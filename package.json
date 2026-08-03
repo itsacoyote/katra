@@ -1,0 +1,80 @@
+{
+  "name": "@itsacoyote/katra",
+  "version": "0.0.0",
+  "description": "Local, git-native, agent-first project manager and coordination layer for AI coding sessions.",
+  "keywords": [
+    "cli",
+    "issue-tracker",
+    "project-management",
+    "agent",
+    "ai",
+    "git",
+    "worktree",
+    "sqlite"
+  ],
+  "license": "MIT",
+  "author": "itsacoyote",
+  "homepage": "https://github.com/itsacoyote/katra#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/itsacoyote/katra.git"
+  },
+  "bugs": {
+    "url": "https://github.com/itsacoyote/katra/issues"
+  },
+  "type": "module",
+  "bin": {
+    "katra": "./dist/cli.js"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20.11"
+  },
+  "packageManager": "pnpm@11.1.2",
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsup && tsc -p tsconfig.build.json",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "lint": "biome check .",
+    "lint:fix": "biome check --write .",
+    "format": "biome format --write .",
+    "check": "pnpm lint && pnpm typecheck && pnpm test",
+    "changeset": "changeset",
+    "release": "pnpm build && changeset publish",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.2",
+    "commander": "^15.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.6",
+    "@changesets/changelog-github": "^0.7.0",
+    "@changesets/cli": "^2.31.1",
+    "@types/better-sqlite3": "^9.6.0",
+    "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "^4.1.10",
+    "tsup": "^8.5.1",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
+  }
+}

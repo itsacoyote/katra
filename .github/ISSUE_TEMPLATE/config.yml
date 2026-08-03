@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Design discussion
+    url: https://github.com/itsacoyote/katra/discussions
+    about: Questions about katra's design, or ideas that aren't a concrete request yet.
+  - name: Security vulnerability
+    url: https://github.com/itsacoyote/katra/security/advisories/new
+    about: Report privately — please do not open a public issue.

@@ -1,0 +1,49 @@
+name: Bug report
+description: Something in katra doesn't work the way it should
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        katra is pre-alpha — most of the spec isn't implemented yet. Please check
+        [`docs/katra-spec.md`](https://github.com/itsacoyote/katra/blob/main/docs/katra-spec.md)
+        to confirm the behavior is supposed to exist before filing.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What did you expect, and what did you get instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: The exact commands you ran, and their output.
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: katra-version
+    attributes:
+      label: katra version
+      placeholder: "katra --version"
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: OS and Node version
+      placeholder: "macOS 15.2, Node 22.11.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Multiple worktrees involved? A provider plugin installed? Offline?
