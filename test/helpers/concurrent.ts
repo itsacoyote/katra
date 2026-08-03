@@ -18,6 +18,43 @@ import { fileURLToPath } from "node:url";
 /** Marks the one line a worker uses to report its result. */
 const RESULT_PREFIX = "__KATRA_RESULT__";
 
+/**
+ * Lets a worker import katra's TypeScript source directly.
+ *
+ * Node 24 strips types natively, so a `.ts` file runs as-is — but the project
+ * compiles under NodeNext, where source must spell imports with a `.js`
+ * extension. Plain Node resolves that literally and fails, because only the
+ * `.ts` exists on disk. A test runner supplies its own resolver; a spawned
+ * process has none, so this hook maps `./x.js` to `./x.ts` when that is what
+ * actually exists.
+ *
+ * The alternative would be building to `dist/` before every concurrency test,
+ * or duplicating the code under test inside the worker — the first is slow and
+ * order-dependent, the second tests a copy rather than the real thing.
+ */
+const RESOLVE_HOOK = `
+import { registerHooks } from "node:module";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+
+registerHooks({
+  resolve(specifier, context, next) {
+    const isRelative = specifier.startsWith("./") || specifier.startsWith("../");
+    if (isRelative && specifier.endsWith(".js") && context.parentURL) {
+      const candidate = specifier.slice(0, -3) + ".ts";
+      try {
+        if (existsSync(fileURLToPath(new URL(candidate, context.parentURL)))) {
+          return next(candidate, context);
+        }
+      } catch {
+        // Fall through to normal resolution.
+      }
+    }
+    return next(specifier, context);
+  },
+});
+`;
+
 /** What one spawned process reported back. */
 export interface ProcessOutcome<T> {
   readonly index: number;
@@ -88,6 +125,7 @@ function parseReport<T>(stdout: string): T | undefined {
 
 function runOne<T>(
   workerPath: string,
+  hookPath: string,
   index: number,
   startAt: number,
   timeoutMs: number,
@@ -95,7 +133,7 @@ function runOne<T>(
   env: Readonly<Record<string, string>> | undefined,
 ): Promise<ProcessOutcome<T>> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, [workerPath], {
+    const child = spawn(process.execPath, ["--import", hookPath, workerPath], {
       ...(cwd === undefined ? {} : { cwd }),
       env: {
         ...process.env,
@@ -145,7 +183,9 @@ export async function runConcurrent<T>(options: ConcurrentOptions): Promise<Proc
   mkdirSync(WORKER_ROOT, { recursive: true });
   const dir = mkdtempSync(join(WORKER_ROOT, "run-"));
   const workerPath = join(dir, "worker.mjs");
+  const hookPath = join(dir, "resolve-ts.mjs");
   writeFileSync(workerPath, buildWorker(source), "utf8");
+  writeFileSync(hookPath, RESOLVE_HOOK, "utf8");
 
   // Enough lead time for every process to boot and reach the barrier.
   const startAt = Date.now() + 300 + count * 40;
@@ -153,7 +193,7 @@ export async function runConcurrent<T>(options: ConcurrentOptions): Promise<Proc
   try {
     return await Promise.all(
       Array.from({ length: count }, (_unused, index) =>
-        runOne<T>(workerPath, index, startAt, timeoutMs, cwd, env),
+        runOne<T>(workerPath, hookPath, index, startAt, timeoutMs, cwd, env),
       ),
     );
   } finally {
