@@ -41,7 +41,7 @@ These come from the spec and are not open for re-litigation in a PR:
 1. **katra is complete standalone.** Zero providers, no network, no external tracker — every core feature works unchanged. External refs are augmentation.
 2. **Strictly one-directional.** katra reads external trackers and never writes to them. The provider interface has no write method *by construction*, not by convention.
 3. **katra never reacts automatically to external state.** Task state changes only from an explicit command — never as a side effect of a read.
-4. **The database is never committed.** It lives under the git common dir and is gitignored. Snapshots are disposable backups, not a source of truth and not a review surface.
+4. **The database is never committed.** It lives under the git common dir — *inside* `.git/`, which git cannot track — so this is structural, not enforced by an ignore rule. katra writes no ignore entry; see [ADR-004](docs/decisions/ADR-004-no-ignore-entry.md). What katra must never do is modify a tracked file. Snapshots are disposable backups, not a source of truth and not a review surface.
 5. **Events are append-only and immutable.** Never edit or delete one, even when the underlying entity changes.
 6. **Never auto-log every attribute edit.** Event types are a curated, fixed set. Field churn buries the signal.
 
