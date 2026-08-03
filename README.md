@@ -44,7 +44,7 @@ npx @itsacoyote/katra --help
 
 ## Development
 
-Requires **Node ≥ 20.11** and **pnpm**.
+Requires **Node ≥ 22.12** and **pnpm**.
 
 ```bash
 pnpm install

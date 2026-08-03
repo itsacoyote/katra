@@ -21,12 +21,30 @@ A third question sits on top of the format: whether child tasks get **hierarchic
 
 ## Decision
 
-Use **short random IDs with a `kt-` prefix** — e.g. `kt-5c46` — and keep them **flat**, with hierarchy stored in a `parent_id` column.
+Use **short random IDs with a `kt-` prefix** — e.g. `kt-9f3k2a` — and keep them **flat**, with hierarchy stored in a `parent_id` column.
 
-- Randomness is uniform across the whole suffix.
-- Collisions are handled by retrying the insert against a `UNIQUE` constraint. At katra's scale (one repo's backlog) collisions are rare, and a retry is cheap and correct.
+- The suffix is **six base36 characters** (`0-9a-z`), drawn from `crypto.randomBytes`. Randomness is uniform across the whole suffix.
+- Collisions are handled by retrying the insert against a `UNIQUE` constraint.
 - Chronological ordering comes from an indexed `created_at` column, not from the ID.
 - Partial-ID resolution matches on prefix; an ambiguous prefix lists the candidates rather than guessing.
+
+### Why six characters
+
+An earlier draft of this ADR used a four-character example. Research measured the actual collision probability and four is too short:
+
+| suffix length | keyspace | P(≥1 collision in 2,000) | P(≥1 collision in 10,000) |
+| --- | --- | --- | --- |
+| 3 | 46,656 | 100% | 100% |
+| 4 | 1.68M | 69.6% | 100% |
+| 5 | 60.5M | 3.25% | 56.3% |
+| **6** | **2.18B** | **0.09%** | **2.27%** |
+
+Retry makes any of these *correct*, so this is a question of how often the retry path fires, not whether it works. At four characters it fires routinely in normal use; at six it is genuinely exceptional while the ID stays short enough to type. A retry cap of 5–10 attempts is ample, because the per-draw collision probability stays low even when a collision somewhere across many draws is likely.
+
+Two implementation constraints follow, both verified against real SQLite:
+
+- **The retry must match narrowly on `SQLITE_CONSTRAINT_PRIMARYKEY`.** Retrying on any `SQLITE_CONSTRAINT_*` would silently mask an invalid-enum bug as a phantom ID collision.
+- **Prefix lookups must use `GLOB` or explicit range bounds, never `LIKE`.** `LIKE 'prefix%'` does not get SQLite's index range-scan optimization: measured at 5,000 rows, 2,000 `LIKE` lookups took 1.17s versus 151ms for the equivalent `GLOB` — a 7.7× gap that widens with backlog size.
 
 ## Consequences
 

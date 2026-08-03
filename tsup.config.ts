@@ -6,7 +6,7 @@ export default defineConfig({
     cli: "src/cli.ts",
   },
   format: ["esm"],
-  target: "node20",
+  target: "node22",
   platform: "node",
   // Declarations are emitted by `tsc -p tsconfig.build.json` instead of tsup's
   // dts step: tsup delegates to rollup-plugin-dts, which pins its own

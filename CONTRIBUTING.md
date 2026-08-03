@@ -15,7 +15,9 @@ A few decisions are non-negotiable and PRs that violate them will be closed:
 
 ## Getting set up
 
-Requires **Node ≥ 20.11** and **pnpm** (`corepack enable` gets you pnpm).
+Requires **Node ≥ 22.12** and **pnpm** (`corepack enable` gets you pnpm).
+
+That floor comes from the dependencies, not preference: `better-sqlite3` 13 requires Node ≥ 22 and `commander` 15 is ESM-only and requires ≥ 22.12.
 
 ```bash
 git clone https://github.com/itsacoyote/katra.git

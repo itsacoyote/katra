@@ -38,7 +38,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        node: [20, 22, 24]
+        # better-sqlite3 13 requires node >=22; commander 15 requires >=22.12.
+        node: [22, 24]
     steps:
       - uses: actions/checkout@v5
 
