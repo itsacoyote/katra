@@ -41,7 +41,6 @@ export {
   type KatraErrorDetail,
   KatraException,
 } from "./core/errors.js";
-
 // The store handle, as a type only.
 //
 // `openStore` is deliberately NOT re-exported yet: it returns an `OpenStore`,
@@ -51,4 +50,14 @@ export {
 // lands alongside the task API, once there is something for a consumer to do
 // with a store.
 export type { Store } from "./core/store.js";
+// Identity. `resolveId` and `requireId` are not re-exported for the same
+// reason as `openStore`: they take an `OpenStore`, so publishing them would
+// put the storage handle back into the public API through a parameter.
+export {
+  generateId,
+  ID_PREFIX,
+  ID_SUFFIX_LENGTH,
+  type IdResolution,
+  MIN_PREFIX_LENGTH,
+} from "./core/tasks/ids.js";
 export { VERSION } from "./version.js";
