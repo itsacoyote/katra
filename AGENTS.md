@@ -58,8 +58,11 @@ These come from the spec and are not open for re-litigation in a PR:
 
 Don't invent values for these — they're fixed sets, deliberately:
 
-- **Status lanes:** `Defined → Researching → Planned → In Progress → In Review → Done`
-  (the spec calls the third lane `Ready`; renamed per [ADR-002](docs/decisions/ADR-002-planned-lane-naming.md) so that **ready** means only one thing: *unblocked by dependencies*, computed from the deps graph)
+- **Status lanes:** `Defined → Researching → Planned → In Progress → In Review → Done`, plus the terminal `Cancelled`.
+  - The spec calls the third lane `Ready`; renamed per [ADR-002](docs/decisions/ADR-002-planned-lane-naming.md) so that **ready** means only one thing: *unblocked by dependencies*, computed from the deps graph.
+  - `Cancelled` added per [ADR-003](docs/decisions/ADR-003-cancelled-terminal-lane.md) for work that was real but abandoned.
+- **`TERMINAL` = `{ Done, Cancelled }`.** A task is ready when no dependency sits in a **non-terminal** lane — never `= 'Done'`. Define this in exactly one place; a missed site is a correctness bug.
+- **Every write transaction uses `BEGIN IMMEDIATE`** (`db.transaction(fn).immediate()`). Measured: the deferred default loses ~33% of writes to `SQLITE_BUSY` under six concurrent processes, and `busy_timeout` does not save it. This also closes the cycle-detection TOCTOU race.
 - **Level:** `epic | task`
 - **Kind** (mirrors Conventional Commits): `feat | fix | refactor | perf | docs | test | chore`
 - **Note kinds:** `general | decision | handoff | acceptance`
