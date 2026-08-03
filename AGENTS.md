@@ -58,7 +58,8 @@ These come from the spec and are not open for re-litigation in a PR:
 
 Don't invent values for these — they're fixed sets, deliberately:
 
-- **Status lanes:** `Defined → Researching → Ready → In Progress → In Review → Done`
+- **Status lanes:** `Defined → Researching → Planned → In Progress → In Review → Done`
+  (the spec calls the third lane `Ready`; renamed per [ADR-002](docs/decisions/ADR-002-planned-lane-naming.md) so that **ready** means only one thing: *unblocked by dependencies*, computed from the deps graph)
 - **Level:** `epic | task`
 - **Kind** (mirrors Conventional Commits): `feat | fix | refactor | perf | docs | test | chore`
 - **Note kinds:** `general | decision | handoff | acceptance`

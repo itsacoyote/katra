@@ -89,6 +89,8 @@ Entities, conceptually:
 
 **Status lanes (decided starting set):** the six workflow phases, one per Define→Document stage —
 `Defined → Researching → Ready → In Progress → In Review → Done`.
+
+> **Superseded:** the `Ready` lane is named `Planned` as of [ADR-002](decisions/ADR-002-planned-lane-naming.md), so that "ready" refers only to the computed unblocked-by-dependencies property. The rest of this section stands.
 Fixed for now; go user-defined only if the pinch is felt. `status-changed` events record from→to across these lanes.
 
 ---
