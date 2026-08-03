@@ -13,12 +13,36 @@ A local, git-native, agent-first project manager and coordination layer for AI c
 ## Project layout
 
 ```
-src/index.ts      library core — all logic lives here
-src/cli.ts        thin CLI wrapper — parse, call, format; no logic
-test/             vitest tests
-docs/             spec and design notes
-scripts/          maintenance and migration scripts
+src/index.ts            public API barrel — an export list, not a place logic goes
+src/cli.ts              the binary: hands argv to run(), sets the exit code
+src/version.ts          the package version, importable from either side
+
+src/core/               all logic lives here; never references exit codes
+  enums.ts              the fixed value sets, their types, and sqlEnum()
+  errors.ts             KatraException + its discriminated detail union
+  clock.ts              the one place a timestamp is produced
+  store.ts              openStore() — the single door to a database handle
+  db/
+    locate.ts           git-common-dir resolution + failure taxonomy
+    connection.ts       pragmas + writeTx (BEGIN IMMEDIATE)
+    migrate.ts          user_version migration runner
+    retry.ts            busy-retry for statements SQLite's handler misses
+    migrations/         one numbered module per schema step
+
+src/cli/                parse, call, format — nothing else
+  program.ts            createProgram() + run(); owns exitOverride
+  output.ts             emit() and the ONE exit-code mapping table
+  commands/             one module per command, each registering itself
+
+test/core/  test/cli/   mirroring src/
+test/helpers/           git repos, stores, seeding, in-process CLI, concurrency
+test/fixtures/          golden files (the committed schema snapshot)
+docs/                   spec, ADRs, design notes
 ```
+
+**Nesting rule:** `core/db/*` is storage mechanics · `core/tasks/*` and the
+task-relationship modules are domain logic · `core/{enums,errors,clock,store}.ts`
+are shared roots. Tests live under `test/` mirroring `src/`, not colocated.
 
 ## Commands
 

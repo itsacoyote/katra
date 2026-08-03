@@ -1,17 +1,54 @@
 /**
- * katra — library core.
+ * katra's public API.
  *
- * Everything katra can do lives here as plain TypeScript. The CLI in `cli.ts`
- * is a thin wrapper over this module, which keeps a future MCP surface a
- * wrapper rather than a rewrite (see docs/katra-spec.md §8).
+ * This is the package's `main`/`exports` contract: an export list, not a place
+ * logic gets written. A later MCP surface imports from here rather than
+ * reaching into `src/core/`.
  *
- * Nothing is implemented yet — the design session comes first.
+ * Note what is deliberately absent: `OpenStore` and the `better-sqlite3`
+ * handle it carries. Publishing those would make the storage engine's concrete
+ * type part of katra's API, so a consumer would need better-sqlite3's types
+ * resolvable just to hold a store.
  */
 
-/** Package version, injected at build time from package.json. */
-export const VERSION = "0.0.0";
+export type { StoreWarning } from "./core/db/locate.js";
+// The fixed value sets and their derived types.
+export {
+  isKind,
+  isLane,
+  isLevel,
+  isPriority,
+  isTerminal,
+  KINDS,
+  type Kind,
+  LANES,
+  type Lane,
+  LEVELS,
+  type Level,
+  PRIORITIES,
+  PRIORITY_DEFAULT,
+  PRIORITY_MAX,
+  PRIORITY_MIN,
+  type Priority,
+  TERMINAL_LANES,
+  type TerminalLane,
+} from "./core/enums.js";
+// Errors — a consumer catches these and reads the structured detail.
+export {
+  isKatraException,
+  KATRA_ERROR_CODES,
+  type KatraErrorCode,
+  type KatraErrorDetail,
+  KatraException,
+} from "./core/errors.js";
 
-/** Placeholder so the build, types, and tests have something real to bite on. */
-export function describe(): string {
-  return "katra — local, git-native, agent-first project manager";
-}
+// The store handle, as a type only.
+//
+// `openStore` is deliberately NOT re-exported yet: it returns an `OpenStore`,
+// which carries the better-sqlite3 handle, so publishing it would put the
+// storage engine's concrete type back into the public API through the return
+// value — the exact leak this barrel exists to prevent. A public entry point
+// lands alongside the task API, once there is something for a consumer to do
+// with a store.
+export type { Store } from "./core/store.js";
+export { VERSION } from "./version.js";

@@ -1,19 +1,13 @@
 #!/usr/bin/env node
 /**
- * katra — CLI entry point.
+ * The `katra` binary.
  *
- * Deliberately thin: parse args, call into the library core, format output.
- * No business logic belongs in this file.
+ * Deliberately almost empty: it hands `process.argv` to `run` and turns the
+ * returned number into an exit status. Everything else — parsing, dispatch,
+ * formatting, error mapping — lives in `src/cli/`, and all the logic lives in
+ * `src/core/`.
  */
 
-import { Command } from "commander";
-import { describe, VERSION } from "./index.js";
+import { run } from "./cli/program.js";
 
-const program = new Command();
-
-program
-  .name("katra")
-  .description(describe())
-  .version(VERSION, "-v, --version", "print the katra version");
-
-program.parse();
+process.exitCode = await run(process.argv.slice(2));

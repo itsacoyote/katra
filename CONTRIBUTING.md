@@ -69,7 +69,10 @@ TypeScript conventions:
 
 ## Architecture rules
 
-- **Library core, thin CLI wrapper.** Logic goes in the core module; `src/cli.ts` only parses, calls, and formats. This keeps a future MCP surface a wrapper instead of a rewrite.
+- **Library core, thin CLI wrapper.** Logic goes in `src/core/`; `src/cli/` only parses, calls, and formats. This keeps a future MCP surface a wrapper instead of a rewrite.
+- **The core never mentions exit codes.** It throws a `KatraException` carrying a structured detail; exactly one table in `src/cli/output.ts` maps those to process exit codes. A future MCP surface catches the same exceptions and maps them its own way.
+- **`openStore` is the only way to get a database handle.** The pragmas that make a connection safe — `foreign_keys`, `busy_timeout` — are per-connection, so a handle obtained anywhere else silently loses them.
+- **Every write goes through `writeTx`**, which uses `BEGIN IMMEDIATE`. The deferred default loses about a third of its writes to `SQLITE_BUSY` under six concurrent processes, and `busy_timeout` does not save it.
 - **Every read command supports `--json`.** An agent parsing formatted text is a silent-misread bug waiting to happen.
 - **Bodies come from stdin or `--body-file`**, never inline args — shell escaping is the main CLI failure mode for writes with bodies.
 - **Blocked actions explain themselves.** Never refuse silently; say what blocked it and what would unblock it.
