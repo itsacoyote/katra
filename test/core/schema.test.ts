@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
@@ -55,6 +57,7 @@ describe("initial schema", () => {
     expect(byType("table")).toEqual(["deps", "links", "tags", "tasks"]);
     expect(byType("view")).toEqual(["task_readiness"]);
     expect(byType("trigger")).toEqual([
+      "tasks_epic_demotion_guard",
       "tasks_parent_must_be_epic_insert",
       "tasks_parent_must_be_epic_update",
     ]);
@@ -63,7 +66,20 @@ describe("initial schema", () => {
   it("is the migration the runner ships as version 1", () => {
     expect(MIGRATIONS).toHaveLength(1);
     expect(MIGRATIONS[0]?.version).toBe(1);
-    expect(MIGRATIONS[0]?.sql).toBe(buildInitDdl());
+  });
+
+  it("matches the committed schema byte for byte", () => {
+    // Migration 1 is rendered from the enum arrays at import time, so a store
+    // created BEFORE an enum changes keeps its old CHECK forever — forward-only
+    // migration never re-runs step 1. Comparing the builder to itself could
+    // never catch that. This golden file turns any enum edit red, forcing a
+    // conscious choice: update the snapshot for a pre-release change, or add
+    // migration 0002 to rebuild the affected constraint.
+    const golden = readFileSync(
+      fileURLToPath(new URL("../fixtures/schema-v1.sql", import.meta.url)),
+      "utf8",
+    );
+    expect(MIGRATIONS[0]?.sql).toBe(golden);
   });
 });
 
@@ -144,7 +160,29 @@ describe("hierarchy rules", () => {
   });
 
   it("rejects a task that is its own parent", () => {
-    expect(() => rawInsert(db, baseTask({ id: "kt-self01", parent_id: "kt-self01" }))).toThrow();
+    // On INSERT this aborts in the epic trigger first: the row does not exist
+    // yet, so the subquery is NULL and NULL IS NOT 'epic' is true. Reaching the
+    // self-parent CHECK at all requires an UPDATE on an existing epic.
+    expect(() =>
+      db.prepare("UPDATE tasks SET parent_id = id WHERE id = 'kt-epic01'").run(),
+    ).toThrowError(/parent_id IS NULL OR parent_id <> id/);
+  });
+
+  it("refuses to demote an epic that still has children", () => {
+    // Both parent triggers fire only on parent_id writes, and RESTRICT only
+    // covers deletes — so without its own guard a level change would strand
+    // every child pointing at a row that is no longer an epic.
+    rawInsert(db, baseTask({ id: "kt-task01", parent_id: "kt-epic01" }));
+
+    expect(() =>
+      db.prepare("UPDATE tasks SET level='task' WHERE id='kt-epic01'").run(),
+    ).toThrowError(/cannot demote an epic/);
+  });
+
+  it("allows demoting an epic once it has no children", () => {
+    expect(() =>
+      db.prepare("UPDATE tasks SET level='task' WHERE id='kt-epic01'").run(),
+    ).not.toThrow();
   });
 
   it("refuses to delete an epic that still has children", () => {
@@ -192,6 +230,30 @@ describe("terminal lanes always carry closed_at", () => {
 
   it("accepts a non-terminal lane with no closed_at", () => {
     expect(() => rawInsert(db, baseTask({ lane: "In Progress" }))).not.toThrow();
+  });
+
+  it("rejects an UPDATE that moves a task to Done without closed_at", () => {
+    // This is the path requirement 51 exists to block — `update --lane Done`
+    // slipping past close/cancel. The INSERT cases alone would not pin it.
+    rawInsert(db, baseTask({ id: "kt-upd001" }));
+    expect(() =>
+      db.prepare("UPDATE tasks SET lane='Done' WHERE id='kt-upd001'").run(),
+    ).toThrowError(/CHECK constraint failed/);
+  });
+
+  it("rejects clearing closed_at while the lane is still terminal", () => {
+    rawInsert(db, baseTask({ id: "kt-upd002", lane: "Done", closed_at: TS }));
+    expect(() =>
+      db.prepare("UPDATE tasks SET closed_at=NULL WHERE id='kt-upd002'").run(),
+    ).toThrowError(/CHECK constraint failed/);
+  });
+
+  it("rejects promoting a parented task to an epic", () => {
+    rawInsert(db, baseTask({ id: "kt-epicX", level: "epic", closed_at: null }));
+    rawInsert(db, baseTask({ id: "kt-child1", parent_id: "kt-epicX" }));
+    expect(() =>
+      db.prepare("UPDATE tasks SET level='epic' WHERE id='kt-child1'").run(),
+    ).toThrowError(/CHECK constraint failed/);
   });
 });
 

@@ -6,13 +6,13 @@
  * WAL checkpointing regardless of platform.
  */
 
-import type { Store } from "../../src/core/store.js";
+import type { OpenStore } from "../../src/core/store.js";
 import { openStore } from "../../src/core/store.js";
 import type { GitFixture } from "./fixture.js";
 import { createGitRepo } from "./fixture.js";
 
 export interface StoreFixture {
-  readonly store: Store;
+  readonly store: OpenStore;
   /** The repository the store belongs to, for worktree and path assertions. */
   readonly repo: GitFixture;
   cleanup(): void;

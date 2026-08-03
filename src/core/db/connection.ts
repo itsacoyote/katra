@@ -16,6 +16,7 @@
 import Database from "better-sqlite3";
 import { nowIso } from "../clock.js";
 import { KatraException } from "../errors.js";
+import { withBusyRetry } from "./retry.js";
 
 type DatabaseHandle = Database.Database;
 
@@ -45,7 +46,14 @@ export function openDatabase(dbPath: string): DatabaseHandle {
   try {
     // A corrupt or non-SQLite file does not fail at construction — SQLite is
     // lazy — so the first pragma is where it surfaces.
-    const mode = db.pragma("journal_mode = WAL", { simple: true });
+    //
+    // It is also where concurrent opens collide. Setting WAL needs a momentary
+    // exclusive lock and does **not** go through SQLite's busy handler, so
+    // `busy_timeout` cannot help here however generous it is; the retry has to
+    // be explicit. Without it, six processes opening one new store lose at
+    // least one of themselves to "database is locked" about a third of the
+    // time.
+    const mode = withBusyRetry(() => db.pragma("journal_mode = WAL", { simple: true }));
     if (mode !== "wal") {
       db.close();
       throw new KatraException({

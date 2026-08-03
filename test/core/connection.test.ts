@@ -141,6 +141,7 @@ describe("writeTx", () => {
         const { openDatabase, writeTx } = await import(${JSON.stringify(
           fileURLToPath(new URL("../../src/core/db/connection.ts", import.meta.url)),
         )});
+        barrier();
         const db = openDatabase(${JSON.stringify(path)});
         const read = db.prepare("SELECT COUNT(*) c FROM t");
         const write = db.prepare("INSERT INTO t (who) VALUES (?)");

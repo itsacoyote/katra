@@ -1,63 +1,13 @@
-/**
- * The initial schema.
- *
- * The DDL is *built* from the enum arrays rather than written beside them.
- * A `.sql` text file cannot reference a TypeScript array, which is precisely
- * how a renamed lane would leave the `CHECK` constraint behind — and these
- * constraints are load-bearing, since the store is written by concurrent
- * processes and a type does not survive to runtime.
- *
- * `buildInitDdl` takes the sets as an argument for the same reason: a test can
- * inject a value no hardcoded list could know about, which is the only way to
- * prove the DDL is generated rather than copied.
- */
 
-import {
-  KINDS,
-  LANES,
-  LEVELS,
-  PRIORITY_DEFAULT,
-  PRIORITY_MAX,
-  PRIORITY_MIN,
-  sqlEnum,
-  TERMINAL_LANES,
-} from "../../enums.js";
-import type { Migration } from "../migrate.js";
-
-export interface SchemaSets {
-  readonly levels: readonly string[];
-  readonly kinds: readonly string[];
-  readonly lanes: readonly string[];
-  readonly terminalLanes: readonly string[];
-  readonly priorityMin: number;
-  readonly priorityMax: number;
-  readonly priorityDefault: number;
-}
-
-export const DEFAULT_SCHEMA_SETS: SchemaSets = {
-  levels: LEVELS,
-  kinds: KINDS,
-  lanes: LANES,
-  terminalLanes: TERMINAL_LANES,
-  priorityMin: PRIORITY_MIN,
-  priorityMax: PRIORITY_MAX,
-  priorityDefault: PRIORITY_DEFAULT,
-};
-
-/** Renders the initial DDL for the given value sets. */
-export function buildInitDdl(sets: SchemaSets = DEFAULT_SCHEMA_SETS): string {
-  const terminal = sqlEnum(sets.terminalLanes);
-
-  return `
 CREATE TABLE tasks (
   id           TEXT PRIMARY KEY,
-  level        TEXT NOT NULL CHECK (level IN (${sqlEnum(sets.levels)})),
-  kind         TEXT NOT NULL CHECK (kind IN (${sqlEnum(sets.kinds)})),
+  level        TEXT NOT NULL CHECK (level IN ('epic','task')),
+  kind         TEXT NOT NULL CHECK (kind IN ('feat','fix','refactor','perf','docs','test','chore')),
   title        TEXT NOT NULL,
   description  TEXT,
-  lane         TEXT NOT NULL DEFAULT 'Defined' CHECK (lane IN (${sqlEnum(sets.lanes)})),
-  priority     INTEGER NOT NULL DEFAULT ${sets.priorityDefault}
-               CHECK (priority BETWEEN ${sets.priorityMin} AND ${sets.priorityMax}),
+  lane         TEXT NOT NULL DEFAULT 'Defined' CHECK (lane IN ('Defined','Researching','Planned','In Progress','In Review','Done','Cancelled')),
+  priority     INTEGER NOT NULL DEFAULT 2
+               CHECK (priority BETWEEN 0 AND 4),
   assignee     TEXT,
   -- RESTRICT, not SET NULL: SET NULL orphans an epic's children with no error,
   -- no lane change and no trace. RESTRICT makes refusing that deletion a
@@ -73,7 +23,7 @@ CREATE TABLE tasks (
   -- A terminal lane always carries closed_at. This is what stops any path other
   -- than close/cancel from producing terminal work that silently releases its
   -- dependents, including raw SQL that bypasses application validation.
-  CHECK (lane NOT IN (${terminal}) OR closed_at IS NOT NULL)
+  CHECK (lane NOT IN ('Done','Cancelled') OR closed_at IS NOT NULL)
 );
 
 -- "parent must be an epic" cannot be a CHECK: SQLite prohibits subqueries
@@ -139,7 +89,7 @@ SELECT t.id AS id,
        NOT EXISTS (
          SELECT 1 FROM deps d
          JOIN tasks b ON b.id = d.depends_on_id
-         WHERE d.task_id = t.id AND b.lane NOT IN (${terminal})
+         WHERE d.task_id = t.id AND b.lane NOT IN ('Done','Cancelled')
        ) AS is_ready
 FROM tasks t;
 
@@ -152,11 +102,3 @@ CREATE INDEX deps_depends_on     ON deps(depends_on_id);
 -- Serves requirement 44's --tag filter. The table's primary key is
 -- (task_id, tag), which cannot answer "which tasks carry this tag".
 CREATE INDEX tags_tag            ON tags(tag);
-`;
-}
-
-export const migration0001: Migration = {
-  version: 1,
-  name: "init",
-  sql: buildInitDdl(),
-};

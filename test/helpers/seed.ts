@@ -14,7 +14,7 @@
 
 import type { Kind, Lane, Level, Priority } from "../../src/core/enums.js";
 import { isTerminal } from "../../src/core/enums.js";
-import type { Store } from "../../src/core/store.js";
+import type { OpenStore } from "../../src/core/store.js";
 
 /** A fixed instant, so seeded ordering is deterministic. */
 export const SEED_EPOCH = Date.UTC(2026, 0, 1, 0, 0, 0, 0);
@@ -22,14 +22,9 @@ export const SEED_EPOCH = Date.UTC(2026, 0, 1, 0, 0, 0, 0);
 let counter = 0;
 
 /** Sequential, collision-free ids for seeded rows. Real ids are random (ADR-001). */
-export function seedId(prefix = "kt-s"): string {
+export function seedId(): string {
   counter += 1;
-  return `${prefix}${String(counter).padStart(5, "0")}`;
-}
-
-/** Resets the id counter so a test can assert on exact ids. */
-export function resetSeedIds(): void {
-  counter = 0;
+  return `kt-s${String(counter).padStart(5, "0")}`;
 }
 
 /** A timestamp `offsetMs` after the fixed seed epoch. */
@@ -62,7 +57,7 @@ export interface SeedTaskInput {
  * invariant into a chore — but the constraint still enforces it, so an
  * explicit `closedAt: null` on a terminal lane correctly fails.
  */
-export function seedTask(store: Store, input: SeedTaskInput = {}): string {
+export function seedTask(store: OpenStore, input: SeedTaskInput = {}): string {
   const id = input.id ?? seedId();
   const lane: Lane = input.lane ?? "Defined";
   const createdAt = input.createdAt ?? seedTime();
@@ -97,12 +92,12 @@ export function seedTask(store: Store, input: SeedTaskInput = {}): string {
 }
 
 /** Inserts an epic and returns its id. */
-export function seedEpic(store: Store, input: Omit<SeedTaskInput, "level"> = {}): string {
+export function seedEpic(store: OpenStore, input: Omit<SeedTaskInput, "level"> = {}): string {
   return seedTask(store, { ...input, level: "epic" });
 }
 
 /** Records that `taskId` is blocked by `dependsOnId`. */
-export function seedDep(store: Store, taskId: string, dependsOnId: string): void {
+export function seedDep(store: OpenStore, taskId: string, dependsOnId: string): void {
   store.db
     .prepare("INSERT INTO deps (task_id, depends_on_id, created_at) VALUES (?,?,?)")
     .run(taskId, dependsOnId, seedTime());
@@ -115,7 +110,7 @@ export function seedDep(store: Store, taskId: string, dependsOnId: string): void
  * unsorted insert fails the constraint about half the time, which is a
  * confusing way for a test to break.
  */
-export function seedLink(store: Store, first: string, second: string): void {
+export function seedLink(store: OpenStore, first: string, second: string): void {
   const [a, b] = [first, second].sort();
   store.db
     .prepare("INSERT INTO links (a_id, b_id, created_at) VALUES (?,?,?)")
@@ -123,16 +118,16 @@ export function seedLink(store: Store, first: string, second: string): void {
 }
 
 /** Tags a task. */
-export function seedTag(store: Store, taskId: string, tag: string): void {
+export function seedTag(store: OpenStore, taskId: string, tag: string): void {
   store.db.prepare("INSERT INTO tags (task_id, tag) VALUES (?,?)").run(taskId, tag);
 }
 
 /** Inserts `count` tasks in one transaction. For volume tests. */
-export function seedMany(store: Store, count: number, input: SeedTaskInput = {}): string[] {
+export function seedMany(store: OpenStore, count: number, input: SeedTaskInput = {}): string[] {
   const ids: string[] = [];
   const insert = store.db.transaction(() => {
     for (let i = 0; i < count; i++) {
-      ids.push(seedTask(store, { ...input, createdAt: seedTime(i) }));
+      ids.push(seedTask(store, { ...input, createdAt: input.createdAt ?? seedTime(i) }));
     }
   });
   insert.immediate();

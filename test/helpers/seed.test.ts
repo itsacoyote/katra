@@ -1,21 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import {
-  resetSeedIds,
-  seedDep,
-  seedEpic,
-  seedLink,
-  seedMany,
-  seedTag,
-  seedTask,
-  seedTime,
-} from "./seed.js";
+import { seedDep, seedEpic, seedLink, seedMany, seedTag, seedTask, seedTime } from "./seed.js";
 import type { StoreFixture } from "./store.js";
 import { createStoreFixture } from "./store.js";
 
 let fixture: StoreFixture;
 beforeEach(() => {
   fixture = createStoreFixture();
-  resetSeedIds();
 });
 afterEach(() => fixture.cleanup());
 

@@ -13,6 +13,7 @@
 import { KatraException } from "../errors.js";
 import type { DatabaseHandle } from "./connection.js";
 import { writeTx } from "./connection.js";
+import { withBusyRetry } from "./retry.js";
 
 /** One forward step. There is deliberately no `down`: katra never migrates backwards. */
 export interface Migration {
@@ -21,53 +22,13 @@ export interface Migration {
   readonly sql: string;
 }
 
-function isBusy(error: unknown): boolean {
-  return String((error as { code?: unknown }).code ?? "").startsWith("SQLITE_BUSY");
-}
-
-/** Blocks the thread briefly. better-sqlite3 is synchronous, so this must be too. */
-function sleepSync(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 /** Reads `user_version` without retrying. */
 export function readSchemaVersion(db: DatabaseHandle): number {
   return Number(db.pragma("user_version", { simple: true }));
 }
 
-/**
- * Reads `user_version`, retrying while the database is busy.
- *
- * A bare pragma read is not automatically safe: two processes racing to open
- * and migrate the same brand-new file can make this throw SQLITE_BUSY before
- * any transaction has started, so `busy_timeout` has nothing to apply to yet.
- * Reproduced roughly one run in ten.
- */
-function readSchemaVersionWithRetry(db: DatabaseHandle, attempts = 20): number {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      return readSchemaVersion(db);
-    } catch (error) {
-      if (attempt >= attempts || !isBusy(error)) throw error;
-      sleepSync(10 + attempt * 5);
-    }
-  }
-}
-
 function targetVersion(migrations: readonly Migration[]): number {
   return migrations.reduce((highest, m) => Math.max(highest, m.version), 0);
-}
-
-/** Guards the one value that has to be interpolated rather than bound. */
-function assertSafeVersion(version: number): void {
-  if (!Number.isSafeInteger(version) || version < 0) {
-    throw new KatraException({
-      code: "validation",
-      message: `refusing to set a non-integer schema version (${String(version)})`,
-      field: "user_version",
-      value: version,
-    });
-  }
 }
 
 /**
@@ -81,21 +42,38 @@ function assertSafeVersion(version: number): void {
  * only decides whether to open a transaction at all; between it and the
  * transaction another process may have migrated the store already. Because
  * `BEGIN IMMEDIATE` serialises writers, the second read is authoritative — so
- * of two racing migrators, one applies the work and the other correctly finds
- * nothing to do.
+ * of several racing migrators, one applies the work and the rest correctly
+ * find nothing to do.
+ *
+ * The first read is retried: a bare pragma read can raise SQLITE_BUSY on a
+ * brand-new file, before any transaction exists for `busy_timeout` to apply to.
  */
 export function migrate(db: DatabaseHandle, migrations: readonly Migration[]): number {
   const target = targetVersion(migrations);
-  assertSafeVersion(target);
+  const current = withBusyRetry(() => readSchemaVersion(db));
 
-  // Fast path: the overwhelmingly common case is an already-current store, and
-  // it should not open a write transaction just to discover that.
-  if (readSchemaVersionWithRetry(db) >= target) return 0;
+  // A store from a future build. Proceeding would read and write a schema this
+  // version does not understand — plausible with one worktree on a global
+  // install and another on a local build, or after a rollback.
+  if (current > target) {
+    throw new KatraException({
+      code: "validation",
+      message:
+        `this store was created by a newer katra (schema v${current}; ` +
+        `this build understands v${target}). Upgrade katra to open it.`,
+      field: "user_version",
+      value: current,
+    });
+  }
+
+  // Fast path: an already-current store should not open a write transaction
+  // just to discover that.
+  if (current === target) return 0;
 
   return writeTx(db, () => {
-    const current = readSchemaVersion(db);
+    const inTransaction = readSchemaVersion(db);
     const pending = migrations
-      .filter((m) => m.version > current)
+      .filter((m) => m.version > inTransaction)
       .sort((a, b) => a.version - b.version);
 
     if (pending.length === 0) return 0;

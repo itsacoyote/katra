@@ -1,9 +1,11 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { readSchemaVersion } from "../../src/core/db/migrate.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { openStore } from "../../src/core/store.js";
+import { runConcurrent } from "../helpers/concurrent.js";
 import { createGitRepo } from "../helpers/fixture.js";
 
 const cleanups: Array<() => void> = [];
@@ -151,5 +153,58 @@ describe("openStore", () => {
     cleanups.push(() => store.close());
 
     expect(warnings).toEqual([]);
+  });
+
+  it("survives several processes racing to create the same store", {
+    timeout: 60_000,
+  }, async () => {
+    // Acceptance criterion 8, at the layer that owns it. Two worktrees
+    // running their first katra command together is the normal case, not an
+    // exotic one — and it is genuinely hostile: setting WAL needs a momentary
+    // exclusive lock that SQLite's busy handler does not cover, so without an
+    // explicit retry one process in six dies with "database is locked".
+    //
+    // The workers call barrier() AFTER their imports: loading TypeScript
+    // modules and the native binding takes a variable few hundred
+    // milliseconds, so syncing before that would scatter them and quietly
+    // stop reproducing the contention.
+    // Sensitivity note: this is a probabilistic test. A single round catches
+    // a missing WAL retry roughly one time in three, because the collision
+    // window is narrow. Three fresh rounds raise that to roughly seven in
+    // ten — measured by deleting the retry and re-running. The retry logic
+    // itself is pinned deterministically in test/core/retry.test.ts; this
+    // test covers its application at the real call site.
+    const storePath = fileURLToPath(new URL("../../src/core/store.ts", import.meta.url));
+
+    for (let round = 0; round < 3; round++) {
+      const r = repo();
+
+      const outcomes = await runConcurrent<{ created: boolean }>({
+        count: 6,
+        source: `
+          const { openStore } = await import(${JSON.stringify(storePath)});
+          barrier();
+          const { store, created } = openStore(${JSON.stringify(r.dir)}, { createIfMissing: true });
+          store.close();
+          report({ created });
+        `,
+      });
+
+      const failures = outcomes.filter((o) => !o.ok);
+      expect(
+        failures.map((f) => `round ${round}: ${f.stderr.split("\n").slice(0, 3).join(" ")}`),
+      ).toEqual([]);
+
+      const results = outcomes.map((o) => o.value).filter((v) => v !== undefined);
+      expect(results).toHaveLength(6);
+      // Exactly one process applies the migration, so exactly one may claim
+      // to have created the store. An existsSync check would have all six
+      // claim it.
+      expect(results.filter((r2) => r2.created)).toHaveLength(1);
+
+      const { store } = openStore(r.dir);
+      expect(readSchemaVersion(store.db)).toBe(1);
+      store.close();
+    }
   });
 });

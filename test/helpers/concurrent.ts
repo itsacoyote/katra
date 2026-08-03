@@ -72,8 +72,9 @@ export interface ConcurrentOptions {
   /**
    * ESM module source. It may `import` anything the project can resolve, and
    * two bindings are already in scope:
-   *   `INDEX`  — this process's 0-based number
-   *   `report` — call once with a JSON-serialisable result
+   *   `INDEX`   — this process's 0-based number
+   *   `barrier` — call **after** your imports to sync with the other processes
+   *   `report`  — call once with a JSON-serialisable result
    */
   readonly source: string;
   readonly cwd?: string;
@@ -100,10 +101,12 @@ const report = (value) => {
   process.stdout.write(${JSON.stringify(RESULT_PREFIX)} + JSON.stringify(value) + "\\n");
 };
 
-// Hold every process at one instant before releasing them. Without this
-// barrier the first process routinely finishes before the last has started,
-// and the contention the test exists to measure never happens.
-while (Date.now() < START_AT) { /* spin */ }
+// Holds every process until one shared instant. The snippet calls this itself,
+// **after** its imports: loading TypeScript modules and a native binding takes
+// a variable tens-to-hundreds of milliseconds per process, so a barrier placed
+// before them disperses the very processes it was meant to align — and the
+// contention the test exists to measure quietly stops happening.
+const barrier = () => { while (Date.now() < START_AT) { /* spin */ } };
 
 ${source}
 `;

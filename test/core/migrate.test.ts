@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { openDatabase } from "../../src/core/db/connection.js";
+import { openDatabase, writeTx } from "../../src/core/db/connection.js";
 import { type Migration, migrate, readSchemaVersion } from "../../src/core/db/migrate.js";
 import { runConcurrent } from "../helpers/concurrent.js";
 import { createNonRepoDir } from "../helpers/fixture.js";
@@ -75,6 +75,34 @@ describe("migrate", () => {
     expect(tables(db)).toEqual([]);
   });
 
+  it("rolls back a version bump written inside a failing transaction", () => {
+    // The rollback test above fails while *preparing* invalid SQL, so the
+    // version write is never reached — it proves the schema rolled back, not
+    // the version. This pins the version half directly.
+    const db = openDatabase(tempDbPath());
+    cleanups.push(() => db.close());
+
+    expect(() =>
+      writeTx(db, () => {
+        db.pragma("user_version = 9");
+        throw new Error("abort");
+      }),
+    ).toThrowError("abort");
+
+    expect(readSchemaVersion(db)).toBe(0);
+  });
+
+  it("refuses a store written by a newer schema version", () => {
+    // One worktree on a global install and another on a local build is enough
+    // to hit this; proceeding would read and write a schema this build does
+    // not understand.
+    const db = openDatabase(tempDbPath());
+    cleanups.push(() => db.close());
+    db.pragma("user_version = 99");
+
+    expect(() => migrate(db, STEPS)).toThrowError(/newer katra/);
+  });
+
   it("leaves the version untouched when there are no migrations at all", () => {
     const db = openDatabase(tempDbPath());
     cleanups.push(() => db.close());
@@ -100,6 +128,7 @@ describe("migrate", () => {
       source: `
         const { openDatabase } = await import(${JSON.stringify(modules.connection)});
         const { migrate, readSchemaVersion } = await import(${JSON.stringify(modules.migrate)});
+        barrier();
         const steps = [
           { version: 1, name: "one", sql: "CREATE TABLE a (id INTEGER PRIMARY KEY)" },
           { version: 2, name: "two", sql: "CREATE TABLE b (id INTEGER PRIMARY KEY)" },

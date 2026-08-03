@@ -17,20 +17,19 @@ import { MIGRATIONS } from "./db/migrations/index.js";
 import { KatraException } from "./errors.js";
 
 /**
- * An open store.
+ * A store, as the outside world sees it.
  *
- * Core functions take a `Store`, never a raw `better-sqlite3` handle. The
- * handle is reachable as `db` for modules inside `core/`, but keeping it off
- * the public signatures is what stops the storage engine's concrete type from
- * becoming part of katra's exported API.
+ * Deliberately does **not** expose the database handle. This is the type
+ * `src/index.ts` publishes, and putting `db` on it would make
+ * better-sqlite3's `Database` structurally part of katra's public API — a
+ * consumer would need better-sqlite3's types resolvable just to hold a store,
+ * and swapping the storage engine would become a breaking change.
  */
 export interface Store {
   /** Absolute path to the database file. */
   readonly dbPath: string;
   /** Absolute path to the git common dir this store belongs to. */
   readonly commonDir: string;
-  /** The underlying connection. For use inside `core/` only. */
-  readonly db: DatabaseHandle;
   /**
    * Releases the connection.
    *
@@ -41,9 +40,25 @@ export interface Store {
   close(): void;
 }
 
+/**
+ * A store plus its connection, for modules inside `core/`.
+ *
+ * Internal signatures take this; the public surface takes {@link Store}. The
+ * separation is a type boundary rather than a comment asking people to behave.
+ */
+export interface OpenStore extends Store {
+  readonly db: DatabaseHandle;
+}
+
 export interface OpenStoreResult {
-  readonly store: Store;
-  /** True when this call brought the store into being. */
+  readonly store: OpenStore;
+  /**
+   * True when this call brought the store into being.
+   *
+   * Derived from the migration actually being applied rather than from a
+   * pre-open `existsSync`, which every racer would answer the same way — under
+   * a concurrent first run, all of them would claim to have created it.
+   */
   readonly created: boolean;
   /**
    * Non-fatal findings from locating the store, carried out to the CLI.
@@ -89,8 +104,9 @@ export function openStore(cwd: string, options: OpenStoreOptions = {}): OpenStor
   mkdirSync(location.storeDir, { recursive: true });
   const db = openDatabase(location.dbPath);
 
+  let applied: number;
   try {
-    migrate(db, MIGRATIONS);
+    applied = migrate(db, MIGRATIONS);
   } catch (error) {
     db.close();
     throw error;
@@ -103,7 +119,7 @@ export function openStore(cwd: string, options: OpenStoreOptions = {}): OpenStor
       db,
       close: () => db.close(),
     },
-    created: !existed,
+    created: applied > 0,
     warnings: location.warnings,
   };
 }
