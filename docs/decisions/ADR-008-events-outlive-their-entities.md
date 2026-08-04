@@ -44,6 +44,12 @@ $ katra log --all
 
 `deleted` is a **seventh event type**, not in the spec's list of nine — that list predates F1's `delete` command. Recorded here rather than added silently.
 
+**The title lives in its own column, not in `reason`.** An earlier draft of this ADR said the `deleted` event "carries the title in its `reason`", and plan review caught that this does not survive contact with the example above. The `created` line shows a title too, and no column held it — a `LEFT JOIN` to `tasks` returns NULL precisely because the task is deleted, which is the whole scenario. The illustration was not producible from the schema it illustrated.
+
+Worse, `reason` means *why* everywhere else: `close` and `cancel` put a human explanation there. Any generic renderer — including `brief`, the feature this table exists for — prints it as a reason. And a research lens reading this ADR concluded it implied a `katra delete --reason` flag, which is the correct reading of a column called `reason`. A design a careful reader misreads is a design problem, not a reader problem.
+
+So `events` gets a nullable `title`, stamped on `created` and `deleted`. It costs one column, makes history readable with no join at all, and leaves `reason` meaning one thing. `events` is append-only under forward-only migrations, so a later fix could not reconstruct titles for rows already written — which is why this is settled before migration 0002 is authored rather than after.
+
 **Notes are the opposite case and cascade.** A note is fat content attached to a live task, not a record of an occurrence; without its task it is unreachable and unreadable. `notes.task_id` keeps `ON DELETE CASCADE`. The `note-added` event survives and its `ref` becomes dangling, exactly like `entity_id` — the event still truthfully says a note was added.
 
 This is coherent, not a compromise: **history survives, content does not.** `delete` is documented for work that should never have existed — a typo, a duplicate, a misfile — and work that was real but abandoned belongs in `Cancelled`, which keeps everything.
