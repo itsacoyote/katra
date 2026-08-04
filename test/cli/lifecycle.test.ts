@@ -155,3 +155,32 @@ describe("registration and json", () => {
     expect(payload.unblocked.map((t) => t.id)).toEqual([dependent]);
   });
 });
+
+describe("katra reopen reports what it took away", () => {
+  it("renders the tasks it blocked again", async () => {
+    // The core returns `reblocked`; nothing rendered it. Deleting the whole
+    // block from formatLifecycle left the suite green, so the one command
+    // that can produce it was printing nothing.
+    const blocker = await add("the blocker");
+    const waiter = await add("was startable");
+    await runCli(["dep", waiter, "--blocked-by", blocker], { cwd: repo.dir });
+    await runCli(["close", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["reopen", blocker], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).toContain("blocked again 1:");
+    expect(result.stdout).toContain("was startable");
+  });
+
+  it("says nothing about re-blocking when close and cancel run", async () => {
+    const blocker = await add("the blocker");
+    const waiter = await add("waits");
+    await runCli(["dep", waiter, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const closed = await runCli(["close", blocker], { cwd: repo.dir });
+
+    expect(closed.stdout).not.toContain("blocked again");
+    expect(closed.stdout).toContain("unblocked 1:");
+  });
+});

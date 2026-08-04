@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { DepResult } from "../../src/cli/commands/dep.js";
+import type { DependencyResult } from "../../src/cli/commands/dep.js";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
 import { runCli } from "../helpers/cli.js";
@@ -117,7 +117,7 @@ describe("katra dep", () => {
       cwd: repo.dir,
     });
 
-    const payload = result.json() as DepResult;
+    const payload = result.json() as DependencyResult;
     expect(payload).toMatchObject({
       action: "added",
       taskId: blocked,

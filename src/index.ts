@@ -30,11 +30,16 @@ export type {
   BlockedTask,
   Blocker,
   DeleteResult,
+  DependencyResult,
+  HelpDocument,
+  InitResult,
   JsonDocument,
   LifecycleResult,
+  LinkResult,
   NextResult,
   StoreWarning,
   TaskList,
+  VersionDocument,
 } from "./core/contract.js";
 // The fixed value sets and their derived types.
 export {

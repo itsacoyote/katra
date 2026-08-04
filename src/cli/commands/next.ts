@@ -7,7 +7,7 @@ import { narrowKind, narrowLevel } from "../../core/narrow.js";
 import type { NextFilters, NextResult } from "../../core/tasks/next.js";
 import { NEXT_LANE, nextTask } from "../../core/tasks/next.js";
 import { requireEpicId } from "../../core/tasks/repo.js";
-import { EXIT, emit } from "../output.js";
+import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
 
@@ -58,12 +58,13 @@ export function registerNext(program: Command, context: CliContext): void {
         }),
       );
 
+      // Always exit 0, including when nothing is ready (ADR-006). Nothing
+      // failed: `next` was asked a question, looked, and the answer was
+      // "nothing yet". Exit 1 would mean "refused, do not retry" (ADR-005),
+      // when closing a blocker makes the identical command return a task. The
+      // distinction lives in the payload — `status` separates found from none,
+      // and `blocked` separates "everything is stuck" from "the backlog is
+      // empty", which is the whole reason NextResult is a union.
       emit(result, { json: options.json === true, warnings, streams: context.streams }, formatNext);
-
-      // A non-zero exit so a script can branch on "is there work", while the
-      // emitted body still explains what is blocked. Throwing here would
-      // replace that structured answer with an error envelope, and exiting
-      // zero would read as "all done" when the truth is "everything is stuck".
-      if (result.status === "none") context.setExitCode(EXIT.user);
     });
 }

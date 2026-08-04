@@ -7,15 +7,12 @@
  */
 
 import type { Command } from "commander";
+import type { InitResult } from "../../core/contract.js";
 import { openStore } from "../../core/store.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 
-/** What `init` reports. This type is the `--json` contract. */
-export interface InitResult {
-  readonly path: string;
-  readonly created: boolean;
-}
+export type { InitResult };
 
 function formatInit(result: InitResult): string {
   return result.created

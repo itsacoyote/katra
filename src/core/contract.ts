@@ -48,6 +48,30 @@ export interface TaskList {
   readonly tasks: readonly Task[];
 }
 
+/** What `init` prints. */
+export interface InitResult {
+  readonly path: string;
+  readonly created: boolean;
+}
+
+/** What `dep` prints. */
+export interface DependencyResult {
+  readonly action: "added" | "removed";
+  readonly taskId: string;
+  readonly dependsOnId: string;
+  /** Whether the dependent is unblocked after the change. */
+  readonly ready: boolean;
+  /** What still stands in its way, so the answer is actionable. */
+  readonly blockers: readonly Blocker[];
+}
+
+/** What `link` prints. */
+export interface LinkResult {
+  readonly action: "linked" | "unlinked";
+  readonly a: string;
+  readonly b: string;
+}
+
 /** What `close`, `cancel` and `reopen` print. */
 export interface LifecycleResult {
   readonly task: Task;
@@ -100,6 +124,16 @@ export interface BlockedTask {
 export type NextResult =
   | { readonly status: "found"; readonly task: Task; readonly epic: TaskSummary | null }
   | { readonly status: "none"; readonly blocked: readonly BlockedTask[] };
+
+/** What `--help --json` prints: the usage screen, as data. */
+export interface HelpDocument {
+  readonly help: string;
+}
+
+/** What `--version --json` prints. */
+export interface VersionDocument {
+  readonly version: string;
+}
 
 /**
  * Any command's document, as it is actually printed.

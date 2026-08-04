@@ -96,9 +96,17 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** The exit code a given failure maps to. */
-export function exitCodeFor(detail: KatraErrorDetail): number {
-  return detail.code === "internal" ? EXIT.internal : EXIT_FOR_ERROR[detail.code];
+/**
+ * The exit code a deliberate failure maps to.
+ *
+ * Takes a `KatraErrorCode`, not a whole `KatraErrorDetail`: `internal` is the
+ * one member of that union nothing in the core ever throws — it is built at
+ * the CLI boundary from a caught non-KatraException, where `emitError` returns
+ * `EXIT.internal` directly. A branch for it here would be unreachable, and an
+ * unreachable branch that an ADR cites as a safety property is worse than none.
+ */
+export function exitCodeFor(code: KatraErrorCode): number {
+  return EXIT_FOR_ERROR[code];
 }
 
 /**
@@ -132,7 +140,11 @@ export function emitError(error: unknown, options: EmitOptions): number {
     streams.err(`katra: ${detail.message}\n`);
     streams.err(formatErrorHint(detail));
   }
-  return exitCodeFor(detail);
+  // `internal` is a member of the detail union because the envelope above can
+  // carry it, but nothing in the core throws it on purpose — so it is handled
+  // here, at the one place a KatraException becomes an exit code, rather than
+  // inside `exitCodeFor`, where the branch would be unreachable.
+  return detail.code === "internal" ? EXIT.internal : exitCodeFor(detail.code);
 }
 
 /**

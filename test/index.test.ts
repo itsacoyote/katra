@@ -93,11 +93,19 @@ describe("the public barrel", () => {
         forbidden,
       );
 
-      // Both `from "…"` and the `import("…")` type-position form. Matching
-      // only the `from` keyword left a bypass: `export type X =
-      // import("./core/store.js").X` is invisible to it, and re-added the
-      // better-sqlite3 leak while this test stayed green.
-      for (const match of source.matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*)"(\.[^"]+)\.js"/g)) {
+      // Every form that pulls in another module: `from "…"`, the
+      // `import("…")` type position, and a bare side-effect `import "…"`.
+      // Each omission was a real bypass — the first revision matched only
+      // `from`, the second added `import(` but still let a bare import
+      // re-open the leak with this test green.
+      //
+      // Matched against the comment-stripped source, like the assertion
+      // above: a *commented-out* import would otherwise turn this red, in a
+      // file whose whole style is explanatory comments.
+      const stripped = code(source);
+      for (const match of stripped.matchAll(
+        /(?:\bfrom|\bimport|\brequire)\s*\(?\s*["'](\.[^"']+?)(?:\.js)?["']/g,
+      )) {
         const specifier = match[1];
         if (specifier === undefined) continue;
         walk(resolve(dirname(file), `${specifier}.ts`), path);
@@ -106,9 +114,19 @@ describe("the public barrel", () => {
 
     walk(join(root, "index.ts"), []);
 
-    // A guard on the guard: the walk has to have gone somewhere. A broken
-    // regex or a changed import style would otherwise pass vacuously.
-    expect(visited.size).toBeGreaterThan(4);
-    expect([...visited].some((file) => file.endsWith("contract.ts"))).toBe(true);
+    // A guard on the guard, and an exact set rather than a lower bound: a
+    // broken regex would otherwise pass vacuously by visiting nothing, and a
+    // size check would still pass if the walk found *different* files. If a
+    // module joins or leaves the published graph, that is a deliberate act and
+    // this list is where it gets acknowledged.
+    expect([...visited].map((file) => relative(root, file)).sort()).toEqual([
+      "core/contract.ts",
+      "core/enums.ts",
+      "core/errors.ts",
+      "core/tasks/id-format.ts",
+      "core/tasks/types.ts",
+      "index.ts",
+      "version.ts",
+    ]);
   });
 });

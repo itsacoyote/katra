@@ -3,17 +3,13 @@
  */
 
 import type { Command } from "commander";
+import type { LinkResult } from "../../core/contract.js";
 import { addLink, removeLink } from "../../core/graph/links.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
 
-/** What `link` reports. This type is the `--json` contract. */
-export interface LinkResult {
-  readonly action: "linked" | "unlinked";
-  readonly a: string;
-  readonly b: string;
-}
+export type { LinkResult };
 
 function formatLink(result: LinkResult): string {
   return result.action === "linked"

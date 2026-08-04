@@ -6,7 +6,8 @@
  * consume the real `process.argv` on import.
  */
 
-import { Command, CommanderError } from "commander";
+import { Command, CommanderError, type Option } from "commander";
+import type { HelpDocument, VersionDocument } from "../core/contract.js";
 import { KatraException } from "../core/errors.js";
 import { VERSION } from "../version.js";
 import { readPipedStdin } from "./body.js";
@@ -61,6 +62,44 @@ export interface CreateProgramOptions {
 }
 
 /**
+ * Every flag on `command` (plus the program's own) that consumes the token
+ * after it.
+ *
+ * Derived from the program, **per command**, not from a hand-maintained list.
+ * A single flat set of every value-taking flag katra defines is wrong: twelve
+ * commands share fourteen such flags, but only thirty-one of those one hundred
+ * and sixty-eight pairs actually exist. A flat set therefore treats
+ * `katra update <id> --tag --json` as "`--json` is `--tag`'s value" — when
+ * `update` has no `--tag` at all, so `--json` was a real request and the
+ * invocation is simply malformed. The caller then gets a usage error written
+ * as prose to stderr with an empty stdout, which is exactly the contract
+ * `configureOutput` below exists to uphold.
+ */
+function valueTakingFlags(argv: readonly string[], program: Command): ReadonlySet<string> {
+  const flags = new Set<string>();
+
+  const collect = (options: readonly Option[]): void => {
+    for (const option of options) {
+      // `required` is `--flag <value>`, `optional` is `--flag [value]`. A
+      // boolean flag is neither and never swallows the next token.
+      if (!option.required && !option.optional) continue;
+      if (option.long !== undefined) flags.add(option.long);
+      if (option.short !== undefined) flags.add(option.short);
+    }
+  };
+
+  collect(program.options);
+
+  // The first bare token is the subcommand: katra's only program-level options
+  // are `-v`/`--version` and `--help`, neither of which takes a value.
+  const name = argv.find((token) => !token.startsWith("-"));
+  const command = program.commands.find((candidate) => candidate.name() === name);
+  if (command !== undefined) collect(command.options);
+
+  return flags;
+}
+
+/**
  * Whether this invocation asked for `--json`.
  *
  * Parsed rather than string-matched. `argv.includes("--json")` is wrong the
@@ -71,9 +110,10 @@ export interface CreateProgramOptions {
  * Everything after a bare `--` is an operand by convention, so it is ignored
  * too.
  */
-export function wantsJson(argv: readonly string[]): boolean {
+export function wantsJson(argv: readonly string[], program: Command): boolean {
   const end = argv.indexOf("--");
   const considered = end === -1 ? argv : argv.slice(0, end);
+  const valueTaking = valueTakingFlags(considered, program);
 
   return considered.some((token, index) => {
     if (token !== "--json") return false;
@@ -81,33 +121,9 @@ export function wantsJson(argv: readonly string[]): boolean {
     // has no option whose value could legitimately be the string "--json", so
     // any `--json` directly following a value-taking flag is that flag's value.
     const previous = considered[index - 1];
-    return previous === undefined || !VALUE_TAKING_FLAGS.has(previous);
+    return previous === undefined || !valueTaking.has(previous);
   });
 }
-
-/**
- * Every katra option that consumes the token after it.
- *
- * Kept here rather than derived from the program because the answer is needed
- * *before* the program parses — and a wrong answer silently changes which
- * stream a failure is written to.
- */
-const VALUE_TAKING_FLAGS = new Set([
-  "--assignee",
-  "--body-file",
-  "--blocked-by",
-  "--epic",
-  "--kind",
-  "--lane",
-  "--level",
-  "--parent",
-  "--priority",
-  "--reason",
-  "--tag",
-  "--add-tag",
-  "--remove-tag",
-  "--title",
-]);
 
 /** Builds the program. Registering a command is a one-line call per module. */
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -171,7 +187,11 @@ export async function run(
   options: CreateProgramOptions = {},
 ): Promise<number> {
   const streams = options.streams ?? processStreams;
-  const json = wantsJson(argv);
+  // A throwaway program, purely to ask which of *this* command's flags take a
+  // value. Building one is object construction with no I/O, and the answer has
+  // to be known before the real program parses, because it decides where a
+  // parse failure gets written.
+  const json = wantsJson(argv, createProgram(options));
   let requested: number = EXIT.ok;
   let prose = "";
   const program = createProgram({
@@ -198,7 +218,17 @@ export async function run(
       // Under --json their prose went to the sink, so emit it as a document
       // rather than leaving stdout empty on a successful invocation.
       if (error.exitCode === 0) {
-        if (json) streams.out(`${JSON.stringify({ help: prose.trimEnd() }, null, 2)}\n`);
+        if (json) {
+          // Two different documents, discriminated rather than crammed under
+          // one key: `--version --json` used to emit `{"help": "0.0.0"}`,
+          // which is the version filed under the wrong name and
+          // indistinguishable in shape from a 900-character usage screen.
+          const document: HelpDocument | VersionDocument =
+            error.code === "commander.version"
+              ? { version: prose.trim() }
+              : { help: prose.trimEnd() };
+          streams.out(`${JSON.stringify(document, null, 2)}\n`);
+        }
         return EXIT.ok;
       }
       // A malformed invocation is still a failure a `--json` caller has to be

@@ -115,6 +115,51 @@ describe("katra list", () => {
     expect(lines[0]?.indexOf("a much longer title")).toBe(lines[1]?.indexOf("short"));
   });
 
+  it("pads the kind column too, and shows epic in place of a kind", async () => {
+    // The kind column had no coverage: both rows in the test above share a
+    // kind, so deleting its padEnd changed nothing. The epic branch had none
+    // either — `--level epic` was only ever exercised through --json.
+    await add(["a fix", "--kind", "fix"]);
+    await add(["a chore", "--kind", "chore"]);
+    await add(["an epic", "--level", "epic"]);
+
+    const lines = (await runCli(["list"], { cwd: repo.dir })).stdout.trim().split("\n");
+    const titleColumn = (title: string) =>
+      lines.find((line) => line.includes(title))?.indexOf(title);
+
+    // "chore" is the widest, so every title starts at the same column only if
+    // the kind is padded to it.
+    expect(titleColumn("a fix")).toBe(titleColumn("a chore"));
+    expect(titleColumn("an epic")).toBe(titleColumn("a chore"));
+
+    // And an epic shows its level, not the kind it happens to carry.
+    expect(lines.find((line) => line.includes("an epic"))).toMatch(/\bepic\b/);
+  });
+
+  it("refuses --epic pointed at a task that is not an epic", async () => {
+    // This was a real bug, fixed in review: `--epic <a task id>` returned an
+    // empty list and exit 0, which reads as "this epic has no children"
+    // rather than "that is not an epic". Nothing pinned the fix — swapping
+    // requireEpicId back to requireId left the whole suite green.
+    const notAnEpic = await add(["a plain task"]);
+
+    const result = await runCli(["list", "--epic", notAnEpic], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/not an epic/);
+  });
+
+  it("lists the children of a real epic", async () => {
+    const epic = await add(["an epic", "--level", "epic"]);
+    await add(["a child", "--parent", epic]);
+    await add(["unrelated"]);
+
+    const result = await runCli(["list", "--epic", epic, "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect((result.json() as TaskList).tasks.map((t) => t.title)).toEqual(["a child"]);
+  });
+
   it("emits list output that parses as JSON with no human text mixed in", async () => {
     await add(["one"]);
 

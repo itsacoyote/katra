@@ -3,24 +3,15 @@
  */
 
 import type { Command } from "commander";
-import type { Blocker } from "../../core/graph/deps.js";
+import type { DependencyResult } from "../../core/contract.js";
 import { addDependency, isReady, listBlockers, removeDependency } from "../../core/graph/deps.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
 
-/** What `dep` reports. This type is the `--json` contract. */
-export interface DepResult {
-  readonly action: "added" | "removed";
-  readonly taskId: string;
-  readonly dependsOnId: string;
-  /** Whether the dependent is unblocked after the change. */
-  readonly ready: boolean;
-  /** What still stands in its way, so the answer is actionable. */
-  readonly blockers: readonly Blocker[];
-}
+export type { DependencyResult };
 
-function formatDep(result: DepResult): string {
+function formatDep(result: DependencyResult): string {
   const headline =
     result.action === "added"
       ? `${result.taskId} now depends on ${result.dependsOnId}`
@@ -58,7 +49,7 @@ export function registerDep(program: Command, context: CliContext): void {
           dependsOnId,
           ready: isReady(store, taskId),
           blockers: listBlockers(store, taskId),
-        } satisfies DepResult;
+        } satisfies DependencyResult;
       });
 
       emit(result, { json: options.json === true, warnings, streams: context.streams }, formatDep);

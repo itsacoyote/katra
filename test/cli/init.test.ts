@@ -187,18 +187,25 @@ describe("the built binary", () => {
 
   // Skipped rather than built here. Running `pnpm build` inside the suite made
   // `pnpm test` rewrite dist/ as a side effect, cost up to two minutes, and
-  // failed wherever pnpm could not run from process.cwd(). CI builds before it
-  // tests, so the check runs there; locally it runs whenever dist/ is present.
-  it.skipIf(!existsSync(builtCli))("runs end to end from dist", () => {
-    // The in-process harness cannot catch a broken shebang, a bad bin entry, or
-    // an import that only fails once bundled.
-    const r = repo();
+  // failed wherever pnpm could not run from process.cwd().
+  //
+  // Skipped only *outside* CI. CI builds before it tests (`ci.yml`), so a
+  // missing dist/cli.js there means the build silently emitted nothing while
+  // `bin` still points at it — precisely what this test exists to catch, and
+  // exactly the case a bare skipIf would have hidden.
+  it.skipIf(!existsSync(builtCli) && process.env.CI === undefined)(
+    "runs end to end from dist",
+    () => {
+      // The in-process harness cannot catch a broken shebang, a bad bin entry, or
+      // an import that only fails once bundled.
+      const r = repo();
 
-    const out = execFileSync(process.execPath, [builtCli, "init"], {
-      cwd: r.dir,
-      encoding: "utf8",
-    });
+      const out = execFileSync(process.execPath, [builtCli, "init"], {
+        cwd: r.dir,
+        encoding: "utf8",
+      });
 
-    expect(out).toMatch(/^Created katra store at /);
-  });
+      expect(out).toMatch(/^Created katra store at /);
+    },
+  );
 });

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { isKatraException, KatraException } from "../../src/core/errors.js";
+import { EXIT, exitCodeFor } from "../../src/cli/output.js";
+import { isKatraException, KATRA_ERROR_CODES, KatraException } from "../../src/core/errors.js";
 
 describe("KatraException", () => {
   it("carries the structured detail payload on a KatraException", () => {
@@ -91,5 +92,33 @@ describe("KatraException", () => {
     expect(isKatraException("not an error")).toBe(false);
     expect(isKatraException(null)).toBe(false);
     expect(isKatraException({ detail: { code: "usage" } })).toBe(false);
+  });
+});
+
+describe("the exit-code mapping", () => {
+  it("maps every deliberate failure code to the exit code the spec names", () => {
+    // Exported and, until now, never called directly by a test — every
+    // assertion reached it through the CLI, so a wrong entry could only be
+    // caught where a command happened to produce that code.
+    const mapping = Object.fromEntries(KATRA_ERROR_CODES.map((code) => [code, exitCodeFor(code)]));
+
+    expect(mapping).toEqual({
+      not_found: EXIT.user,
+      ambiguous_id: EXIT.user,
+      validation: EXIT.user,
+      // A conflict, not a user error: both ids exist and the command is well
+      // formed — only the current shape of the graph refuses it.
+      cycle: EXIT.conflict,
+      conflict: EXIT.conflict,
+      usage: EXIT.usage,
+    });
+  });
+
+  it("never maps a deliberate failure to the fault code", () => {
+    // ADR-005: 4 means katra broke and the caller should retry or escalate.
+    // A refusal reaching it would tell an agent to retry work already refused.
+    for (const code of KATRA_ERROR_CODES) {
+      expect(exitCodeFor(code), `${code} must not be a fault`).not.toBe(EXIT.internal);
+    }
   });
 });

@@ -196,6 +196,23 @@ describe("exit codes", () => {
 });
 
 describe("--json is parsed, not string-matched", () => {
+  it("still honours --json after a flag the command does not define", async () => {
+    // The bug a flat VALUE_TAKING_FLAGS set caused. `--tag` is a real katra
+    // flag — on `add`, not on `update` — so a global set treated `--json` as
+    // its value and dropped the JSON contract for a caller who did ask. Twelve
+    // commands share fourteen value-taking flags, and only 31 of those 168
+    // pairs exist, so 137 argv shapes were affected.
+    const id = await add(["a task"]);
+
+    const result = await runCli(["update", id, "--tag", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+    expect(result.stderr).toBe("");
+    const payload = result.json() as { error: { code: string; message: string } };
+    expect(payload.error.code).toBe("usage");
+    expect(payload.error.message).toMatch(/--tag/);
+  });
+
   it("does not switch to JSON when --json is an option's value", async () => {
     // `argv.includes("--json")` was true here, so a caller who never asked for
     // JSON got a JSON error document on stdout and an empty stderr.
@@ -216,6 +233,17 @@ describe("--json is parsed, not string-matched", () => {
     expect(result.exitCode).not.toBe(EXIT.ok);
     expect(result.stdout).toBe("");
     expect(result.stderr).not.toBe("");
+  });
+
+  it("emits the version under its own key, not the help key", async () => {
+    // `--version --json` used to print {"help": "0.0.0"} — the version filed
+    // under the wrong name, and indistinguishable in shape from a help screen.
+    const result = await runCli(["--version", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    const payload = result.json() as { version?: string; help?: string };
+    expect(payload.version).toMatch(/^\d+\.\d+\.\d+/);
+    expect(payload.help).toBeUndefined();
   });
 
   it("keeps stdout parseable for --help", async () => {
@@ -285,32 +313,52 @@ describe("katra next", () => {
     expect(result.stdout).toContain("blockers  none");
   });
 
-  it("exits non-zero and names the blockers when everything planned is stuck", async () => {
-    // An empty success would read as "all done" when the truth is "everything
-    // is stuck" — the distinction this whole return shape exists for.
+  it("names the blockers, and still exits zero, when everything planned is stuck", async () => {
+    // Exit 0 per ADR-006. Nothing failed — `next` was asked a question and the
+    // answer was "nothing yet", which is not a refusal. Exit 1 would mean "do
+    // not retry" (ADR-005) when closing a blocker makes the identical command
+    // return a task. The distinction lives in the payload, which is the thing
+    // an agent reads.
     const blocker = await add(["the blocker"]);
     const blocked = await add(["stuck", "--lane", "Planned"]);
     await runCli(["dep", blocked, "--blocked-by", blocker], { cwd: repo.dir });
 
     const result = await runCli(["next"], { cwd: repo.dir });
 
-    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.exitCode).toBe(EXIT.ok);
     expect(result.stdout).toContain("1 blocked");
     expect(result.stdout).toContain("waits on");
     expect(result.stdout).toContain("the blocker");
   });
 
-  it("still emits a structured answer under --json when nothing is ready", async () => {
+  it("carries the whole answer in the --json payload rather than in the exit code", async () => {
     const blocker = await add(["the blocker"]);
     const blocked = await add(["stuck", "--lane", "Planned"]);
     await runCli(["dep", blocked, "--blocked-by", blocker], { cwd: repo.dir });
 
     const result = await runCli(["next", "--json"], { cwd: repo.dir });
 
-    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.exitCode).toBe(EXIT.ok);
     const payload = result.json() as { status: string; blocked: Array<{ id: string }> };
     expect(payload.status).toBe("none");
     expect(payload.blocked[0]?.id).toBe(blocked);
+  });
+
+  it("distinguishes stuck from empty without either changing the exit code", async () => {
+    // The pair that makes ADR-006 safe: dropping the exit code is only sound
+    // because `status` and `blocked` already separate the two cases, and both
+    // must stay readable at exit 0.
+    const empty = await runCli(["next", "--json"], { cwd: repo.dir });
+    expect(empty.exitCode).toBe(EXIT.ok);
+    expect(empty.json()).toEqual({ status: "none", blocked: [] });
+
+    const blocker = await add(["a blocker"]);
+    const blocked = await add(["stuck", "--lane", "Planned"]);
+    await runCli(["dep", blocked, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const stuck = await runCli(["next", "--json"], { cwd: repo.dir });
+    expect(stuck.exitCode).toBe(EXIT.ok);
+    expect((stuck.json() as { blocked: unknown[] }).blocked).toHaveLength(1);
   });
 
   it("distinguishes an empty backlog from a blocked one", async () => {

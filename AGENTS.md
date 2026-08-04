@@ -10,7 +10,7 @@ A local, git-native, agent-first project manager and coordination layer for AI c
 
 **Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, and twelve commands over them (`init add show list update close cancel reopen delete dep link next`). Everything else in the spec is not: `brief`, `board`, typed notes, FTS5 search, claims and presence, external refs, snapshots, and the beads converter. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
 
-Five decisions in the spec were superseded during implementation; the ADRs in `docs/decisions/` win where they disagree.
+Six decisions in the spec were superseded during implementation; the ADRs in `docs/decisions/` win where they disagree.
 
 ## Project layout
 
@@ -75,7 +75,7 @@ These come from the spec and are not open for re-litigation in a PR:
 
 - **Library core, thin CLI wrapper.** Logic in the core; `cli.ts` only parses args, calls the core, and formats output.
 - **`--json` on every read command.** Agents are the primary reader; parsing formatted text is where silent misreads happen.
-- **Exit codes distinguish a refusal from a fault.** 0 ok · 1 refused · 2 malformed invocation · 3 state conflict · 4 katra broke ([ADR-005](docs/decisions/ADR-005-internal-fault-exit-code.md)). An agent branches on these, so 1 must never mean "retry later".
+- **Exit codes distinguish a refusal from a fault.** 0 ok · 1 refused · 2 malformed invocation · 3 state conflict · 4 katra broke ([ADR-005](docs/decisions/ADR-005-internal-fault-exit-code.md)). An agent branches on these, so 1 must never mean "retry later" — which is why `next` exits 0 even when nothing is ready ([ADR-006](docs/decisions/ADR-006-next-exits-zero.md)) and puts the answer in the payload.
 - **Nothing published from `src/index.ts` may reach the storage engine.** Declarations are emitted per file, so a type re-exported there drags its whole import graph into the shipped `.d.ts` — and `@types/better-sqlite3` is a devDependency. `core/contract.ts` and `core/tasks/id-format.ts` exist to hold the store-free half; `test/index.test.ts` walks the graph and fails on a regression.
 - **Bodies via `--body-file`**, never inline args; `--body-file -` reads stdin. Bare stdin is *not* consulted — consuming whatever sits on fd 0 made every shell redirect a silent overwrite.
 - **Rich blocked feedback.** A refused claim says *why* and *what unblocks it* — never a silent refusal.

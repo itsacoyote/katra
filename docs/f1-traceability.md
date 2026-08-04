@@ -6,11 +6,12 @@ It is a real check, not a formality. Two review passes have now found tests here
 
 - **Plan review** found four — one compared a value to itself, one asserted something vacuously true, one was scoped to a single field where four were required, and one had no owner at all.
 - **Senior review, first pass** found ten more, including the `rowid` tie-break (criterion 45), which this document had claimed as covered when the assertion held whether or not the tie-break existed.
+- **Senior review, fourth pass** mutation-audited the four CLI test files earlier passes never reached, running 78 mutations. Four escaped the whole suite — including the `--epic` fix from an earlier pass, which had no regression test at all, so an already-fixed bug could return in silence. It also found `wantsJson`'s flag set was global where it had to be per-command.
 - **Senior review, second pass** found that the *correction* to criterion 45 was itself overstated, and that four join-driven orderings were genuinely testable and genuinely untested. It also found `reportUnblocked`'s central filter had no owner, and that `test/index.test.ts` proved the runtime barrel while saying nothing about the declaration graph it was actually about.
 
 Each row below is marked covered because a test was written or rewritten, not because the criterion looked satisfied.
 
-**Result: all 46 acceptance criteria covered**, plus requirement 55 (the tie-break on the join-driven listings), which had no criterion of its own and no test. `pnpm check` passes with 403 tests.
+**Result: all 46 acceptance criteria covered**, plus requirement 55 (the tie-break on the join-driven listings), which had no criterion of its own and no test. `pnpm check` passes with 413 tests.
 
 Rows marked † are not numbered acceptance criteria — they are requirements the reviews found uncovered, given a row here so they are not lost again.
 
@@ -24,9 +25,13 @@ Where a criterion cannot be fully proven by a black-box test, that is stated in 
 | 2 | Outside a repo exits non-zero; missing git and a broken worktree are distinct | "exits non-zero with a not-a-repository message outside a git repo" · "throws a distinct error when the git binary is absent from PATH" · "surfaces git's own stderr when a worktree's main repository has moved" | `test/cli/init.test.ts`, `test/core/locate.test.ts` |
 | 3 | Identical from root, subdirectory and worktree | "resolves the same absolute store path from the repo root, a subdirectory, and a linked worktree" | `test/core/locate.test.ts` |
 | 4 | `git status` byte-identical across a lifecycle | "stays byte-identical across a representative lifecycle" | `test/cli/feature.test.ts` |
-| 5 | Foreign keys on, katra's busy timeout, every connection | "issues the foreign_keys pragma on every new connection" · "sets katra's own busy_timeout on every new connection" · "actually enforces foreign keys rather than merely reporting them on" | `test/core/connection.test.ts` |
+| 5 | Foreign keys on, katra's busy timeout, every connection | "issues the foreign_keys pragma on every new connection" · "sets katra's own busy_timeout on every new connection" · "actually enforces foreign keys rather than merely reporting them on"† | `test/core/connection.test.ts` |
+
+> **Criterion 26 changed behaviour.** It required `next` to exit non-zero when nothing is ready. ADR-005 then defined 1 as "refused, do not retry", which made that a self-contradiction — closing a blocker makes the identical command return a task, so it is the textbook *retry later*. [ADR-006](decisions/ADR-006-next-exits-zero.md) supersedes it: `next` always exits 0 and the distinction lives in the payload, where `status` and `blocked` already carried it.
 
 > **Criterion 5 had no falsifiable test until the third review pass.** Deleting *both* per-connection pragmas from `openDatabase` left the whole file green: better-sqlite3's defaults are `busy_timeout = 5000` — which `BUSY_TIMEOUT_MS` also was — and this build compiles with `DEFAULT_FOREIGN_KEYS`, so `PRAGMA foreign_keys` already reads 1 with no pragma issued. `BUSY_TIMEOUT_MS` is now 7500 so the value distinguishes, and the foreign-key claim is asserted white-box on the pragma call, since no observable value can. Mutation-verified: removing either pragma now fails.
+
+> † The enforcement test cannot fail *on this better-sqlite3 build*, which compiles with `DEFAULT_FOREIGN_KEYS` — it is carried as the behavioural companion to the pragma-call assertion, which is the one that distinguishes. It would start earning its place on a build without that flag.
 
 > AC4 previously asserted the database was invisible to `git status` — vacuously true for anything inside `.git/`, so no implementation could fail it. See ADR-004.
 
@@ -97,7 +102,7 @@ Where a criterion cannot be fully proven by a black-box test, that is stated in 
 | # | Criterion | Named test | File |
 | --- | --- | --- | --- |
 | 25 | `next` returns one Planned, ready, lowest-priority task; ties by oldest | "returns the lowest-priority-number ready task in the Planned lane" · "breaks a priority tie by choosing the oldest task" | `test/core/next.test.ts` |
-| 26 | `next` exits non-zero naming the blockers when nothing is ready | "exits non-zero and names the blockers when everything planned is stuck" | `test/cli/feature.test.ts` |
+| 26 | `next` names the blockers when nothing is ready, and exits **0** (ADR-006) | "names the blockers, and still exits zero, when everything planned is stuck" · "carries the whole answer in the --json payload rather than in the exit code" · "distinguishes stuck from empty without either changing the exit code" | `test/cli/feature.test.ts` |
 | 27 | `next --kind` never returns another kind | "returns only tasks of the requested kind" · "narrows by kind without returning more than one item" | `test/core/next.test.ts`, `test/cli/feature.test.ts` |
 | 28 | Every read accepts `--json`, valid, no human text | as criterion 35 | `test/cli/feature.test.ts` |
 | 29 | Each of the four exit codes produced on a real path | "produces each of the four exit codes on a real path" · "reaches the conflict code by all three routes the spec names" · "emits a structured usage document under --json rather than an empty stdout" | `test/cli/feature.test.ts` |
