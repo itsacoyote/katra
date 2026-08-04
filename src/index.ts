@@ -41,6 +41,9 @@ export {
   type KatraErrorDetail,
   KatraException,
 } from "./core/errors.js";
+// The dependency graph. Readiness is defined once by the task_readiness view
+// created with the schema; nothing re-derives it.
+export type { Blocker } from "./core/graph/deps.js";
 // The store handle, as a type only.
 //
 // `openStore` is deliberately NOT re-exported yet: it returns an `OpenStore`,
