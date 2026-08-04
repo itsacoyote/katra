@@ -15,7 +15,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, join, normalize } from "node:path";
 import type { StoreWarning } from "../contract.js";
 import { KatraException } from "../errors.js";
 
@@ -240,7 +240,14 @@ function checkAmbientRedirect(
  */
 export function resolveStoreLocation(cwd: string, options: LocateOptions = {}): StoreLocation {
   const env = options.env ?? process.env;
-  const commonDir = runGit(cwd, env, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  // Normalised to the platform's own separators. git reports forward slashes
+  // even on Windows, while `join` below produces backslashes — so without this
+  // `commonDir` and `dbPath` disagree, and `dbPath.startsWith(commonDir)` is
+  // false for paths that are in fact nested. Every consumer comparing or
+  // re-joining these would inherit that.
+  const commonDir = normalize(
+    runGit(cwd, env, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+  );
   const storeDir = join(commonDir, STORE_DIR_NAME);
 
   return {

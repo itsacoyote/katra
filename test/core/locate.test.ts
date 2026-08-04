@@ -36,6 +36,21 @@ describe("resolveStoreLocation", () => {
     expect(location.warnings).toEqual([]);
   });
 
+  it("returns three paths that agree about separators", () => {
+    // git reports forward slashes even on Windows, while `join` uses the
+    // platform separator — so an un-normalised commonDir made
+    // `dbPath.startsWith(commonDir)` false for a path genuinely nested inside
+    // it. Caught by the CI matrix, not locally.
+    const repo = createGitRepo();
+    cleanups.push(() => repo.cleanup());
+
+    const location = resolveStoreLocation(repo.dir);
+
+    expect(location.storeDir.startsWith(location.commonDir)).toBe(true);
+    expect(location.dbPath.startsWith(location.storeDir)).toBe(true);
+    expect(location.dbPath).toBe(join(location.storeDir, DB_FILE_NAME));
+  });
+
   it("resolves the same absolute store path from the repo root, a subdirectory, and a linked worktree", () => {
     // The premise of katra's whole storage model. The bare --git-common-dir
     // flag returns three different strings here (".git", "../.git", and an
