@@ -10,6 +10,7 @@ import { Command, CommanderError } from "commander";
 import { VERSION } from "../version.js";
 import { readPipedStdin } from "./body.js";
 import { registerAdd } from "./commands/add.js";
+import { registerDep } from "./commands/dep.js";
 import { registerInit } from "./commands/init.js";
 import { registerShow } from "./commands/show.js";
 import type { OutputStreams } from "./output.js";
@@ -65,6 +66,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerInit(program, context);
   registerAdd(program, context);
   registerShow(program, context);
+  registerDep(program, context);
 
   return program;
 }
