@@ -7,6 +7,7 @@
  */
 
 import { Command, CommanderError, type Option } from "commander";
+import { createActorResolver } from "../core/actor.js";
 import type { HelpDocument, VersionDocument } from "../core/contract.js";
 import { KatraException } from "../core/errors.js";
 import { VERSION } from "../version.js";
@@ -34,6 +35,15 @@ export interface CliContext {
    * stdin, which would block rather than fail.
    */
   readonly readStdin: () => string | undefined;
+  /**
+   * Who is writing: `<branch> @ <worktree path>`, per ADR-007.
+   *
+   * A function, not a value, because resolving it costs two subprocess spawns
+   * and only write commands need it — `list` and `show` must not pay for an
+   * actor they never stamp. Memoised per context, so a command writing several
+   * events resolves once.
+   */
+  readonly actor: () => string;
   /**
    * Requests a non-zero exit without raising an error.
    *
@@ -127,11 +137,18 @@ export function wantsJson(argv: readonly string[], program: Command): boolean {
 
 /** Builds the program. Registering a command is a one-line call per module. */
 export function createProgram(options: CreateProgramOptions = {}): Command {
+  const cwd = options.cwd ?? process.cwd();
+  const env = options.env ?? process.env;
+
   const context: CliContext = {
-    cwd: options.cwd ?? process.cwd(),
+    cwd,
     streams: options.streams ?? processStreams,
-    env: options.env ?? process.env,
+    env,
     readStdin: options.readStdin ?? readPipedStdin,
+    // Built here rather than at module scope: this function runs once per
+    // invocation, and once per test inside a single worker process. A shared
+    // cache would leak one test's branch into the next one's assertions.
+    actor: createActorResolver({ cwd, env }),
     setExitCode: options.onExitCode ?? (() => undefined),
   };
 
