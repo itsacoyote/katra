@@ -12,6 +12,7 @@ import { readPipedStdin } from "./body.js";
 import { registerAdd } from "./commands/add.js";
 import { registerDep } from "./commands/dep.js";
 import { registerInit } from "./commands/init.js";
+import { registerList } from "./commands/list.js";
 import { registerShow } from "./commands/show.js";
 import type { OutputStreams } from "./output.js";
 import { EXIT, emitError, processStreams } from "./output.js";
@@ -67,6 +68,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerAdd(program, context);
   registerShow(program, context);
   registerDep(program, context);
+  registerList(program, context);
 
   return program;
 }

@@ -48,3 +48,30 @@ export function formatTaskDetail(detail: TaskDetail): string {
 
   return lines.join("\n");
 }
+
+/**
+ * A listing, aligned so ids and lanes line up down the page.
+ *
+ * An empty result says so rather than printing nothing: a blank response is
+ * indistinguishable from a command that failed silently.
+ */
+export function formatTaskList(tasks: readonly Task[]): string {
+  if (tasks.length === 0) return "no tasks match";
+
+  const width = (pick: (task: Task) => string): number =>
+    Math.max(...tasks.map((task) => pick(task).length));
+  const laneWidth = width((task) => task.lane);
+  const kindWidth = width((task) => (task.level === "epic" ? "epic" : task.kind));
+
+  return tasks
+    .map((task) =>
+      [
+        task.id,
+        `P${task.priority}`,
+        task.lane.padEnd(laneWidth),
+        (task.level === "epic" ? "epic" : task.kind).padEnd(kindWidth),
+        task.title,
+      ].join("  "),
+    )
+    .join("\n");
+}
