@@ -20,9 +20,9 @@ describe("updateTask", () => {
 
     const after = updateTask(fixture.store, id, { title: "after" });
 
-    expect(after.title).toBe("after");
-    expect(after.updatedAt).not.toBe(before?.updatedAt);
-    expect(after.createdAt).toBe(before?.createdAt);
+    expect(after.task.title).toBe("after");
+    expect(after.task.updatedAt).not.toBe(before?.updatedAt);
+    expect(after.task.createdAt).toBe(before?.createdAt);
   });
 
   it("leaves unspecified fields untouched", () => {
@@ -36,7 +36,7 @@ describe("updateTask", () => {
 
     const after = updateTask(fixture.store, id, { lane: "Planned" });
 
-    expect(after).toMatchObject({
+    expect(after.task).toMatchObject({
       title: "keep",
       kind: "fix",
       priority: 1,
@@ -89,7 +89,7 @@ describe("updateTask", () => {
     const id = seedTask(fixture.store);
 
     for (const lane of ["Researching", "Planned", "In Progress", "In Review", "Defined"] as const) {
-      expect(updateTask(fixture.store, id, { lane }).lane).toBe(lane);
+      expect(updateTask(fixture.store, id, { lane }).task.lane).toBe(lane);
     }
   });
 
@@ -102,15 +102,18 @@ describe("updateTask", () => {
 
     const after = updateTask(fixture.store, id, { parentId: second });
 
-    expect(after.id).toBe(id);
-    expect(after.parentId).toBe(second);
+    expect(after.task.id).toBe(id);
+    expect(after.task.parentId).toBe(second);
+    // The detail resolves the epic by name, so the printed answer never shows a
+    // bare id where `show` would show a title.
+    expect(after.parent?.title).toBe("second epic");
   });
 
   it("detaches a task from its epic", () => {
     const epic = seedEpic(fixture.store);
     const id = seedTask(fixture.store, { parentId: epic });
 
-    expect(updateTask(fixture.store, id, { parentId: null }).parentId).toBeNull();
+    expect(updateTask(fixture.store, id, { parentId: null }).task.parentId).toBeNull();
   });
 
   it("clears closed_at whenever it sets a lane", () => {
@@ -127,9 +130,9 @@ describe("updateTask", () => {
 
     const updated = updateTask(fixture.store, id, { lane: "Planned" });
 
-    expect(updated.lane).toBe("Planned");
-    expect(updated.closedAt).toBeNull();
-    expect(updated.closeReason).toBeNull();
+    expect(updated.task.lane).toBe("Planned");
+    expect(updated.task.closedAt).toBeNull();
+    expect(updated.task.closeReason).toBeNull();
   });
 
   it("refuses to reparent onto a task rather than an epic", () => {
@@ -150,7 +153,7 @@ describe("updateTask", () => {
     const epic = seedEpic(fixture.store, { id: "kt-ep0001" });
     seedTask(fixture.store, { id: "kt-tk0001" });
 
-    expect(updateTask(fixture.store, "tk0", { parentId: "ep0" }).parentId).toBe(epic);
+    expect(updateTask(fixture.store, "tk0", { parentId: "ep0" }).task.parentId).toBe(epic);
   });
 
   it("adds and removes tags", () => {
@@ -158,7 +161,29 @@ describe("updateTask", () => {
 
     const after = updateTask(fixture.store, id, { addTags: ["new"], removeTags: ["drop"] });
 
-    expect(after.tags).toEqual(["keep", "new"]);
+    expect(after.task.tags).toEqual(["keep", "new"]);
+  });
+
+  it("bumps updated_at for a tag-only edit", () => {
+    // Tags live in their own table, so this used to leave updated_at alone —
+    // and `show` hides the "updated" line when it equals created_at, so both
+    // output modes claimed a task that had just been edited never was.
+    const id = seedTask(fixture.store, { tags: ["old"] });
+    const before = getTask(fixture.store, id);
+
+    const after = updateTask(fixture.store, id, { addTags: ["fresh"] });
+
+    expect(after.task.updatedAt).not.toBe(before?.updatedAt);
+    expect(after.task.updatedAt).not.toBe(after.task.createdAt);
+  });
+
+  it("leaves updated_at alone when a tag edit changed nothing", () => {
+    const id = seedTask(fixture.store, { tags: ["already"] });
+    const before = getTask(fixture.store, id);
+
+    const after = updateTask(fixture.store, id, { addTags: ["already"] });
+
+    expect(after.task.updatedAt).toBe(before?.updatedAt);
   });
 
   it("rejects a priority outside the allowed range", () => {

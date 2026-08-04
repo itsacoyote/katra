@@ -20,6 +20,14 @@ export const EXIT = {
   usage: 2,
   /** Legal request, but the current state refuses it. */
   conflict: 3,
+  /**
+   * katra broke — an unwritable store, a corrupt file, a bug.
+   *
+   * Separate from `user` (ADR-005). Both used to be 1, so an agent branching
+   * on the exit code could not tell "your request was refused, do not retry"
+   * from "the disk is read-only, escalate".
+   */
+  internal: 4,
 } as const;
 
 /**
@@ -70,12 +78,10 @@ export function emit<T>(result: T, options: EmitOptions, formatText: (value: T) 
   const warnings = options.warnings ?? [];
 
   if (options.json) {
-    const payload =
-      warnings.length > 0 && isPlainObject(result)
-        ? { ...result, warnings }
-        : warnings.length > 0
-          ? { result, warnings }
-          : result;
+    // Every command returns a plain object, so warnings merge into the top
+    // level — see `JsonDocument` in core/contract.ts, which is the published
+    // shape of exactly this.
+    const payload = warnings.length > 0 && isPlainObject(result) ? { ...result, warnings } : result;
     streams.out(`${JSON.stringify(payload, null, 2)}\n`);
     return;
   }
@@ -92,7 +98,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /** The exit code a given failure maps to. */
 export function exitCodeFor(detail: KatraErrorDetail): number {
-  return EXIT_FOR_ERROR[detail.code];
+  return detail.code === "internal" ? EXIT.internal : EXIT_FOR_ERROR[detail.code];
 }
 
 /**
@@ -106,15 +112,17 @@ export function emitError(error: unknown, options: EmitOptions): number {
   const streams = options.streams ?? processStreams;
 
   if (!isKatraException(error)) {
-    // Not a deliberate refusal — a genuine fault. Say so distinctly rather
-    // than dressing it up as a katra error.
+    // Not a deliberate refusal — a genuine fault. Reported distinctly, and
+    // with its own exit code: an agent must be able to tell a refusal it
+    // should not retry from a fault it should escalate (ADR-005).
     const message = error instanceof Error ? error.message : String(error);
+    const detail: KatraErrorDetail = { code: "internal", message };
     if (options.json) {
-      streams.out(`${JSON.stringify({ error: { code: "internal", message } }, null, 2)}\n`);
+      streams.out(`${JSON.stringify({ error: detail }, null, 2)}\n`);
     } else {
       streams.err(`katra: internal error: ${message}\n`);
     }
-    return EXIT.user;
+    return EXIT.internal;
   }
 
   const { detail } = error;
@@ -143,6 +151,7 @@ function formatErrorHint(detail: KatraErrorDetail): string {
     case "validation":
     case "conflict":
     case "usage":
+    case "internal":
       return "";
     default: {
       const exhaustive: never = detail;

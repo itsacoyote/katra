@@ -5,11 +5,12 @@ Acceptance criterion 30 requires that every criterion maps to at least one named
 It is a real check, not a formality. Two review passes have now found tests here that could never fail:
 
 - **Plan review** found four — one compared a value to itself, one asserted something vacuously true, one was scoped to a single field where four were required, and one had no owner at all.
-- **Senior review** found ten more, including the `rowid` tie-break (criterion 45), which this document had claimed as covered when the assertion held whether or not the tie-break existed.
+- **Senior review, first pass** found ten more, including the `rowid` tie-break (criterion 45), which this document had claimed as covered when the assertion held whether or not the tie-break existed.
+- **Senior review, second pass** found that the *correction* to criterion 45 was itself overstated, and that four join-driven orderings were genuinely testable and genuinely untested. It also found `reportUnblocked`'s central filter had no owner, and that `test/index.test.ts` proved the runtime barrel while saying nothing about the declaration graph it was actually about.
 
 Each row below is marked covered because a test was written or rewritten, not because the criterion looked satisfied.
 
-**Result: 46 of 46 covered.** `pnpm check` passes with 380 tests.
+**Result: 47 of 47 covered.** `pnpm check` passes with 401 tests.
 
 Where a criterion cannot be fully proven by a black-box test, that is stated in the row rather than papered over — see criterion 45.
 
@@ -103,13 +104,16 @@ Where a criterion cannot be fully proven by a black-box test, that is stated in 
 | 39 | A `GIT_COMMON_DIR` warning reaches the user from a non-`init` command | "surfaces the GIT_COMMON_DIR warning from show, not only from init" | `test/cli/add-show.test.ts` |
 | 44 | `--body-file` resolves relative to the invoking directory | "reads --body-file relative to the invoking directory, not the repo root" | `test/cli/add-show.test.ts` |
 | 45 | Rows sharing a `created_at` are ordered deterministically in `list` and `next` | "breaks a created_at tie by insertion order, not by id" (×2) · "agrees with next about which of two tied tasks comes first" | `test/core/list.test.ts`, `test/core/next.test.ts` |
+| 55 | The same tie-break holds on every dependency and link listing | "breaks a created_at tie among dependents / dependencies / blockers / links by task insertion order" | `test/core/deps.test.ts`, `test/core/links.test.ts` |
 | 30 | `pnpm check` passes and every criterion maps to a named test | this document, plus the suite | — |
 
 > Criteria 35 and 38 previously had no owner: every task added a *per-command* test, and nobody was assigned the aggregate. Both now iterate the program's own command list rather than a hand-written one, so a command added later and left unwired fails the suite.
 
 > **Criterion 29 changed behaviour, not just its test.** A cycle mapped to exit 1; the spec says 3. The test named "reaches the conflict code by all three routes the spec names" exercised two routes and then asserted the third produced a *different* code — and this document cited it as covering the criterion, so the audit reported green on its own violation. `cycle` now maps to `EXIT.conflict`: both ids exist and the command is well formed, so only the current shape of the graph refuses it, which is exactly what separates 3 from 1.
 
-> **Criterion 45 is partially structural, and that is a measured limit rather than an oversight.** Deleting `t.rowid` from the `ORDER BY` does **not** fail the two tie-break tests: SQLite's only tie order *is* rowid, so a plan without the clause returns identical rows in identical order. Both `PRAGMA reverse_unordered_selects` and opposing the id order against the insertion order were tried and neither separates the two implementations. What the clause buys is that the order is *specified* — SQLite documents the order of equal `ORDER BY` keys as undefined and free to change with the query plan. The falsifiable half is the cross-command test: `list` and `next` must pick the same winner among tied rows, which fails the moment either query's ordering changes.
+> **Criterion 45, corrected.** An earlier revision of this document claimed that *no* black-box test could fail when `rowid` was removed from an `ORDER BY`, because "SQLite's only tie order is rowid". That is true only of `list` and `next`, which drive off `tasks` — there, the sorter's input order already is the tasks rowid order, so the clause changes nothing observable and both tie-break tests still pass without it. It is **false** for the four join-driven queries, which sort rows drawn from `deps` and `links`: their input order comes from those tables' indexes, so the tasks rowid tie-break genuinely decides the answer. All four were untested. Each now has a test that is mutation-verified — removing the clause fails 4/4 — and the tests oppose *both* the id order and the edge-insertion order, because opposing either one alone is satisfied by an incidental query plan.
+>
+> For `list` and `next` the guarantee remains structural: SQLite documents the order of equal `ORDER BY` keys as undefined and free to change with the plan, so the clause buys a *specified* order rather than an incidental one. The falsifiable half there is the cross-command test — `list` and `next` must pick the same winner among tied rows.
 
 ## What is deliberately not covered
 

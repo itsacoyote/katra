@@ -233,3 +233,43 @@ describe("concurrent writers", () => {
     expect(task?.closeReason).toMatch(/^closed by [01]$/);
   });
 });
+
+describe("reopen reports what it took away", () => {
+  it("names the dependents it blocked again", () => {
+    // The module's own contract says every transition reports the readiness it
+    // changed. `reopen` changes it in the opposite direction and used to say
+    // nothing, so an agent reviving a blocker was never told that work it was
+    // about to start had just become unstartable.
+    const blocker = seedTask(fixture.store, { title: "the blocker" });
+    const waiter = seedTask(fixture.store, { title: "was startable" });
+    addDependency(fixture.store, waiter, blocker);
+    closeTask(fixture.store, blocker);
+    expect(isReady(fixture.store, waiter)).toBe(true);
+
+    const { unblocked, reblocked } = reopenTask(fixture.store, blocker);
+
+    expect(unblocked).toEqual([]);
+    expect(reblocked.map((task) => task.title)).toEqual(["was startable"]);
+  });
+
+  it("reports nothing re-blocked when the dependent was already stuck elsewhere", () => {
+    const blocker = seedTask(fixture.store, { title: "one blocker" });
+    const other = seedTask(fixture.store, { title: "another blocker", lane: "In Progress" });
+    const waiter = seedTask(fixture.store, { title: "doubly blocked" });
+    addDependency(fixture.store, waiter, blocker);
+    addDependency(fixture.store, waiter, other);
+    closeTask(fixture.store, blocker);
+
+    expect(reopenTask(fixture.store, blocker).reblocked).toEqual([]);
+  });
+
+  it("leaves close and cancel reporting nothing re-blocked", () => {
+    const blocker = seedTask(fixture.store);
+    const waiter = seedTask(fixture.store);
+    addDependency(fixture.store, waiter, blocker);
+
+    expect(closeTask(fixture.store, blocker).reblocked).toEqual([]);
+    expect(reopenTask(fixture.store, blocker).unblocked).toEqual([]);
+    expect(cancelTask(fixture.store, blocker, "dropped").reblocked).toEqual([]);
+  });
+});

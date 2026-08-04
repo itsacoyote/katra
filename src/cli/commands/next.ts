@@ -4,9 +4,9 @@
 
 import type { Command } from "commander";
 import { narrowKind, narrowLevel } from "../../core/narrow.js";
-import { requireId } from "../../core/tasks/ids.js";
 import type { NextFilters, NextResult } from "../../core/tasks/next.js";
 import { NEXT_LANE, nextTask } from "../../core/tasks/next.js";
+import { requireEpicId } from "../../core/tasks/repo.js";
 import { EXIT, emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
@@ -54,7 +54,7 @@ export function registerNext(program: Command, context: CliContext): void {
       const { result, warnings } = withStore(context, (store) =>
         nextTask(store, {
           ...base,
-          ...(options.epic === undefined ? {} : { epic: requireId(store, options.epic) }),
+          ...(options.epic === undefined ? {} : { epic: requireEpicId(store, options.epic) }),
         }),
       );
 

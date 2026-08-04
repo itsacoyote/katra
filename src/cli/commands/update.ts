@@ -4,7 +4,6 @@
 
 import type { Command } from "commander";
 import { narrowKind, narrowLane, narrowPriority } from "../../core/narrow.js";
-import { showTask } from "../../core/tasks/repo.js";
 import type { TaskPatch } from "../../core/tasks/update.js";
 import { updateTask } from "../../core/tasks/update.js";
 import { readBody } from "../body.js";
@@ -43,7 +42,7 @@ export function registerUpdate(program: Command, context: CliContext): void {
     .option("--clear-assignee", "remove the assignee")
     .option("--parent <id>", "move under this epic; accepts a partial id")
     .option("--clear-parent", "detach from its epic")
-    .option("--body-file <path>", "replace the description from a file, or pipe it on stdin")
+    .option("--body-file <path>", 'replace the description from a file, or "-" for stdin')
     .option("--add-tag <tag>", "add a tag; repeatable", collect)
     .option("--remove-tag <tag>", "remove a tag; repeatable", collect)
     .option("--json", "emit structured output")
@@ -74,12 +73,10 @@ export function registerUpdate(program: Command, context: CliContext): void {
         ...(options.removeTag === undefined ? {} : { removeTags: options.removeTag }),
       };
 
-      const { result, warnings } = withStore(context, (store) => {
-        updateTask(store, id, patch);
-        // Re-read through showTask so the output names the epic rather than
-        // only its id, exactly as `show` does.
-        return showTask(store, id);
-      });
+      // updateTask returns the same detail `show` prints, read inside its own
+      // transaction — so the output is this update's result, not whatever a
+      // concurrent writer left behind a moment later.
+      const { result, warnings } = withStore(context, (store) => updateTask(store, id, patch));
 
       emit(
         result,

@@ -8,6 +8,7 @@
  * migration story, by older builds, so a row is untrusted input.
  */
 
+import type { TaskList } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import type { Kind, Lane, Level, Priority } from "../enums.js";
 import { isTerminal, PRIORITY_DEFAULT } from "../enums.js";
@@ -71,7 +72,7 @@ export function getTask(store: OpenStore, id: string): Task | undefined {
   return row === undefined ? undefined : rowToTask(store, row);
 }
 
-function summarise(store: OpenStore, id: string): TaskSummary | null {
+function summariseById(store: OpenStore, id: string): TaskSummary | null {
   const row = store.db.prepare(SELECT_TASK).get(id) as TaskRow | undefined;
   if (row === undefined) return null;
   return {
@@ -102,7 +103,7 @@ export function requireEpicId(store: OpenStore, input: string): string {
       code: "validation",
       message:
         `${id} is a ${parent.level}, not an epic — only an epic can hold children. ` +
-        `Promote it with \`katra update ${id} --level epic\` first.`,
+        "Give an existing epic, or create one with `katra add <title> --level epic`.",
       field: "parent",
       value: id,
     });
@@ -148,16 +149,19 @@ export function createTask(store: OpenStore, input: NewTask): Task {
     });
   }
 
-  // Resolved before the write so a partial parent id is accepted, and checked
-  // for level so a task given as a parent is refused by name rather than by
-  // the trigger that backs the same rule.
-  const parentId =
-    input.parentId === undefined || input.parentId === null
-      ? null
-      : requireEpicId(store, input.parentId);
+  const id = writeTx(store.db, (now) => {
+    // Resolved inside the transaction, so a partial parent id is accepted and
+    // a bad one is refused by name rather than by the trigger backing the same
+    // rule. Resolved *outside* it, another worktree could delete the epic in
+    // the window before the INSERT — the delete is allowed, since the epic has
+    // no children yet — and the foreign key would fire as a raw
+    // SQLITE_CONSTRAINT_FOREIGNKEY reported under the untyped "internal" code.
+    const parentId =
+      input.parentId === undefined || input.parentId === null
+        ? null
+        : requireEpicId(store, input.parentId);
 
-  const id = writeTx(store.db, (now) =>
-    insertWithRetry((candidate) => {
+    return insertWithRetry((candidate) => {
       store.db
         .prepare(
           `INSERT INTO tasks
@@ -184,8 +188,8 @@ export function createTask(store: OpenStore, input: NewTask): Task {
         const trimmed = tag.trim();
         if (trimmed !== "") addTag.run(candidate, trimmed);
       }
-    }),
-  );
+    });
+  });
 
   const created = getTask(store, id);
   if (created === undefined) {
@@ -206,15 +210,25 @@ export function createTask(store: OpenStore, input: NewTask): Task {
  * "several matches".
  */
 export function showTask(store: OpenStore, idInput: string): TaskDetail {
-  const id = requireId(store, idInput);
+  return showTaskWithin(store, requireId(store, idInput));
+}
+
+/**
+ * The same read, given an already-resolved id.
+ *
+ * Split out so `update` can produce its own result **inside its transaction**
+ * rather than re-reading afterwards — a second, un-transacted read can return a
+ * concurrent writer's state instead of the one the caller just wrote.
+ */
+export function showTaskWithin(store: OpenStore, id: string): TaskDetail {
   const task = getTask(store, id);
   if (task === undefined) {
-    throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
+    throw new KatraException({ code: "not_found", message: `no task matches "${id}"`, id });
   }
 
   return {
     task,
-    parent: task.parentId === null ? null : summarise(store, task.parentId),
+    parent: task.parentId === null ? null : summariseById(store, task.parentId),
     links: listLinks(store, id),
   };
 }
@@ -233,10 +247,7 @@ export interface TaskFilters {
   readonly ready?: boolean;
 }
 
-/** What `list` returns. This type is the `--json` contract. */
-export interface TaskList {
-  readonly tasks: readonly Task[];
-}
+export type { TaskList };
 
 /**
  * Lists tasks matching every supplied filter.

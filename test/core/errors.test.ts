@@ -48,6 +48,7 @@ describe("KatraException", () => {
         case "conflict":
           return e.detail.reason;
         case "usage":
+        case "internal":
           return e.detail.message;
         default: {
           const exhaustive: never = e.detail;

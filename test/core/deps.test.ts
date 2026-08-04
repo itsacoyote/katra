@@ -12,7 +12,7 @@ import {
   removeDependency,
 } from "../../src/core/graph/deps.js";
 import { runConcurrent } from "../helpers/concurrent.js";
-import { seedDep, seedTask } from "../helpers/seed.js";
+import { seedDep, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -288,5 +288,49 @@ describe("concurrent writers", () => {
     // The decisive check: whatever the timing, no cycle may exist afterwards.
     const edges = fixture.store.db.prepare("SELECT COUNT(*) c FROM deps").get();
     expect(edges).toEqual({ c: 1 });
+  });
+});
+
+describe("tie-breaking on the join-driven queries", () => {
+  // These queries sort rows drawn from `deps`, not from `tasks`, so the
+  // sorter's input order is whatever the deps index yields — not the tasks
+  // rowid order. That makes the `tasks` rowid tie-break genuinely observable
+  // here, unlike in `list` and `next` where SQLite's incidental scan order
+  // already matches it (see docs/f1-traceability.md).
+  //
+  // Two things are deliberately opposed to insertion order, because either one
+  // alone is satisfied by an incidental plan: the **ids** descend, so an index
+  // walk gives the reverse answer, and the **dep rows** are written back to
+  // front. Only a tasks-rowid tie-break yields task insertion order.
+  function tiedTrio(): { hub: string; first: string; second: string } {
+    const stamp = seedTime(500);
+    const hub = seedTask(fixture.store, { id: "kt-hub000", title: "hub", createdAt: stamp });
+    const first = seedTask(fixture.store, { id: "kt-zzzzzz", title: "first", createdAt: stamp });
+    const second = seedTask(fixture.store, { id: "kt-aaaaaa", title: "second", createdAt: stamp });
+    return { hub, first, second };
+  }
+
+  it("breaks a created_at tie among dependents by task insertion order", () => {
+    const { hub, first, second } = tiedTrio();
+    seedDep(fixture.store, second, hub);
+    seedDep(fixture.store, first, hub);
+
+    expect(listDependents(fixture.store, hub).map((t) => t.title)).toEqual(["first", "second"]);
+  });
+
+  it("breaks a created_at tie among dependencies by task insertion order", () => {
+    const { hub, first, second } = tiedTrio();
+    seedDep(fixture.store, hub, second);
+    seedDep(fixture.store, hub, first);
+
+    expect(listDependencies(fixture.store, hub).map((t) => t.title)).toEqual(["first", "second"]);
+  });
+
+  it("breaks a created_at tie among blockers by task insertion order", () => {
+    const { hub, first, second } = tiedTrio();
+    seedDep(fixture.store, hub, second);
+    seedDep(fixture.store, hub, first);
+
+    expect(listBlockers(fixture.store, hub).map((t) => t.title)).toEqual(["first", "second"]);
   });
 });

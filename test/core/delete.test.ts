@@ -4,7 +4,7 @@ import { addDependency, isReady } from "../../src/core/graph/deps.js";
 import { addLink } from "../../src/core/graph/links.js";
 import { deleteTask } from "../../src/core/tasks/delete.js";
 import { getTask } from "../../src/core/tasks/repo.js";
-import { seedEpic, seedTask } from "../helpers/seed.js";
+import { seedDep, seedEpic, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -16,6 +16,21 @@ afterEach(() => fixture.cleanup());
 
 const count = (table: string): number =>
   (fixture.store.db.prepare(`SELECT COUNT(*) c FROM ${table}`).get() as { c: number }).c;
+
+describe("what a delete reports as released", () => {
+  it("says nothing about a dependent that was already startable", () => {
+    // The filter that makes this true — "was blocked before, ready after" —
+    // is a no-op for close/cancel/reopen, whose guards prove the subject was
+    // non-terminal. `delete` accepts any lane, so this is the only path where
+    // it matters, and removing it leaves the whole suite green.
+    const alreadyDone = seedTask(fixture.store, { title: "already finished", lane: "Done" });
+    const waiter = seedTask(fixture.store, { title: "never actually blocked" });
+    seedDep(fixture.store, waiter, alreadyDone);
+    expect(isReady(fixture.store, waiter)).toBe(true);
+
+    expect(deleteTask(fixture.store, alreadyDone).unblocked).toEqual([]);
+  });
+});
 
 describe("deleteTask", () => {
   it("removes the task", () => {

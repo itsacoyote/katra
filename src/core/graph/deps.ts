@@ -10,23 +10,18 @@
  * strand every task behind an abandoned blocker.
  */
 
+import type { Blocker } from "../contract.js";
 import { writeTx } from "../db/connection.js";
-import type { Lane } from "../enums.js";
 import { sqlEnum, TERMINAL_LANES } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { narrowLane } from "../narrow.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "../tasks/ids.js";
 
+export type { Blocker };
+
 /** The one place readiness is defined. Consumers join this; nobody re-derives it. */
 export const READINESS_VIEW = "task_readiness";
-
-/** A task standing between another task and readiness. */
-export interface Blocker {
-  readonly id: string;
-  readonly title: string;
-  readonly lane: Lane;
-}
 
 /**
  * Whether `id` has no unfinished dependencies.
@@ -81,7 +76,7 @@ export function listBlockers(store: OpenStore, id: string): Blocker[] {
  * Every id is the same length, so no id can be a substring of another and the
  * `instr` guard that stops the walk revisiting a node is exact.
  */
-export function findCycle(store: OpenStore, taskId: string, dependsOnId: string): string[] | null {
+function findCycle(store: OpenStore, taskId: string, dependsOnId: string): string[] | null {
   const row = store.db
     .prepare(
       `WITH RECURSIVE walk(id, path) AS (

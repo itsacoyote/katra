@@ -3,7 +3,7 @@ import { isKatraException } from "../../src/core/errors.js";
 import { isReady } from "../../src/core/graph/deps.js";
 import { addLink, listLinks, removeLink } from "../../src/core/graph/links.js";
 import { showTask } from "../../src/core/tasks/repo.js";
-import { seedTask } from "../helpers/seed.js";
+import { seedLink, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -153,5 +153,23 @@ describe("cascade", () => {
     fixture.store.db.prepare("DELETE FROM tasks WHERE id = ?").run(a);
 
     expect(rowCount()).toBe(0);
+  });
+});
+
+describe("tie-breaking", () => {
+  it("breaks a created_at tie among links by task insertion order", () => {
+    // `listLinks` sorts rows drawn from `links`, so the sorter's input order is
+    // the *links* rowid order. Writing the link rows in the opposite order to
+    // the task rows makes the `tasks` rowid tie-break observable — this fails
+    // if `t.rowid` is dropped from the query.
+    const stamp = seedTime(500);
+    const hub = seedTask(fixture.store, { id: "kt-hub000", title: "hub", createdAt: stamp });
+    seedTask(fixture.store, { id: "kt-zzzzzz", title: "first", createdAt: stamp });
+    seedTask(fixture.store, { id: "kt-aaaaaa", title: "second", createdAt: stamp });
+
+    seedLink(fixture.store, hub, "kt-aaaaaa");
+    seedLink(fixture.store, hub, "kt-zzzzzz");
+
+    expect(listLinks(fixture.store, hub).map((t) => t.title)).toEqual(["first", "second"]);
   });
 });

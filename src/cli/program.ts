@@ -53,11 +53,69 @@ export interface CreateProgramOptions {
   /**
    * Whether `--json` was asked for.
    *
-   * Commander does not read katra's flags, so it has to be told: its usage
-   * errors are prose, and under `--json` prose must not reach either stream.
+   * Commander's own help and usage errors are prose, and under `--json` prose
+   * must not reach either stream — so the program has to be told before it
+   * parses. {@link wantsJson} works this out; do not scan argv by hand.
    */
   readonly json?: boolean;
+  /**
+   * Where commander's prose goes instead of the real streams.
+   *
+   * Set by `run` under `--json`. Commander writes help screens and usage
+   * errors as sentences; diverting them here keeps stdout parseable and lets
+   * `run` re-emit the same text inside a document.
+   */
+  readonly onProse?: (text: string) => void;
 }
+
+/**
+ * Whether this invocation asked for `--json`.
+ *
+ * Parsed rather than string-matched. `argv.includes("--json")` is wrong the
+ * moment `--json` appears as an option *value*: `katra add t --assignee --json`
+ * assigns the string "--json" to `--assignee`, and a scan would flip the whole
+ * error contract to JSON for a caller who never asked for it.
+ *
+ * Everything after a bare `--` is an operand by convention, so it is ignored
+ * too.
+ */
+export function wantsJson(argv: readonly string[]): boolean {
+  const end = argv.indexOf("--");
+  const considered = end === -1 ? argv : argv.slice(0, end);
+
+  return considered.some((token, index) => {
+    if (token !== "--json") return false;
+    // An option's value is the token right after a flag that takes one. katra
+    // has no option whose value could legitimately be the string "--json", so
+    // any `--json` directly following a value-taking flag is that flag's value.
+    const previous = considered[index - 1];
+    return previous === undefined || !VALUE_TAKING_FLAGS.has(previous);
+  });
+}
+
+/**
+ * Every katra option that consumes the token after it.
+ *
+ * Kept here rather than derived from the program because the answer is needed
+ * *before* the program parses — and a wrong answer silently changes which
+ * stream a failure is written to.
+ */
+const VALUE_TAKING_FLAGS = new Set([
+  "--assignee",
+  "--body-file",
+  "--blocked-by",
+  "--epic",
+  "--kind",
+  "--lane",
+  "--level",
+  "--parent",
+  "--priority",
+  "--reason",
+  "--tag",
+  "--add-tag",
+  "--remove-tag",
+  "--title",
+]);
 
 /** Builds the program. Registering a command is a one-line call per module. */
 export function createProgram(options: CreateProgramOptions = {}): Command {
@@ -87,11 +145,15 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   // Under --json commander's prose is dropped entirely: `run` catches the same
   // CommanderError and re-emits it as a structured `usage` document, so letting
   // the sentence through as well would put human text on stderr next to it.
+  //
+  // `writeOut` is diverted too: `--help --json` would otherwise print a help
+  // screen to stdout and exit 0, which is worse than a usage error for an
+  // agent that always passes --json — it gets unparseable output *and* a
+  // success code. `run` re-emits whatever lands in the sink as a document.
+  const sink = options.onProse;
   program.configureOutput({
-    writeOut: (text) => context.streams.out(text),
-    writeErr: (text) => {
-      if (options.json !== true) context.streams.err(text);
-    },
+    writeOut: (text) => (sink === undefined ? context.streams.out(text) : sink(text)),
+    writeErr: (text) => (sink === undefined ? context.streams.err(text) : sink(text)),
   });
 
   registerInit(program, context);
@@ -117,12 +179,20 @@ export async function run(
   options: CreateProgramOptions = {},
 ): Promise<number> {
   const streams = options.streams ?? processStreams;
-  const json = argv.includes("--json");
+  const json = wantsJson(argv);
   let requested: number = EXIT.ok;
+  let prose = "";
   const program = createProgram({
     ...options,
     streams,
     json,
+    ...(json
+      ? {
+          onProse: (text: string) => {
+            prose += text;
+          },
+        }
+      : {}),
     onExitCode: (code) => {
       requested = code;
     },
@@ -133,13 +203,17 @@ export async function run(
     return requested;
   } catch (error) {
     if (error instanceof CommanderError) {
-      // `--help` and `--version` arrive here too; commander has already
-      // written them and reports exit code 0.
-      if (error.exitCode === 0) return EXIT.ok;
+      // `--help` and `--version` arrive here too and report exit code 0.
+      // Under --json their prose went to the sink, so emit it as a document
+      // rather than leaving stdout empty on a successful invocation.
+      if (error.exitCode === 0) {
+        if (json) streams.out(`${JSON.stringify({ help: prose.trimEnd() }, null, 2)}\n`);
+        return EXIT.ok;
+      }
       // A malformed invocation is still a failure a `--json` caller has to be
-      // able to read. Commander's own message was suppressed above, so this is
-      // the only thing written — as the same error envelope every other
-      // failure uses, rather than a bare non-zero exit and an empty stdout.
+      // able to read. Commander's own message went to the sink, so this is the
+      // only thing written — as the same error envelope every other failure
+      // uses, rather than a bare non-zero exit and an empty stdout.
       if (!json) return EXIT.usage;
       return emitError(new KatraException({ code: "usage", message: error.message }), {
         json,

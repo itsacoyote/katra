@@ -9,32 +9,18 @@
  * work left" are different answers, and an agent that conflates them stops.
  */
 
+import type { BlockedTask, NextResult } from "../contract.js";
 import type { Kind, Level } from "../enums.js";
 import { KatraException } from "../errors.js";
-import type { Blocker } from "../graph/deps.js";
 import { listBlockers, READINESS_VIEW } from "../graph/deps.js";
 import type { OpenStore } from "../store.js";
 import { getTask } from "./repo.js";
-import type { Task, TaskSummary } from "./types.js";
 import { summarise } from "./types.js";
+
+export type { BlockedTask, NextResult };
 
 /** The lane `next` draws from: work that has been planned but not started. */
 export const NEXT_LANE = "Planned";
-
-/** A planned task that cannot be started, and what stands in its way. */
-export interface BlockedTask {
-  readonly id: string;
-  readonly title: string;
-  readonly blockers: readonly Blocker[];
-}
-
-/**
- * Deliberately a discriminated union rather than `Task | null`: the empty case
- * has to carry the blockers, or the caller learns only that it got nothing.
- */
-export type NextResult =
-  | { readonly status: "found"; readonly task: Task; readonly epic: TaskSummary | null }
-  | { readonly status: "none"; readonly blocked: readonly BlockedTask[] };
 
 export interface NextFilters {
   readonly kind?: Kind;
@@ -104,11 +90,11 @@ export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResul
         id: candidate.id,
       });
     }
-    const parent = task.parentId === null ? null : getTask(store, task.parentId);
+    const parent = task.parentId === null ? undefined : getTask(store, task.parentId);
     return {
       status: "found",
       task,
-      epic: parent === undefined || parent === null ? null : summarise(parent),
+      epic: parent === undefined ? null : summarise(parent),
     };
   }
 

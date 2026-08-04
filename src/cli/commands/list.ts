@@ -4,8 +4,12 @@
 
 import type { Command } from "commander";
 import { narrowKind, narrowLane, narrowLevel, narrowPriority } from "../../core/narrow.js";
-import { requireId } from "../../core/tasks/ids.js";
-import { listTasks, type TaskFilters, type TaskList } from "../../core/tasks/repo.js";
+import {
+  listTasks,
+  requireEpicId,
+  type TaskFilters,
+  type TaskList,
+} from "../../core/tasks/repo.js";
 import { formatTaskList } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
@@ -60,7 +64,10 @@ export function registerList(program: Command, context: CliContext): void {
       const { result, warnings } = withStore(context, (store) =>
         listTasks(store, {
           ...base,
-          ...(options.epic === undefined ? {} : { epic: requireId(store, options.epic) }),
+          // requireEpicId, not requireId: `--epic <a task id>` used to return
+          // an empty list and exit 0, which reads as "this epic has no
+          // children" rather than "that is not an epic".
+          ...(options.epic === undefined ? {} : { epic: requireEpicId(store, options.epic) }),
         }),
       );
 

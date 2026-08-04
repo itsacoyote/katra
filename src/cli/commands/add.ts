@@ -41,7 +41,7 @@ export function registerAdd(program: Command, context: CliContext): void {
       ...previous,
       value,
     ])
-    .option("--body-file <path>", "read the description from a file, or pipe it on stdin")
+    .option("--body-file <path>", 'read the description from a file, or "-" for stdin')
     .option("--json", "emit structured output")
     .action((title: string, options: AddOptions) => {
       // Descriptions arrive by file or pipe, never as an argument: quotes,

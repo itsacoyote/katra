@@ -87,11 +87,31 @@ describe("katra update", () => {
     // so an implementation that appended rather than replaced would satisfy
     // the assertion below just as well — "replaces" was untested.
     const id = await add(["a task"]);
-    await runCli(["update", id], { cwd: repo.dir, stdin: "the original description" });
+    await runCli(["update", id, "--body-file", "-"], {
+      cwd: repo.dir,
+      stdin: "the original description",
+    });
 
-    await runCli(["update", id], { cwd: repo.dir, stdin: "a new description" });
+    await runCli(["update", id, "--body-file", "-"], {
+      cwd: repo.dir,
+      stdin: "a new description",
+    });
 
     expect((await detail(id)).task.description).toBe("a new description");
+  });
+
+  it("leaves the description alone when stdin was not asked for", async () => {
+    // The reason bare stdin is no longer consulted: `katra update <id>
+    // --priority 0` inside a script with redirected input silently replaced
+    // the description with the script's data, with no undo until snapshots.
+    const id = await add(["a task"]);
+    await runCli(["update", id, "--body-file", "-"], { cwd: repo.dir, stdin: "the real body" });
+
+    await runCli(["update", id, "--priority", "0"], { cwd: repo.dir, stdin: "unrelated input" });
+
+    const after = await detail(id);
+    expect(after.task.description).toBe("the real body");
+    expect(after.task.priority).toBe(0);
   });
 
   it("emits the updated task as JSON", async () => {

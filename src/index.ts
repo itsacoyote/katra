@@ -19,7 +19,23 @@
  * then the CLI is the interface and these types describe what it says.
  */
 
-export type { StoreWarning } from "./core/db/locate.js";
+// The `--json` documents, and the warning envelope every one of them can
+// carry. They live in `core/contract.ts`, which imports nothing that touches
+// the database — declarations are emitted per file, so a type re-exported from
+// here drags its whole import graph into the published `.d.ts`. Sourcing these
+// from the modules that produce them put `import Database from "better-sqlite3"`
+// into `dist/index.d.ts` by way of `OpenStore`, breaking any consumer that had
+// not set `skipLibCheck`.
+export type {
+  BlockedTask,
+  Blocker,
+  DeleteResult,
+  JsonDocument,
+  LifecycleResult,
+  NextResult,
+  StoreWarning,
+  TaskList,
+} from "./core/contract.js";
 // The fixed value sets and their derived types.
 export {
   isKind,
@@ -49,22 +65,15 @@ export {
   type KatraErrorDetail,
   KatraException,
 } from "./core/errors.js";
-// A blocker, as `next` and `show` report one. Readiness itself is defined once
-// by the task_readiness view created with the schema; nothing re-derives it.
-export type { Blocker } from "./core/graph/deps.js";
-// What `delete` prints.
-export type { DeleteResult } from "./core/tasks/delete.js";
 // Identity. `resolveId` and `requireId` are not re-exported: they take an
 // `OpenStore`, so publishing them would put the storage handle into the public
 // API through a parameter. `generateId` needs no store and is genuinely usable.
-export { generateId, ID_PREFIX, ID_SUFFIX_LENGTH, MIN_PREFIX_LENGTH } from "./core/tasks/ids.js";
-// What `close`, `cancel` and `reopen` print.
-export type { LifecycleResult } from "./core/tasks/lifecycle.js";
-// What `next` prints — a discriminated union, so the empty case still carries
-// the blocked tasks rather than being indistinguishable from "no work left".
-export type { BlockedTask, NextResult } from "./core/tasks/next.js";
-// What `list` prints.
-export type { TaskList } from "./core/tasks/repo.js";
+export {
+  generateId,
+  ID_PREFIX,
+  ID_SUFFIX_LENGTH,
+  MIN_PREFIX_LENGTH,
+} from "./core/tasks/id-format.js";
 // The task model: what `add` and `show` print.
 export type { Task, TaskDetail, TaskSummary } from "./core/tasks/types.js";
 export { VERSION } from "./version.js";

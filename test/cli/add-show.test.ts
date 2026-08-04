@@ -109,12 +109,30 @@ describe("katra add", () => {
     expect(result.stderr).toMatch(/lane must be one of/);
   });
 
-  it("reads a description from stdin", async () => {
+  it("reads a description from stdin when asked with --body-file -", async () => {
     const body = 'a description with "quotes", `backticks` and $VARS\nplus a second line';
-    const id = await add(["piped"], body);
+    const id = await add(["piped", "--body-file", "-"], body);
 
     const shown = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskDetail;
     expect(shown.task.description).toBe(body);
+  });
+
+  it("ignores stdin that was not asked for", async () => {
+    // Consuming whatever happens to be on fd 0 made every redirect a silent
+    // write: `bash script.sh < data.txt` calling `katra add` would take the
+    // script's input as the description. The shell's plumbing is not consent.
+    const id = await add(["not piped"], "this is somebody else's stdin");
+
+    const shown = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskDetail;
+    expect(shown.task.description).toBeNull();
+  });
+
+  it("treats an empty --body-file as no body, like an empty pipe", async () => {
+    writeFileSync(join(repo.dir, "empty.md"), "   \n");
+    const id = await add(["blank body", "--body-file", "empty.md"]);
+
+    const shown = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskDetail;
+    expect(shown.task.description).toBeNull();
   });
 
   it("reads a description from --body-file", async () => {

@@ -51,8 +51,11 @@ export function formatTaskDetail(detail: TaskDetail): string {
 export function formatTaskList(tasks: readonly Task[]): string {
   if (tasks.length === 0) return "no tasks match";
 
+  // Reduced rather than `Math.max(...tasks.map(…))`: spreading the result set
+  // as arguments blows the stack somewhere past a hundred thousand rows, and
+  // `list` has no limit.
   const width = (pick: (task: Task) => string): number =>
-    Math.max(...tasks.map((task) => pick(task).length));
+    tasks.reduce((widest, task) => Math.max(widest, pick(task).length), 0);
   const laneWidth = width((task) => task.lane);
   const kindWidth = width((task) => (task.level === "epic" ? "epic" : task.kind));
 

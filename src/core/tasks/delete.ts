@@ -8,26 +8,15 @@
  * In F1 this is **irreversible**: there is no restore until snapshots arrive.
  */
 
+import type { DeleteResult } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import { KatraException } from "../errors.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { getTask } from "./repo.js";
-import type { TaskSummary } from "./types.js";
 import { reportUnblocked } from "./unblocked.js";
 
-export interface DeleteResult {
-  readonly id: string;
-  readonly title: string;
-  /**
-   * Tasks that became ready because this one is gone.
-   *
-   * `ON DELETE CASCADE` removes the dependency rows, which silently makes
-   * dependents startable — the same consequence `cancel` reports, and just as
-   * easy to miss.
-   */
-  readonly unblocked: readonly TaskSummary[];
-}
+export type { DeleteResult };
 
 function countChildren(store: OpenStore, id: string): number {
   return (

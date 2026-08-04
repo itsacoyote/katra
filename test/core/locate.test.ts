@@ -131,6 +131,46 @@ describe("resolveStoreLocation", () => {
     expect(location.warnings[0]?.message).toContain("GIT_COMMON_DIR");
   });
 
+  it("warns rather than failing where there is no work tree", () => {
+    // The redirect check re-resolves with the variables stripped. Its second
+    // git call — `--show-toplevel`, used only to word the warning — fails
+    // wherever there is no work tree, while `--git-common-dir` succeeds. Left
+    // unguarded it turned a warning into a hard failure on invocations that
+    // had always worked.
+    const repo = createGitRepo();
+    cleanups.push(() => repo.cleanup());
+    const other = createGitRepo();
+    cleanups.push(() => other.cleanup());
+    const insideGitDir = join(repo.dir, ".git");
+
+    const location = resolveStoreLocation(insideGitDir, {
+      env: { ...process.env, GIT_DIR: join(other.dir, ".git") },
+    });
+
+    expect(location.warnings).toHaveLength(1);
+    expect(location.warnings[0]?.code).toBe("ambient-git-dir");
+  });
+
+  it("does not warn for a submodule, whose git dir is not <toplevel>/.git", () => {
+    // A submodule resolves to `<superproject>/.git/modules/<name>`. Comparing
+    // the common dir against `<toplevel>/.git`, as this once did, reported
+    // every correctly-resolved submodule as a foreign repository.
+    const repo = createGitRepo();
+    cleanups.push(() => repo.cleanup());
+    const inner = createGitRepo();
+    cleanups.push(() => inner.cleanup());
+
+    git(repo.dir, "-c", "protocol.file.allow=always", "submodule", "add", inner.dir, "sub");
+    const submodule = join(repo.dir, "sub");
+
+    const location = resolveStoreLocation(submodule, {
+      env: { ...process.env, GIT_DIR: git(submodule, "rev-parse", "--absolute-git-dir") },
+    });
+
+    expect(location.warnings).toEqual([]);
+    expect(location.commonDir).toContain("modules");
+  });
+
   it("does not warn for a legitimate linked worktree", () => {
     // A worktree's common dir legitimately differs from its own toplevel; that
     // must not be mistaken for a redirect.

@@ -7,14 +7,20 @@
  * silently the moment a command is added.
  */
 
-import { mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
+import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
 import { createGitRepo, git } from "../helpers/fixture.js";
+
+/** The database file, for tests that need to break it on purpose. */
+function storeDbPath(dir: string): string {
+  return join(dir, ".git", STORE_DIR_NAME, DB_FILE_NAME);
+}
 
 /** Every command katra ships in F1. */
 const EXPECTED_COMMANDS = [
@@ -148,6 +154,33 @@ describe("exit codes", () => {
     );
   });
 
+  it("uses a distinct code for a genuine fault, not the user-error code", async () => {
+    // Requirement 49 defines 1 as "the request was understood and refused".
+    // A broken store is not that, and an agent branching on the exit code has
+    // to be able to tell "do not retry" from "escalate" (ADR-005).
+    const id = await add(["a task"]);
+    chmodSync(storeDbPath(repo.dir), 0o444);
+
+    const result = await runCli(["update", id, "--priority", "0"], { cwd: repo.dir });
+
+    chmodSync(storeDbPath(repo.dir), 0o644);
+    expect(result.exitCode).toBe(EXIT.internal);
+    expect(result.exitCode).not.toBe(EXIT.user);
+    expect(result.stderr).toMatch(/internal error/);
+  });
+
+  it("reports a fault under --json in the same envelope as a refusal", async () => {
+    const id = await add(["a task"]);
+    chmodSync(storeDbPath(repo.dir), 0o444);
+
+    const result = await runCli(["update", id, "--priority", "0", "--json"], { cwd: repo.dir });
+
+    chmodSync(storeDbPath(repo.dir), 0o644);
+    const payload = result.json() as { error: { code: string; message: string } };
+    expect(payload.error.code).toBe("internal");
+    expect(result.exitCode).toBe(EXIT.internal);
+  });
+
   it("emits a structured usage document under --json rather than an empty stdout", async () => {
     // Commander owns argument parsing and writes prose. Under --json that
     // prose must not reach either stream, and the failure still has to be
@@ -159,6 +192,34 @@ describe("exit codes", () => {
     const payload = result.json() as { error: { code: string; message: string } };
     expect(payload.error.code).toBe("usage");
     expect(payload.error.message).toMatch(/title/);
+  });
+});
+
+describe("--json is parsed, not string-matched", () => {
+  it("does not switch to JSON when --json is an option's value", async () => {
+    // `argv.includes("--json")` was true here, so a caller who never asked for
+    // JSON got a JSON error document on stdout and an empty stderr.
+    const result = await runCli(["add", "t", "--assignee", "--json", "--nope"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toMatch(/unknown option/);
+  });
+
+  it("ignores --json after a bare double dash", async () => {
+    const result = await runCli(["add", "--", "--json"], { cwd: repo.dir });
+    expect(result.stdout).toMatch(/^kt-/);
+  });
+
+  it("keeps stdout parseable for --help", async () => {
+    // Prose on stdout with exit 0 is worse than a usage error: an agent that
+    // always passes --json gets unparseable output *and* a success code.
+    const result = await runCli(["--help", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    const payload = result.json() as { help: string };
+    expect(payload.help).toMatch(/Usage: katra/);
+    expect(result.stderr).toBe("");
   });
 });
 

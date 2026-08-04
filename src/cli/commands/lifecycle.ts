@@ -23,6 +23,12 @@ function formatLifecycle(result: LifecycleResult): string {
     lines.push(`  unblocked ${result.unblocked.length}:`);
     for (const task of result.unblocked) lines.push(`    ${task.id}  ${task.title}`);
   }
+  // And the inverse, which `reopen` alone can cause: reviving a blocker takes
+  // work away from whoever was about to start it.
+  if (result.reblocked.length > 0) {
+    lines.push(`  blocked again ${result.reblocked.length}:`);
+    for (const task of result.reblocked) lines.push(`    ${task.id}  ${task.title}`);
+  }
   return lines.join("\n");
 }
 

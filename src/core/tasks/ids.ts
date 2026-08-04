@@ -1,59 +1,22 @@
 /**
- * Minting katra ids, and resolving the partial ones people actually type.
+ * Resolving the partial ids people actually type.
  *
- * Both halves live together because they share the alphabet and the prefix:
- * change one and the other must follow.
+ * The *format* half — the prefix, the length, the alphabet, `generateId` —
+ * lives in `id-format.ts`, which imports nothing that touches the database.
+ * Everything here takes an `OpenStore`, so declaring both in one file put the
+ * better-sqlite3 handle into the published `.d.ts` through this module.
  *
- * See ADR-001 for why ids are short, random and flat rather than sequential,
- * hierarchical, or a ULID.
+ * See ADR-001 for why ids are short, random and flat.
  */
 
-import { randomBytes } from "node:crypto";
 import { KatraException } from "../errors.js";
 import type { OpenStore } from "../store.js";
+import { generateId, ID_PREFIX, MIN_PREFIX_LENGTH } from "./id-format.js";
 
-/** Distinguishes a katra id from a git SHA or an external issue number in prose. */
-export const ID_PREFIX = "kt-";
-
-/**
- * Six base36 characters.
- *
- * Measured collision probability across 2,000 creations: 69.6% at four
- * characters, 0.09% at six. Retry makes any length *correct*, so this is about
- * how often the retry path fires — at four it is routine, at six it is genuinely
- * exceptional, and the id is still short enough to type.
- */
-export const ID_SUFFIX_LENGTH = 6;
-
-const ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz";
-
-/**
- * Largest multiple of 36 that fits in a byte.
- *
- * Bytes at or above this are discarded rather than folded with `%`, which
- * would make the first four characters of the alphabet slightly more likely
- * than the rest.
- */
-const UNBIASED_CEILING = 252;
-
-/** Shortest prefix accepted for lookup, counted after any `kt-` is stripped. */
-export const MIN_PREFIX_LENGTH = 2;
+export { generateId, ID_PREFIX, ID_SUFFIX_LENGTH, MIN_PREFIX_LENGTH } from "./id-format.js";
 
 /** How many times a colliding insert is retried before giving up. */
 export const ID_RETRY_ATTEMPTS = 10;
-
-/** Generates a fresh id. Cryptographically random, not `Math.random`. */
-export function generateId(): string {
-  let suffix = "";
-  while (suffix.length < ID_SUFFIX_LENGTH) {
-    for (const byte of randomBytes(ID_SUFFIX_LENGTH * 2)) {
-      if (byte >= UNBIASED_CEILING) continue;
-      suffix += ALPHABET[byte % ALPHABET.length];
-      if (suffix.length === ID_SUFFIX_LENGTH) break;
-    }
-  }
-  return `${ID_PREFIX}${suffix}`;
-}
 
 function isPrimaryKeyCollision(error: unknown): boolean {
   return (error as { code?: unknown } | null | undefined)?.code === "SQLITE_CONSTRAINT_PRIMARYKEY";

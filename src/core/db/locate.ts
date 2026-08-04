@@ -15,7 +15,10 @@
 
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
+import type { StoreWarning } from "../contract.js";
 import { KatraException } from "../errors.js";
+
+export type { StoreWarning };
 
 /** Directory katra owns inside the git common dir. */
 export const STORE_DIR_NAME = "katra";
@@ -23,12 +26,6 @@ export const STORE_DIR_NAME = "katra";
 export const DB_FILE_NAME = "katra.db";
 /** `--path-format` landed in git 2.31; nothing older can resolve the store. */
 export const MINIMUM_GIT_VERSION = "2.31";
-
-/** Something worth telling the user that is not fatal. */
-export interface StoreWarning {
-  readonly code: "ambient-git-dir";
-  readonly message: string;
-}
 
 export interface StoreLocation {
   /** Absolute path to the git common dir shared by every worktree. */
@@ -172,7 +169,17 @@ function checkAmbientRedirect(
 
   if (unredirected === commonDir) return [];
 
-  const toplevel = runGit(cwd, clean, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
+  // Only for the message. `--show-toplevel` fails wherever there is no work
+  // tree — inside a `.git` directory, or in a bare repo — while
+  // `--git-common-dir` succeeds there, so letting this throw would turn a
+  // warning into a hard failure on invocations that used to work.
+  let toplevel: string;
+  try {
+    toplevel = runGit(cwd, clean, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
+  } catch {
+    toplevel = cwd;
+  }
+
   return [
     {
       code: "ambient-git-dir",

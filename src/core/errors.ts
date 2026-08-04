@@ -58,7 +58,19 @@ export type KatraErrorDetail =
   /** The action is legal but the current state refuses it; `reason` says why. */
   | { readonly code: "conflict"; readonly message: string; readonly reason: string }
   /** The invocation itself was malformed. */
-  | { readonly code: "usage"; readonly message: string };
+  | { readonly code: "usage"; readonly message: string }
+  /**
+   * katra broke.
+   *
+   * Not a refusal — a fault: an unwritable database, a corrupt file, a bug.
+   * Carries no structured payload because there is nothing the caller can act
+   * on except retrying or escalating, which is precisely why it must not be
+   * confused with the codes above. It is a member of the union so the
+   * published type matches what the CLI actually emits; it is **not** a member
+   * of {@link KATRA_ERROR_CODES}, because nothing in the core ever throws it
+   * deliberately.
+   */
+  | { readonly code: "internal"; readonly message: string };
 
 /** Every failure katra raises on purpose. */
 export class KatraException extends Error {
@@ -79,12 +91,10 @@ export class KatraException extends Error {
  * separate katra's deliberate failures from genuine crashes — the two deserve
  * very different output.
  *
- * A value this rejects is a fault, not a refusal. The CLI still reports it in
- * the `--json` error envelope, but under the code `"internal"`, which is
- * deliberately **not** a `KatraErrorCode`: it carries no structured payload and
- * nothing about it is part of the contract except that it means katra broke.
- * Consumers switching over {@link KatraErrorDetail} should treat any code
- * outside {@link KATRA_ERROR_CODES} as exactly that.
+ * A value this rejects is a fault, not a refusal. The CLI reports it in the
+ * same `--json` envelope under the code `"internal"` — a member of
+ * {@link KatraErrorDetail} but deliberately not of {@link KATRA_ERROR_CODES},
+ * since nothing in the core throws it on purpose.
  */
 export function isKatraException(value: unknown): value is KatraException {
   return value instanceof KatraException;

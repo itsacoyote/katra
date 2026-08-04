@@ -229,7 +229,7 @@ There is deliberately **no `write` / `push` / `update` method.** One-directional
 - **Library core + thin CLI wrapper.** Build the logic as a plain TS module; the CLI is a thin surface over it. This keeps a later MCP surface a wrapper, not a rewrite.
 - **MCP held in reserve.** For a greenfield tool the "agent knows the CLI better" familiarity advantage is null on both sides, and the CLI wins on context-budget and universality. MCP's one unique benefit here is pushing events into a live session — which needs a daemon. Add MCP **surgically** later if a specific operation demands it. (Pattern validated by aweb: MCP for inbound push, CLI for outbound actions.)
 - **Discoverability:** workflow instructions live in `AGENTS.md` — the cross-agent convention Claude Code, Codex, and Pi all read — plus `katra help`. Agent-specific files (`CLAUDE.md`, etc.) just reference `AGENTS.md` so there's one source of truth. No per-command MCP schema tax.
-- **Bodies via stdin.** Note/message bodies (arbitrary text, code, quotes) are read from **stdin or `--body-file`**, not inline args — sidesteps shell-escaping, the main CLI failure mode for writes-with-bodies.
+- **Bodies via `--body-file`.** Note/message bodies (arbitrary text, code, quotes) are read from a file, or from stdin with the conventional `--body-file -`, not inline args — sidesteps shell-escaping, the main CLI failure mode for writes-with-bodies. Bare stdin is deliberately *not* read: a command that never mentions the description must not change it just because the caller's shell redirected fd 0.
 
 ---
 

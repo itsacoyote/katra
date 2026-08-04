@@ -12,8 +12,8 @@ import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
-import { getTask, requireEpicId } from "./repo.js";
-import type { Task } from "./types.js";
+import { getTask, requireEpicId, showTaskWithin } from "./repo.js";
+import type { TaskDetail } from "./types.js";
 
 /** The fields `update` can change. Anything omitted is left alone. */
 export interface TaskPatch {
@@ -43,7 +43,7 @@ export interface TaskPatch {
  * Reparenting never changes the id (ADR-001), so a reference written into a
  * commit message stays valid.
  */
-export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch): Task {
+export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch): TaskDetail {
   const id = requireId(store, idInput);
 
   if (patch.lane !== undefined && isTerminal(patch.lane)) {
@@ -118,29 +118,36 @@ export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch):
     if (patch.assignee !== undefined) set("assignee", patch.assignee);
     if (parentId !== undefined) set("parent_id", parentId);
 
-    if (assignments.length > 0) {
+    let tagsChanged = false;
+    if (patch.removeTags !== undefined && patch.removeTags.length > 0) {
+      const remove = store.db.prepare("DELETE FROM tags WHERE task_id = ? AND tag = ?");
+      for (const tag of patch.removeTags) {
+        if (remove.run(id, tag.trim()).changes > 0) tagsChanged = true;
+      }
+    }
+    if (patch.addTags !== undefined && patch.addTags.length > 0) {
+      const addTag = store.db.prepare("INSERT OR IGNORE INTO tags (task_id, tag) VALUES (?,?)");
+      for (const tag of patch.addTags) {
+        const trimmed = tag.trim();
+        if (trimmed !== "" && addTag.run(id, trimmed).changes > 0) tagsChanged = true;
+      }
+    }
+
+    // Tags live in their own table, so a tag-only edit used to leave
+    // `updated_at` untouched — and `show` hides the "updated" line when it
+    // equals `created_at`, so both output modes claimed the task had never
+    // been edited. F3's staleness queries would inherit that.
+    if (assignments.length > 0 || tagsChanged) {
       set("updated_at", now);
       store.db
         .prepare(`UPDATE tasks SET ${assignments.join(", ")} WHERE id = ?`)
         .run(...params, id);
     }
 
-    if (patch.removeTags !== undefined && patch.removeTags.length > 0) {
-      const remove = store.db.prepare("DELETE FROM tags WHERE task_id = ? AND tag = ?");
-      for (const tag of patch.removeTags) remove.run(id, tag.trim());
-    }
-    if (patch.addTags !== undefined && patch.addTags.length > 0) {
-      const addTag = store.db.prepare("INSERT OR IGNORE INTO tags (task_id, tag) VALUES (?,?)");
-      for (const tag of patch.addTags) {
-        const trimmed = tag.trim();
-        if (trimmed !== "") addTag.run(id, trimmed);
-      }
-    }
-
-    const updated = getTask(store, id);
-    if (updated === undefined) {
-      throw new KatraException({ code: "not_found", message: `task ${id} vanished`, id });
-    }
-    return updated;
+    // Read back inside the transaction, and as the full detail the CLI prints.
+    // Re-reading afterwards through `showTask`, as the command used to, opened
+    // a window where the printed answer was a concurrent writer's state rather
+    // than the result of this update.
+    return showTaskWithin(store, id);
   });
 }

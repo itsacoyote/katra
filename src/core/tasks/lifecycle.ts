@@ -8,9 +8,12 @@
  * re-proposing it.
  *
  * Both are terminal, so both release whatever they were blocking. That
- * release is the non-obvious consequence, so every transition here reports it.
+ * release is the non-obvious consequence, so every transition here reports it
+ * — and `reopen` reports the inverse, since reviving a blocker takes work away
+ * from whoever was about to start it.
  */
 
+import type { LifecycleResult } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import type { Lane } from "../enums.js";
 import { isTerminal } from "../enums.js";
@@ -18,23 +21,13 @@ import { KatraException } from "../errors.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { getTask } from "./repo.js";
-import type { Task, TaskSummary } from "./types.js";
-import { reportUnblocked } from "./unblocked.js";
+import type { Task } from "./types.js";
+import { reportReadinessChange } from "./unblocked.js";
+
+export type { LifecycleResult };
 
 /** The lane `reopen` returns a task to unless told otherwise. */
 export const REOPEN_DEFAULT_LANE: Lane = "Defined";
-
-export interface LifecycleResult {
-  readonly task: Task;
-  /**
-   * Tasks that became ready because of this transition.
-   *
-   * Reported rather than left to be discovered: releasing dependents is the
-   * consequence a reader is least likely to predict, and for `cancel` it is
-   * the whole reason the lane exists.
-   */
-  readonly unblocked: readonly TaskSummary[];
-}
 
 function loadOrThrow(store: OpenStore, id: string, idInput: string): Task {
   const task = getTask(store, id);
@@ -52,7 +45,7 @@ interface Move {
 }
 
 /**
- * Applies a lane transition and reports which dependents it released.
+ * Applies a lane transition and reports what it released or re-blocked.
  *
  * **The task is loaded and guarded inside the transaction**, not before it.
  * `BEGIN IMMEDIATE` protects the write; it does not protect the decision to
@@ -62,8 +55,8 @@ interface Move {
  * refuse-if-terminal guard that was supposed to let exactly one through.
  *
  * The before-and-after readiness comparison shares that transaction too, so the
- * reported set is exactly what this change caused rather than what a concurrent
- * writer happened to change alongside it.
+ * reported sets are exactly what this change caused rather than what a
+ * concurrent writer happened to change alongside it.
  */
 function transition(
   store: OpenStore,
@@ -76,7 +69,7 @@ function transition(
     const task = loadOrThrow(store, id, idInput);
     const { lane, markClosed, reason } = plan(task);
 
-    const { result, unblocked } = reportUnblocked(store, id, () => {
+    const { result, unblocked, reblocked } = reportReadinessChange(store, id, () => {
       store.db
         .prepare(
           "UPDATE tasks SET lane = ?, closed_at = ?, close_reason = ?, updated_at = ? WHERE id = ?",
@@ -85,7 +78,7 @@ function transition(
       return loadOrThrow(store, id, idInput);
     });
 
-    return { task: result, unblocked };
+    return { task: result, unblocked, reblocked };
   });
 }
 
