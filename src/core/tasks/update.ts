@@ -10,6 +10,7 @@ import { writeTx } from "../db/connection.js";
 import type { Kind, Lane, Priority } from "../enums.js";
 import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
+import { appendEvent, epicIdFor } from "../events/repo.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { getTask, requireEpicId, showTaskWithin } from "./repo.js";
@@ -142,6 +143,35 @@ export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch):
       store.db
         .prepare(`UPDATE tasks SET ${assignments.join(", ")} WHERE id = ?`)
         .run(...params, id);
+    }
+
+    // Requirement 11, and the sharp edge of this task: a lane move is the
+    // **only** thing `update` records. Title, priority, kind, assignee, tags
+    // and reparenting all emit nothing — attribute churn would bury the
+    // signal in the very stream that exists to carry it.
+    //
+    // And only when the lane actually moved. `--lane Planned` on an
+    // already-Planned task is a no-op, and a status-changed event whose two
+    // lanes are equal describes nothing that happened.
+    //
+    // Reparenting emitting nothing has a consequence worth stating: a task's
+    // epic_id history splits at the move. Events written before it keep the
+    // old epic, events after it get the new one, and neither epic's history is
+    // complete. That is the spec's stated single-level tradeoff, pinned by a
+    // test so it is not "fixed" into something worse.
+    if (patch.lane !== undefined && patch.lane !== existing.lane) {
+      appendEvent(
+        store,
+        {
+          type: "status-changed",
+          entityId: id,
+          epicId: epicIdFor({ id, level: existing.level, parentId: parentId ?? existing.parentId }),
+          actor: store.actor(),
+          fromLane: existing.lane,
+          toLane: patch.lane,
+        },
+        now,
+      );
     }
 
     // Read back inside the transaction, and as the full detail the CLI prints.

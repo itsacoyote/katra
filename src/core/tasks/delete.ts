@@ -11,6 +11,7 @@
 import type { DeleteResult } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import { KatraException } from "../errors.js";
+import { appendEvent, epicIdFor } from "../events/repo.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { getTask } from "./repo.js";
@@ -42,7 +43,7 @@ function countChildren(store: OpenStore, id: string): number {
 export function deleteTask(store: OpenStore, idInput: string): DeleteResult {
   const id = requireId(store, idInput);
 
-  return writeTx(store.db, () => {
+  return writeTx(store.db, (now) => {
     const task = getTask(store, id);
     if (task === undefined) {
       throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
@@ -62,6 +63,26 @@ export function deleteTask(store: OpenStore, idInput: string): DeleteResult {
     const { unblocked } = reportUnblocked(store, id, () => {
       store.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
     });
+
+    // The last thing that happens to a task, so its history ends with an
+    // explanation rather than trailing off (ADR-008).
+    //
+    // Everything the event needs was read *before* the DELETE. Nothing here can
+    // be looked up now: the row is gone, so `epicIdFor` would find no parent
+    // and the title would be unrecoverable — which is exactly why the title is
+    // stamped onto the event and why `appendEvent` takes `epicId` rather than
+    // resolving it.
+    appendEvent(
+      store,
+      {
+        type: "deleted",
+        entityId: id,
+        epicId: epicIdFor(task),
+        actor: store.actor(),
+        title: task.title,
+      },
+      now,
+    );
 
     return { id, title: task.title, unblocked };
   });

@@ -13,6 +13,7 @@ import { writeTx } from "../db/connection.js";
 import type { Kind, Lane, Level, Priority } from "../enums.js";
 import { isTerminal, PRIORITY_DEFAULT } from "../enums.js";
 import { KatraException } from "../errors.js";
+import { appendEvent, epicIdFor } from "../events/repo.js";
 import { READINESS_VIEW } from "../graph/deps.js";
 import { listLinks } from "../graph/links.js";
 import {
@@ -172,7 +173,7 @@ export function createTask(store: OpenStore, input: NewTask): Task {
         ? null
         : requireEpicId(store, input.parentId);
 
-    return insertWithRetry((candidate) => {
+    const created = insertWithRetry((candidate) => {
       store.db
         .prepare(
           `INSERT INTO tasks
@@ -200,6 +201,27 @@ export function createTask(store: OpenStore, input: NewTask): Task {
         if (trimmed !== "") addTag.run(candidate, trimmed);
       }
     });
+
+    // After `insertWithRetry`, not inside its callback: the callback is retried
+    // on a primary-key collision, and an append that ever raised one would make
+    // the retry re-run the task insert too.
+    //
+    // The title is stamped onto the event because a `created` event outlives
+    // its task (ADR-008) — once the row is deleted, no join can recover what it
+    // was called.
+    appendEvent(
+      store,
+      {
+        type: "created",
+        entityId: created,
+        epicId: epicIdFor({ id: created, level, parentId }),
+        actor: store.actor(),
+        title,
+      },
+      now,
+    );
+
+    return created;
   });
 
   const created = getTask(store, id);

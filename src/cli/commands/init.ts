@@ -29,6 +29,7 @@ export function registerInit(program: Command, context: CliContext): void {
       const { store, created, warnings } = openStore(context.cwd, {
         createIfMissing: true,
         env: context.env,
+        actor: context.actor,
       });
 
       try {
