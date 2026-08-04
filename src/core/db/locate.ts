@@ -67,13 +67,13 @@ interface GitFailure {
  * "git is not installed" error rather than a Node internals dump.
  */
 function findGit(env: NodeJS.ProcessEnv): string | undefined {
-  const path = env["PATH"] ?? env["Path"] ?? "";
+  const path = env.PATH ?? env.Path ?? "";
   if (path === "") return undefined;
 
   // PATHEXT is Windows' list of extensions an extensionless name can take.
   const suffixes =
     process.platform === "win32"
-      ? (env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((ext) => ext !== "")
+      ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((ext) => ext !== "")
       : [""];
 
   for (const dir of path.split(delimiter)) {

@@ -70,6 +70,41 @@ describe("katra list", () => {
     ]);
   });
 
+  it("combines filters with AND rather than applying only the last", async () => {
+    // Every filter above is tested alone. The builder ANDs independent
+    // conditions into one WHERE, so a combination is where an over-broad or
+    // last-one-wins bug would show, and nothing exercised two at once.
+    const epic = await add(["the epic", "--level", "epic"]);
+    await add(["wanted", "--kind", "fix", "--lane", "Planned", "--parent", epic, "--tag", "hot"]);
+    await add([
+      "wrong kind",
+      "--kind",
+      "feat",
+      "--lane",
+      "Planned",
+      "--parent",
+      epic,
+      "--tag",
+      "hot",
+    ]);
+    await add([
+      "wrong lane",
+      "--kind",
+      "fix",
+      "--lane",
+      "Defined",
+      "--parent",
+      epic,
+      "--tag",
+      "hot",
+    ]);
+    await add(["wrong tag", "--kind", "fix", "--lane", "Planned", "--parent", epic]);
+
+    const matched = await list(["--kind", "fix", "--lane", "Planned", "--tag", "hot"]);
+
+    expect(matched.tasks.map((t) => t.title)).toEqual(["wanted"]);
+  });
+
   it("separates ready from blocked", async () => {
     const blocker = await add(["blocker"]);
     const blocked = await add(["blocked"]);

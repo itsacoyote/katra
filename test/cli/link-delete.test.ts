@@ -146,3 +146,33 @@ describe("registration", () => {
     expect(names).toEqual(expect.arrayContaining(["link", "delete"]));
   });
 });
+
+describe("deleting a task that carries everything", () => {
+  it("removes its tags, links and dependencies through the CLI", async () => {
+    // Covered at the core level; the CLI layer is a thin pass-through, but
+    // "thin" is an assumption worth one test rather than an argument.
+    const doomed = await add(["doomed", "--tag", "hot", "--tag", "cold"]);
+    const linked = await add(["linked"]);
+    const blocked = await add(["waiting on doomed"]);
+    await runCli(["link", doomed, linked], { cwd: repo.dir });
+    await runCli(["dep", blocked, "--blocked-by", doomed], { cwd: repo.dir });
+
+    const result = await runCli(["delete", doomed, "--force", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    const payload = result.json() as { unblocked: Array<{ id: string }> };
+    expect(payload.unblocked.map((t) => t.id)).toEqual([blocked]);
+
+    // The dependent is startable, the link is gone from the survivor's side,
+    // and the task itself is unfindable.
+    expect((await runCli(["show", doomed], { cwd: repo.dir })).exitCode).toBe(EXIT.user);
+    const survivor = (await runCli(["show", linked, "--json"], { cwd: repo.dir })).json() as {
+      links: unknown[];
+    };
+    expect(survivor.links).toEqual([]);
+    const ready = (await runCli(["list", "--ready", "--json"], { cwd: repo.dir })).json() as {
+      tasks: Array<{ id: string }>;
+    };
+    expect(ready.tasks.map((t) => t.id)).toContain(blocked);
+  });
+});
