@@ -10,7 +10,7 @@ A local, git-native, agent-first project manager and coordination layer for AI c
 
 **Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, and twelve commands over them (`init add show list update close cancel reopen delete dep link next`). Everything else in the spec is not: `brief`, `board`, typed notes, FTS5 search, claims and presence, external refs, snapshots, and the beads converter. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
 
-Six decisions in the spec were superseded during implementation; the ADRs in `docs/decisions/` win where they disagree.
+Eight decisions in the spec were superseded or refined during implementation; the ADRs in `docs/decisions/` win where they disagree.
 
 ## Project layout
 
