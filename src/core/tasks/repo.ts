@@ -13,6 +13,7 @@ import type { Kind, Lane, Level, Priority } from "../enums.js";
 import { PRIORITY_DEFAULT } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { READINESS_VIEW } from "../graph/deps.js";
+import { listLinks } from "../graph/links.js";
 import { narrowKind, narrowLane, narrowLevel, narrowPriority } from "../narrow.js";
 import type { OpenStore } from "../store.js";
 import { insertWithRetry, requireId } from "./ids.js";
@@ -170,6 +171,7 @@ export function showTask(store: OpenStore, idInput: string): TaskDetail {
   return {
     task,
     parent: task.parentId === null ? null : summarise(store, task.parentId),
+    links: listLinks(store, id),
   };
 }
 

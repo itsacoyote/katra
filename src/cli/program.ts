@@ -10,9 +10,11 @@ import { Command, CommanderError } from "commander";
 import { VERSION } from "../version.js";
 import { readPipedStdin } from "./body.js";
 import { registerAdd } from "./commands/add.js";
+import { registerDelete } from "./commands/delete.js";
 import { registerDep } from "./commands/dep.js";
 import { registerInit } from "./commands/init.js";
 import { registerLifecycle } from "./commands/lifecycle.js";
+import { registerLink } from "./commands/link.js";
 import { registerList } from "./commands/list.js";
 import { registerShow } from "./commands/show.js";
 import { registerUpdate } from "./commands/update.js";
@@ -73,6 +75,8 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerList(program, context);
   registerUpdate(program, context);
   registerLifecycle(program, context);
+  registerLink(program, context);
+  registerDelete(program, context);
 
   return program;
 }

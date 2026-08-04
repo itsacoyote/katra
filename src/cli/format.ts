@@ -35,6 +35,9 @@ export function formatTaskDetail(detail: TaskDetail): string {
 
   if (task.assignee !== null) lines.push(field("assignee", task.assignee));
   if (parent !== null) lines.push(field("epic", `${parent.id}  ${parent.title}`));
+  for (const [index, link] of detail.links.entries()) {
+    lines.push(field(index === 0 ? "links" : "", `${link.id}  ${link.title}`));
+  }
   if (task.tags.length > 0) lines.push(field("tags", task.tags.join(", ")));
 
   lines.push(field("created", task.createdAt));

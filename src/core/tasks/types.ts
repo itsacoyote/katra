@@ -43,6 +43,8 @@ export interface TaskDetail {
   readonly task: Task;
   /** The epic this task belongs to, resolved so output can name it. */
   readonly parent: TaskSummary | null;
+  /** Tasks associated with this one. Carries no blocking meaning. */
+  readonly links: readonly TaskSummary[];
 }
 
 /**
