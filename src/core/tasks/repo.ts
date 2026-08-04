@@ -15,52 +15,63 @@ import { isTerminal, PRIORITY_DEFAULT } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { READINESS_VIEW } from "../graph/deps.js";
 import { listLinks } from "../graph/links.js";
-import { narrowKind, narrowLane, narrowLevel, narrowPriority } from "../narrow.js";
+import {
+  narrowKind,
+  narrowLane,
+  narrowLevel,
+  narrowNullableText,
+  narrowPriority,
+  narrowText,
+} from "../narrow.js";
 import type { OpenStore } from "../store.js";
 import { insertWithRetry, requireId } from "./ids.js";
 import type { NewTask, Task, TaskDetail, TaskSummary } from "./types.js";
 
 /** The raw shape SQLite hands back for a task row. */
 interface TaskRow {
-  readonly id: string;
-  readonly level: string;
-  readonly kind: string;
-  readonly title: string;
-  readonly description: string | null;
-  readonly lane: string;
-  readonly priority: number;
-  readonly assignee: string | null;
-  readonly parent_id: string | null;
-  readonly created_at: string;
-  readonly updated_at: string;
-  readonly closed_at: string | null;
-  readonly close_reason: string | null;
+  readonly id: unknown;
+  readonly level: unknown;
+  readonly kind: unknown;
+  readonly title: unknown;
+  readonly description: unknown;
+  readonly lane: unknown;
+  readonly priority: unknown;
+  readonly assignee: unknown;
+  readonly parent_id: unknown;
+  readonly created_at: unknown;
+  readonly updated_at: unknown;
+  readonly closed_at: unknown;
+  readonly close_reason: unknown;
 }
 
 function readTags(store: OpenStore, id: string): string[] {
   return store.db
     .prepare("SELECT tag FROM tags WHERE task_id = ? ORDER BY tag")
     .all(id)
-    .map((row) => (row as { tag: string }).tag);
+    .map((row) => narrowText((row as { tag: unknown }).tag, "tag"));
 }
 
 /** Maps one row into a domain object, narrowing every constrained value. */
 function rowToTask(store: OpenStore, row: TaskRow): Task {
+  // Every column, not just the four with constrained value sets. The store is
+  // written by concurrent processes and, for the migration story, by older
+  // builds — so a row is untrusted input, and "untrusted" includes its types.
+  const id = narrowText(row.id, "id");
   return {
-    id: row.id,
+    id,
     level: narrowLevel(row.level),
     kind: narrowKind(row.kind),
-    title: row.title,
-    description: row.description,
+    title: narrowText(row.title, "title"),
+    description: narrowNullableText(row.description, "description"),
     lane: narrowLane(row.lane),
     priority: narrowPriority(row.priority),
-    assignee: row.assignee,
-    parentId: row.parent_id,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    closedAt: row.closed_at,
-    closeReason: row.close_reason,
-    tags: readTags(store, row.id),
+    assignee: narrowNullableText(row.assignee, "assignee"),
+    parentId: narrowNullableText(row.parent_id, "parent_id"),
+    createdAt: narrowText(row.created_at, "created_at"),
+    updatedAt: narrowText(row.updated_at, "updated_at"),
+    closedAt: narrowNullableText(row.closed_at, "closed_at"),
+    closeReason: narrowNullableText(row.close_reason, "close_reason"),
+    tags: readTags(store, id),
   };
 }
 
@@ -76,8 +87,8 @@ function summariseById(store: OpenStore, id: string): TaskSummary | null {
   const row = store.db.prepare(SELECT_TASK).get(id) as TaskRow | undefined;
   if (row === undefined) return null;
   return {
-    id: row.id,
-    title: row.title,
+    id: narrowText(row.id, "id"),
+    title: narrowText(row.title, "title"),
     level: narrowLevel(row.level),
     lane: narrowLane(row.lane),
   };

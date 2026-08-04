@@ -22,6 +22,8 @@ import {
   sqlEnum,
   TERMINAL_LANES,
 } from "../../enums.js";
+import { KatraException } from "../../errors.js";
+import { ID_PREFIX, ID_SUFFIX_LENGTH } from "../../tasks/id-format.js";
 import type { Migration } from "../migrate.js";
 
 export interface SchemaSets {
@@ -44,13 +46,50 @@ export const DEFAULT_SCHEMA_SETS: SchemaSets = {
   priorityDefault: PRIORITY_DEFAULT,
 };
 
+/**
+ * The `GLOB` pattern an id must match, built from the id format itself.
+ *
+ * Generated rather than written out, for the same reason `sqlEnum` exists: a
+ * hardcoded pattern is a second definition of the id shape that drifts the
+ * moment the length changes.
+ */
+function idPattern(): string {
+  return `${ID_PREFIX}${"[0-9a-z]".repeat(ID_SUFFIX_LENGTH)}`;
+}
+
 /** Renders the initial DDL for the given value sets. */
 export function buildInitDdl(sets: SchemaSets = DEFAULT_SCHEMA_SETS): string {
+  // The string sets go through sqlEnum, which doubles quotes so a value cannot
+  // terminate its own literal. The numbers have no such escape and are
+  // interpolated straight into DDL, so they are checked instead. Unreachable
+  // with DEFAULT_SCHEMA_SETS — but `sets` is a parameter precisely so callers
+  // can pass their own, which is exactly the trap sqlEnum's comment warns about.
+  for (const [name, value] of [
+    ["priorityMin", sets.priorityMin],
+    ["priorityMax", sets.priorityMax],
+    ["priorityDefault", sets.priorityDefault],
+  ] as const) {
+    if (!Number.isInteger(value)) {
+      throw new KatraException({
+        code: "validation",
+        message: `schema ${name} must be an integer, got ${String(value)}`,
+        field: name,
+        value,
+      });
+    }
+  }
+
   const terminal = sqlEnum(sets.terminalLanes);
 
   return `
 CREATE TABLE tasks (
-  id           TEXT PRIMARY KEY,
+  -- The format is enforced here, not merely produced by generateId. The cycle
+  -- walk's instr guard is only exact because no id can be a substring of
+  -- another, which holds only while every id has the same length and alphabet.
+  -- A single hand-written id defeats cycle detection silently: verified that
+  -- with the ids kt-aaaaaa and a, addDependency accepts an edge closing a real
+  -- loop, and nothing ever reports it.
+  id           TEXT PRIMARY KEY CHECK (id GLOB '${idPattern()}'),
   level        TEXT NOT NULL CHECK (level IN (${sqlEnum(sets.levels)})),
   kind         TEXT NOT NULL CHECK (kind IN (${sqlEnum(sets.kinds)})),
   title        TEXT NOT NULL,

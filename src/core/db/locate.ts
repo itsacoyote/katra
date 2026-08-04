@@ -14,7 +14,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { join } from "node:path";
+import { existsSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import type { StoreWarning } from "../contract.js";
 import { KatraException } from "../errors.js";
 
@@ -52,10 +53,48 @@ interface GitFailure {
   readonly spawnFailed: boolean;
 }
 
+/**
+ * Locates the `git` binary on `PATH`, as an absolute path.
+ *
+ * **Not just `"git"`.** On Windows, libuv resolves a bare program name by
+ * looking in the *current directory first*, then `PATH` — POSIX `execvp` does
+ * not. katra's whole premise is running inside arbitrary repositories, so a
+ * repo containing `git.exe`, `git.cmd` or `git.bat` would have that file
+ * executed with the user's privileges by every katra command. Passing a path
+ * containing a separator makes libuv skip the cwd probe entirely.
+ *
+ * Returns undefined when nothing matches, so the caller raises katra's own
+ * "git is not installed" error rather than a Node internals dump.
+ */
+function findGit(env: NodeJS.ProcessEnv): string | undefined {
+  const path = env["PATH"] ?? env["Path"] ?? "";
+  if (path === "") return undefined;
+
+  // PATHEXT is Windows' list of extensions an extensionless name can take.
+  const suffixes =
+    process.platform === "win32"
+      ? (env["PATHEXT"] ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((ext) => ext !== "")
+      : [""];
+
+  for (const dir of path.split(delimiter)) {
+    if (dir === "") continue;
+    for (const suffix of suffixes) {
+      const candidate = join(dir, `git${suffix}`);
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return undefined;
+}
+
 /** Runs `git` in `cwd`, returning stdout or a classified failure. */
 function runGit(cwd: string, env: NodeJS.ProcessEnv, args: string[]): string {
+  const git = findGit(env);
+  if (git === undefined) {
+    throw explainGitFailure({ stderr: "", spawnFailed: true });
+  }
+
   try {
-    return execFileSync("git", args, {
+    return execFileSync(git, args, {
       cwd,
       env,
       encoding: "utf8",

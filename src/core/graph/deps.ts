@@ -64,34 +64,81 @@ export function listBlockers(store: OpenStore, id: string): Blocker[] {
 }
 
 /**
- * Finds the cycle that adding `taskId depends on dependsOnId` would close, or
- * null when there is none.
+ * Whether `taskId` is reachable from `dependsOnId` — i.e. whether the proposed
+ * edge would close a loop.
  *
- * Walks outward from `dependsOnId` following its own dependencies; if that
- * walk reaches `taskId`, the proposed edge closes a loop. A recursive CTE
- * rather than application-side traversal: measured at under 5ms to detect and
- * name a cycle across a 2,000-node chain, so pulling the graph into JavaScript
- * would be slower and more code.
+ * `UNION`, not `UNION ALL`: deduping makes this a node walk, O(V+E). The
+ * path-building query below is a *path* walk, which enumerates every simple
+ * path and is exponential in depth — measured on a layered graph at 25ms for
+ * 32 tasks, 3.2s for 50, and **17.5s for 60**, roughly 5× per added layer.
+ * Its `LIMIT 1` only short-circuits when a cycle exists, so the common case —
+ * no cycle, which is every successful `katra dep` — paid the full cost.
  *
- * Every id is the same length, so no id can be a substring of another and the
- * `instr` guard that stops the walk revisiting a node is exact.
+ * Detection and naming are therefore split. This answers "is there a cycle?"
+ * on the hot path; `cyclePath` runs only after this says yes, where `LIMIT 1`
+ * genuinely stops early and the cost is bounded by the cycle it found.
+ * Measured after the split: 2,000 tasks and 39,200 edges in 30ms.
  */
-function findCycle(store: OpenStore, taskId: string, dependsOnId: string): string[] | null {
+function closesCycle(store: OpenStore, taskId: string, dependsOnId: string): boolean {
   const row = store.db
     .prepare(
-      `WITH RECURSIVE walk(id, path) AS (
-         SELECT ?, ?
-         UNION ALL
-         SELECT d.depends_on_id, w.path || '>' || d.depends_on_id
-           FROM deps d
-           JOIN walk w ON d.task_id = w.id
-          WHERE instr(w.path, d.depends_on_id) = 0
+      `WITH RECURSIVE reach(id) AS (
+         SELECT ?
+         UNION
+         SELECT d.depends_on_id FROM deps d JOIN reach r ON d.task_id = r.id
        )
-       SELECT path FROM walk WHERE id = ? LIMIT 1`,
+       SELECT 1 AS hit FROM reach WHERE id = ? LIMIT 1`,
     )
-    .get(dependsOnId, dependsOnId, taskId) as { path: string } | undefined;
+    .get(dependsOnId, taskId) as { hit: number } | undefined;
 
-  return row === undefined ? null : [taskId, ...row.path.split(">")];
+  return row !== undefined;
+}
+
+/**
+ * Names the cycle that adding `taskId depends on dependsOnId` would close.
+ *
+ * A refusal that only says "cycle" leaves the reader to find it themselves,
+ * which is why this exists — but it only runs once {@link closesCycle} has
+ * confirmed there is one.
+ *
+ * A breadth-first walk in JavaScript rather than a recursive CTE. The SQL
+ * version enumerated simple paths and was exponential in depth even with
+ * `LIMIT 1`, because SQLite's queue reaches the target only after expanding
+ * most of the frontier: measured at 67 seconds to *name* a cycle across 55
+ * tasks in twelve layers. Visiting each node once is O(V+E), and breadth-first
+ * yields the **shortest** cycle, which is a better answer than the arbitrary
+ * one the CTE happened to find first.
+ */
+function cyclePath(store: OpenStore, taskId: string, dependsOnId: string): string[] {
+  const neighbours = store.db.prepare("SELECT depends_on_id AS id FROM deps WHERE task_id = ?");
+  const cameFrom = new Map<string, string>();
+  const seen = new Set<string>([dependsOnId]);
+  const queue: string[] = [dependsOnId];
+
+  for (let head = 0; head < queue.length; head++) {
+    const current = queue[head] as string;
+
+    if (current === taskId) {
+      const path: string[] = [];
+      for (let at: string | undefined = current; at !== undefined; at = cameFrom.get(at)) {
+        path.unshift(at);
+      }
+      // Closed with the proposed edge, so the loop reads taskId -> … -> taskId.
+      return [taskId, ...path];
+    }
+
+    for (const row of neighbours.all(current) as Array<{ id: string }>) {
+      if (seen.has(row.id)) continue;
+      seen.add(row.id);
+      cameFrom.set(row.id, current);
+      queue.push(row.id);
+    }
+  }
+
+  // Unreachable: `closesCycle` already said the target is reachable. Naming
+  // just the endpoints beats throwing — the refusal is correct either way, and
+  // a thinner message is better than turning it into a crash.
+  return [taskId, dependsOnId];
 }
 
 /**
@@ -130,12 +177,11 @@ export function addDependency(
       });
     }
 
-    const cycle = findCycle(store, taskId, dependsOnId);
-    if (cycle !== null) {
+    if (closesCycle(store, taskId, dependsOnId)) {
       throw new KatraException({
         code: "cycle",
         message: `${taskId} cannot depend on ${dependsOnId}: that would close a dependency cycle`,
-        path: cycle,
+        path: cyclePath(store, taskId, dependsOnId),
       });
     }
 

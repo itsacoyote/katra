@@ -1,6 +1,12 @@
 
 CREATE TABLE tasks (
-  id           TEXT PRIMARY KEY,
+  -- The format is enforced here, not merely produced by generateId. The cycle
+  -- walk's instr guard is only exact because no id can be a substring of
+  -- another, which holds only while every id has the same length and alphabet.
+  -- A single hand-written id defeats cycle detection silently: verified that
+  -- with the ids kt-aaaaaa and a, addDependency accepts an edge closing a real
+  -- loop, and nothing ever reports it.
+  id           TEXT PRIMARY KEY CHECK (id GLOB 'kt-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z]'),
   level        TEXT NOT NULL CHECK (level IN ('epic','task')),
   kind         TEXT NOT NULL CHECK (kind IN ('feat','fix','refactor','perf','docs','test','chore')),
   title        TEXT NOT NULL,

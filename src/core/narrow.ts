@@ -37,3 +37,30 @@ export function narrowPriority(value: unknown): Priority {
   const candidate = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
   return isPriority(candidate) ? candidate : invalid("priority", value, PRIORITIES);
 }
+
+/**
+ * Narrows a column that must hold text.
+ *
+ * The four enum columns above are checked because their *values* are
+ * constrained. These are checked because their *type* is: SQLite's affinity
+ * rules let a BLOB sit happily in a `TEXT NOT NULL` column, and better-sqlite3
+ * hands one back as a Buffer. A cast would then let it reach `formatTaskDetail`,
+ * where `.trim()` throws a TypeError that surfaces as `internal` and exit 4 —
+ * telling an agent to escalate a broken machine when the truth is one malformed
+ * row. Under `--json` it serialises as `{"type":"Buffer","data":[…]}`, which
+ * type-checks against nothing katra publishes.
+ */
+export function narrowText(value: unknown, field: string): string {
+  if (typeof value === "string") return value;
+  throw new KatraException({
+    code: "validation",
+    message: `${field} must be text — the stored value is ${typeof value}, so this row is malformed`,
+    field,
+    value,
+  });
+}
+
+/** The same, for a column that may legitimately be NULL. */
+export function narrowNullableText(value: unknown, field: string): string | null {
+  return value === null || value === undefined ? null : narrowText(value, field);
+}

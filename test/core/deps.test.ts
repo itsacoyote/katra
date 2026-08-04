@@ -334,3 +334,65 @@ describe("tie-breaking on the join-driven queries", () => {
     expect(listBlockers(fixture.store, hub).map((t) => t.title)).toEqual(["first", "second"]);
   });
 });
+
+describe("cycle detection cost", () => {
+  it("stays fast on a layered graph, where path enumeration is exponential", () => {
+    // The detection query used UNION ALL with an instr path guard, which
+    // enumerates every *simple path* rather than every node. Measured on this
+    // exact shape: 25ms at 32 tasks, 3.2s at 50, 17.5s at 60 — roughly 5x per
+    // added layer, and the no-cycle case (every successful `dep`) paid it in
+    // full, because LIMIT 1 only short-circuits when a cycle is found.
+    //
+    // 60 tasks is a small backlog for a project tracker, so this was a hang an
+    // agent would hit in normal use. Detection now dedupes with UNION, making
+    // it a node walk.
+    const layers = 12;
+    const perLayer = 5;
+    const ids: string[][] = [];
+    for (let layer = 0; layer < layers; layer++) {
+      ids.push(
+        Array.from({ length: perLayer }, (_unused, n) =>
+          seedTask(fixture.store, { title: `L${layer}-${n}` }),
+        ),
+      );
+    }
+    // Each task depends on every task in the next layer: 55 tasks, 275 edges,
+    // and 5^11 distinct paths through it.
+    for (let layer = 0; layer < layers - 1; layer++) {
+      for (const from of ids[layer] ?? []) {
+        for (const to of ids[layer + 1] ?? []) seedDep(fixture.store, from, to);
+      }
+    }
+
+    const first = ids[0]?.[0] as string;
+    const last = ids[layers - 1]?.[0] as string;
+
+    const started = performance.now();
+    // The expensive direction: no cycle, so the walk cannot stop early.
+    expect(() => addDependency(fixture.store, last, first)).toThrowError(/cycle/);
+    const elapsed = performance.now() - started;
+
+    // Generous by two orders of magnitude against the measured 17.5s, so this
+    // fails on a regression rather than on a slow CI runner.
+    expect(elapsed).toBeLessThan(2000);
+  });
+
+  it("still names the full path when it does refuse", () => {
+    // Detection and naming are separate queries now; the refusal must not have
+    // lost the path it exists to report.
+    const a = seedTask(fixture.store, { id: "kt-paaaaa" });
+    const b = seedTask(fixture.store, { id: "kt-pbbbbb" });
+    const c = seedTask(fixture.store, { id: "kt-pccccc" });
+    addDependency(fixture.store, a, b);
+    addDependency(fixture.store, b, c);
+
+    try {
+      addDependency(fixture.store, c, a);
+      expect.unreachable("should have refused");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      if (error.detail.code !== "cycle") throw new Error("expected a cycle error");
+      expect(error.detail.path).toEqual([c, a, b, c]);
+    }
+  });
+});

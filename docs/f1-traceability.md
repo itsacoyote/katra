@@ -11,7 +11,7 @@ It is a real check, not a formality. Two review passes have now found tests here
 
 Each row below is marked covered because a test was written or rewritten, not because the criterion looked satisfied.
 
-**Result: all 46 acceptance criteria covered**, plus requirement 55 (the tie-break on the join-driven listings), which had no criterion of its own and no test. `pnpm check` passes with 416 tests.
+**Result: all 46 acceptance criteria covered**, plus requirement 55 (the tie-break on the join-driven listings), which had no criterion of its own and no test. `pnpm check` passes with 423 tests.
 
 Rows marked † are not numbered acceptance criteria — they are requirements the reviews found uncovered, given a row here so they are not lost again.
 

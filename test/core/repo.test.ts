@@ -226,3 +226,36 @@ describe("showTask", () => {
     }
   });
 });
+
+describe("reading a malformed row", () => {
+  it("refuses a text column holding a BLOB rather than handing back a Buffer", () => {
+    // SQLite's affinity rules let a BLOB sit in a TEXT NOT NULL column, and
+    // better-sqlite3 returns it as a Buffer. Cast rather than narrowed, it
+    // reached formatTaskDetail, where .trim() threw a TypeError reported as
+    // `internal` and exit 4 — telling an agent to escalate a broken machine
+    // when the truth is one malformed row. Under --json it serialised as
+    // {"type":"Buffer","data":[…]}, which matches nothing katra publishes.
+    const id = seedTask(fixture.store, { title: "fine for now" });
+    fixture.store.db
+      .prepare("UPDATE tasks SET title = ? WHERE id = ?")
+      .run(Buffer.from("not text"), id);
+
+    try {
+      getTask(fixture.store, id);
+      expect.unreachable("should have refused the row");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("validation");
+      expect(error.message).toContain("title");
+      expect(error.message).toMatch(/malformed/);
+    }
+  });
+
+  it("still accepts a NULL in a column that allows one", () => {
+    const id = seedTask(fixture.store, { description: null, assignee: null });
+    const task = getTask(fixture.store, id);
+
+    expect(task?.description).toBeNull();
+    expect(task?.assignee).toBeNull();
+  });
+});

@@ -8,6 +8,7 @@ import {
   MIGRATIONS,
 } from "../../src/core/db/migrations/index.js";
 import { LANES } from "../../src/core/enums.js";
+import { generateId } from "../../src/core/tasks/id-format.js";
 
 type DB = Database.Database;
 
@@ -92,6 +93,25 @@ describe("database-level rejection of every constrained field", () => {
     db = freshDb();
   });
 
+  it("rejects an id that does not match the generated format", () => {
+    // The cycle walk's path guard uses instr, which is only exact while no id
+    // can be a substring of another — true only if every id has the same
+    // length and alphabet. That invariant lived in a comment. Verified: with
+    // the ids `kt-aaaaaa` and `a` in one store, addDependency accepts an edge
+    // that closes a real loop and nothing ever reports it.
+    for (const id of ["a", "kt-abc", "kt-aaaaaaa", "kt-AAAAAA", "kt-aaaa_a", "task-123456"]) {
+      expect(() => rawInsert(db, baseTask({ id })), `${id} should be rejected`).toThrowError(
+        /CHECK constraint failed/,
+      );
+    }
+  });
+
+  it("accepts an id the generator could actually produce", () => {
+    // The guard on the guard: a pattern that rejected everything would satisfy
+    // the test above without katra being able to write a row at all.
+    expect(() => rawInsert(db, baseTask({ id: generateId() }))).not.toThrow();
+  });
+
   it("rejects an insert whose level is outside the allowed set", () => {
     expect(() => rawInsert(db, baseTask({ level: "story" }))).toThrowError(
       /CHECK constraint failed/,
@@ -157,7 +177,7 @@ describe("hierarchy rules", () => {
   });
 
   it("rejects a task whose parent_id references a row that does not exist", () => {
-    expect(() => rawInsert(db, baseTask({ id: "kt-task01", parent_id: "kt-ghost" }))).toThrowError(
+    expect(() => rawInsert(db, baseTask({ id: "kt-task01", parent_id: "kt-ghost0" }))).toThrowError(
       /must reference an epic/,
     );
   });
@@ -267,8 +287,8 @@ describe("terminal lanes always carry closed_at", () => {
   });
 
   it("rejects promoting a parented task to an epic", () => {
-    rawInsert(db, baseTask({ id: "kt-epicX", level: "epic", closed_at: null }));
-    rawInsert(db, baseTask({ id: "kt-child1", parent_id: "kt-epicX" }));
+    rawInsert(db, baseTask({ id: "kt-epic01", level: "epic", closed_at: null }));
+    rawInsert(db, baseTask({ id: "kt-child1", parent_id: "kt-epic01" }));
     expect(() =>
       db.prepare("UPDATE tasks SET level='epic' WHERE id='kt-child1'").run(),
     ).toThrowError(/CHECK constraint failed/);
@@ -376,5 +396,23 @@ describe("the DDL is generated, not copied", () => {
 
     expect(ddl).toContain("BETWEEN 7 AND 9");
     expect(ddl).toContain("DEFAULT 8");
+  });
+});
+
+describe("buildInitDdl's own inputs", () => {
+  it("refuses a non-integer priority bound rather than interpolating it", () => {
+    // sqlEnum escapes the string sets; the numbers have no such escape and go
+    // straight into the DDL. Unreachable with DEFAULT_SCHEMA_SETS — but `sets`
+    // is a parameter precisely so callers can pass their own, which is the
+    // trap sqlEnum's own comment warns about for the next person.
+    for (const bad of [
+      { priorityMin: 1.5 },
+      { priorityMax: Number.NaN },
+      { priorityDefault: "2 OR 1=1" as unknown as number },
+    ]) {
+      expect(() => buildInitDdl({ ...DEFAULT_SCHEMA_SETS, ...bad })).toThrowError(
+        /must be an integer/,
+      );
+    }
   });
 });
