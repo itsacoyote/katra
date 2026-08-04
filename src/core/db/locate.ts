@@ -198,7 +198,12 @@ function checkAmbientRedirect(
 
   let unredirected: string;
   try {
-    unredirected = runGit(cwd, clean, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+    // Normalised on both sides, or the comparison is separator-sensitive: git
+    // reports forward slashes on Windows while `commonDir` was normalised by
+    // the caller, so every invocation would look redirected.
+    unredirected = normalize(
+      runGit(cwd, clean, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    );
   } catch {
     // Without the variables this directory is not a repository at all, so they
     // are not redirecting resolution — they are the only reason it works here.

@@ -1,5 +1,5 @@
 import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, normalize } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { DB_FILE_NAME, resolveStoreLocation, STORE_DIR_NAME } from "../../src/core/db/locate.js";
 import { isKatraException } from "../../src/core/errors.js";
@@ -28,7 +28,12 @@ describe("resolveStoreLocation", () => {
     cleanups.push(() => repo.cleanup());
 
     const location = resolveStoreLocation(repo.dir);
-    const commonDir = git(repo.dir, "rev-parse", "--path-format=absolute", "--git-common-dir");
+    // Normalised, because git reports forward slashes on Windows and katra
+    // returns the platform's own separators — see "returns three paths that
+    // agree about separators" above for why it must.
+    const commonDir = normalize(
+      git(repo.dir, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+    );
 
     expect(location.commonDir).toBe(commonDir);
     expect(location.storeDir).toBe(join(commonDir, STORE_DIR_NAME));
