@@ -16,6 +16,7 @@ import { registerInit } from "./commands/init.js";
 import { registerLifecycle } from "./commands/lifecycle.js";
 import { registerLink } from "./commands/link.js";
 import { registerList } from "./commands/list.js";
+import { registerNext } from "./commands/next.js";
 import { registerShow } from "./commands/show.js";
 import { registerUpdate } from "./commands/update.js";
 import type { OutputStreams } from "./output.js";
@@ -31,6 +32,15 @@ export interface CliContext {
    * stdin, which would block rather than fail.
    */
   readonly readStdin: () => string | undefined;
+  /**
+   * Requests a non-zero exit without raising an error.
+   *
+   * For answers that are legitimate but negative — `next` finding nothing
+   * ready is the case that needs it. Throwing would replace the structured
+   * answer with an error envelope, and returning zero would read as "all
+   * done" when the truth is "everything is stuck".
+   */
+  setExitCode(code: number): void;
 }
 
 export interface CreateProgramOptions {
@@ -38,6 +48,7 @@ export interface CreateProgramOptions {
   readonly streams?: OutputStreams;
   readonly env?: NodeJS.ProcessEnv;
   readonly readStdin?: () => string | undefined;
+  readonly onExitCode?: (code: number) => void;
 }
 
 /** Builds the program. Registering a command is a one-line call per module. */
@@ -47,6 +58,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     streams: options.streams ?? processStreams,
     env: options.env ?? process.env,
     readStdin: options.readStdin ?? readPipedStdin,
+    setExitCode: options.onExitCode ?? (() => undefined),
   };
 
   const program = new Command();
@@ -77,6 +89,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerLifecycle(program, context);
   registerLink(program, context);
   registerDelete(program, context);
+  registerNext(program, context);
 
   return program;
 }
@@ -90,11 +103,18 @@ export async function run(
   options: CreateProgramOptions = {},
 ): Promise<number> {
   const streams = options.streams ?? processStreams;
-  const program = createProgram({ ...options, streams });
+  let requested: number = EXIT.ok;
+  const program = createProgram({
+    ...options,
+    streams,
+    onExitCode: (code) => {
+      requested = code;
+    },
+  });
 
   try {
     await program.parseAsync([...argv], { from: "user" });
-    return EXIT.ok;
+    return requested;
   } catch (error) {
     if (error instanceof CommanderError) {
       // `--help` and `--version` arrive here too; commander has already
