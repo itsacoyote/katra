@@ -19,6 +19,8 @@ export interface CliRun {
 export interface RunCliOptions {
   readonly cwd: string;
   readonly env?: NodeJS.ProcessEnv;
+  /** Text to present as piped stdin. Omit for "nothing piped". */
+  readonly stdin?: string;
 }
 
 /** Invokes katra with `args`, as a user would type them after `katra`. */
@@ -29,6 +31,8 @@ export async function runCli(args: readonly string[], options: RunCliOptions): P
   const exitCode = await run(args, {
     cwd: options.cwd,
     env: options.env ?? process.env,
+    // Never touch the runner's real stdin: reading it would block, not fail.
+    readStdin: () => options.stdin,
     streams: {
       out: (text) => {
         stdout += text;

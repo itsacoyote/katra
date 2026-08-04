@@ -8,7 +8,10 @@
 
 import { Command, CommanderError } from "commander";
 import { VERSION } from "../version.js";
+import { readPipedStdin } from "./body.js";
+import { registerAdd } from "./commands/add.js";
 import { registerInit } from "./commands/init.js";
+import { registerShow } from "./commands/show.js";
 import type { OutputStreams } from "./output.js";
 import { EXIT, emitError, processStreams } from "./output.js";
 
@@ -17,12 +20,18 @@ export interface CliContext {
   readonly cwd: string;
   readonly streams: OutputStreams;
   readonly env: NodeJS.ProcessEnv;
+  /**
+   * Reads piped stdin. Injectable so a test never consumes the runner's own
+   * stdin, which would block rather than fail.
+   */
+  readonly readStdin: () => string | undefined;
 }
 
 export interface CreateProgramOptions {
   readonly cwd?: string;
   readonly streams?: OutputStreams;
   readonly env?: NodeJS.ProcessEnv;
+  readonly readStdin?: () => string | undefined;
 }
 
 /** Builds the program. Registering a command is a one-line call per module. */
@@ -31,6 +40,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
     cwd: options.cwd ?? process.cwd(),
     streams: options.streams ?? processStreams,
     env: options.env ?? process.env,
+    readStdin: options.readStdin ?? readPipedStdin,
   };
 
   const program = new Command();
@@ -53,6 +63,8 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   });
 
   registerInit(program, context);
+  registerAdd(program, context);
+  registerShow(program, context);
 
   return program;
 }

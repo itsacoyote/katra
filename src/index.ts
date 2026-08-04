@@ -60,4 +60,7 @@ export {
   type IdResolution,
   MIN_PREFIX_LENGTH,
 } from "./core/tasks/ids.js";
+// The task model. The core functions that operate on these take an OpenStore,
+// so they are not re-exported here for the same reason as openStore.
+export type { NewTask, Task, TaskDetail, TaskSummary } from "./core/tasks/types.js";
 export { VERSION } from "./version.js";
