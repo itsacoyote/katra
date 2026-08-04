@@ -8,7 +8,7 @@ import {
   MIGRATIONS,
 } from "../../src/core/db/migrations/index.js";
 import { LANES } from "../../src/core/enums.js";
-import { generateId } from "../../src/core/tasks/id-format.js";
+import { generateId } from "../../src/core/id-format.js";
 
 type DB = Database.Database;
 

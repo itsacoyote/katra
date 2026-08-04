@@ -1,5 +1,7 @@
+import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isKatraException } from "../../src/core/errors.js";
+import { idPattern, NOTE_ID_PREFIX } from "../../src/core/id-format.js";
 import {
   generateId,
   ID_PREFIX,
@@ -54,7 +56,111 @@ describe("generateId", () => {
   });
 });
 
+describe("generateId across id spaces", () => {
+  it("generates an id with the prefix it was given", () => {
+    const note = generateId(NOTE_ID_PREFIX);
+
+    expect(note).toMatch(/^nt-[0-9a-z]{6}$/);
+    expect(note.startsWith(NOTE_ID_PREFIX)).toBe(true);
+  });
+
+  it("still mints a task id when no prefix is given", () => {
+    // `generateId()` is published from src/index.ts and has always meant a task
+    // id. Making the prefix required would have been a breaking change to the
+    // package's only id function.
+    expect(generateId()).toMatch(/^kt-[0-9a-z]{6}$/);
+  });
+
+  it("varies only the prefix, never the suffix format", () => {
+    // The alphabet, the length and the byte-rejection loop are the id format
+    // itself. A parameterisation that let them drift per entity would make
+    // `kt-` and `nt-` two different id schemes wearing one function.
+    for (const prefix of [ID_PREFIX, NOTE_ID_PREFIX, "zz-", ""]) {
+      const id = generateId(prefix);
+      expect(id.slice(prefix.length)).toMatch(/^[0-9a-z]{6}$/);
+      expect(id).toHaveLength(prefix.length + ID_SUFFIX_LENGTH);
+    }
+  });
+
+  it("does not collide across two thousand note ids", () => {
+    const ids = new Set(Array.from({ length: 2000 }, () => generateId(NOTE_ID_PREFIX)));
+    expect(ids.size).toBe(2000);
+  });
+});
+
+describe("idPattern", () => {
+  it("builds the GLOB from the id format rather than a hardcoded string", () => {
+    expect(idPattern(ID_PREFIX)).toBe("kt-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z]");
+    expect(idPattern(NOTE_ID_PREFIX)).toBe("nt-[0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z][0-9a-z]");
+  });
+
+  it("emits one character class per suffix character", () => {
+    // Falsifiability: the two assertions above would also pass against a pair
+    // of hardcoded strings. Counting against ID_SUFFIX_LENGTH cannot — it is
+    // the constant the pattern is supposed to be derived from.
+    const classes = idPattern("x-").match(/\[0-9a-z\]/g) ?? [];
+    expect(classes).toHaveLength(ID_SUFFIX_LENGTH);
+    expect(idPattern("x-").startsWith("x-")).toBe(true);
+  });
+
+  it("matches every id generated for its prefix and rejects the other space", () => {
+    // Asserted against SQLite's own GLOB, not a hand-rolled equivalent: the
+    // pattern's only job is to go into a CHECK constraint, and a
+    // reimplementation here would be testing my regex rather than the
+    // constraint. A mismatch means either every insert fails or the constraint
+    // is decorative.
+    const db = new Database(":memory:");
+    try {
+      const matches = db.prepare("SELECT ? GLOB ? AS hit");
+      const glob = (value: string, pattern: string): boolean =>
+        (matches.get(value, pattern) as { hit: number }).hit === 1;
+
+      for (let i = 0; i < 50; i++) {
+        expect(glob(generateId(ID_PREFIX), idPattern(ID_PREFIX))).toBe(true);
+        expect(glob(generateId(NOTE_ID_PREFIX), idPattern(NOTE_ID_PREFIX))).toBe(true);
+        expect(glob(generateId(ID_PREFIX), idPattern(NOTE_ID_PREFIX))).toBe(false);
+      }
+
+      // Length is load-bearing too: a suffix one character short or long must
+      // fail, or the constraint would admit ids nothing generates.
+      expect(glob("kt-abcde", idPattern(ID_PREFIX))).toBe(false);
+      expect(glob("kt-abcdefg", idPattern(ID_PREFIX))).toBe(false);
+      expect(glob("kt-ABCDEF", idPattern(ID_PREFIX))).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("insertWithRetry", () => {
+  it("mints from the id space it was given", () => {
+    const seen: string[] = [];
+    const id = insertWithRetry((candidate) => {
+      seen.push(candidate);
+    }, NOTE_ID_PREFIX);
+
+    expect(id).toMatch(/^nt-[0-9a-z]{6}$/);
+    expect(seen).toEqual([id]);
+  });
+
+  it("retries within the note id space rather than falling back to tasks", () => {
+    // The retry regenerates, and a regeneration that dropped the prefix would
+    // put a kt- id into the notes table — where the CHECK constraint rejects
+    // it, surfacing as an unexplained failure several attempts later.
+    const attempts: string[] = [];
+    insertWithRetry((candidate) => {
+      attempts.push(candidate);
+      if (attempts.length < 3) {
+        throw Object.assign(new Error("UNIQUE constraint failed: notes.id"), {
+          code: "SQLITE_CONSTRAINT_PRIMARYKEY",
+        });
+      }
+    }, NOTE_ID_PREFIX);
+
+    expect(attempts).toHaveLength(3);
+    expect(attempts.every((id) => id.startsWith(NOTE_ID_PREFIX))).toBe(true);
+  });
+
   it("returns the id the insert accepted", () => {
     const seen: string[] = [];
     const id = insertWithRetry((candidate) => {

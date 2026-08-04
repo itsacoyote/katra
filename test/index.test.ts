@@ -128,7 +128,7 @@ describe("the public barrel", () => {
       "core/contract.ts",
       "core/enums.ts",
       "core/errors.ts",
-      "core/tasks/id-format.ts",
+      "core/id-format.ts",
       "core/tasks/types.ts",
       "index.ts",
       "version.ts",

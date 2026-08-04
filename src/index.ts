@@ -78,7 +78,7 @@ export {
   ID_PREFIX,
   ID_SUFFIX_LENGTH,
   MIN_PREFIX_LENGTH,
-} from "./core/tasks/id-format.js";
+} from "./core/id-format.js";
 // The task model: what `add` and `show` print.
 export type { Task, TaskDetail, TaskSummary } from "./core/tasks/types.js";
 export { VERSION } from "./version.js";

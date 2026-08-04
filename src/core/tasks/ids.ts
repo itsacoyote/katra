@@ -10,10 +10,10 @@
  */
 
 import { KatraException } from "../errors.js";
+import { generateId, ID_PREFIX, MIN_PREFIX_LENGTH } from "../id-format.js";
 import type { OpenStore } from "../store.js";
-import { generateId, ID_PREFIX, MIN_PREFIX_LENGTH } from "./id-format.js";
 
-export { generateId, ID_PREFIX, ID_SUFFIX_LENGTH, MIN_PREFIX_LENGTH } from "./id-format.js";
+export { generateId, ID_PREFIX, ID_SUFFIX_LENGTH, MIN_PREFIX_LENGTH } from "../id-format.js";
 
 /** How many times a colliding insert is retried before giving up. */
 export const ID_RETRY_ATTEMPTS = 10;
@@ -33,10 +33,14 @@ function isPrimaryKeyCollision(error: unknown): boolean {
  *
  * Safe to call inside a transaction: SQLite aborts the offending *statement*
  * on a constraint violation, not the surrounding transaction.
+ *
+ * `prefix` selects which id space to mint from — tasks by default, notes when
+ * given {@link NOTE_ID_PREFIX}. Everything else here is already independent of
+ * what is being inserted.
  */
-export function insertWithRetry(insert: (id: string) => void): string {
+export function insertWithRetry(insert: (id: string) => void, prefix: string = ID_PREFIX): string {
   for (let attempt = 0; ; attempt++) {
-    const id = generateId();
+    const id = generateId(prefix);
     try {
       insert(id);
       return id;
