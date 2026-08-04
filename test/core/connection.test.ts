@@ -1,6 +1,5 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BUSY_TIMEOUT_MS, openDatabase, writeTx } from "../../src/core/db/connection.js";
@@ -160,7 +159,7 @@ describe("writeTx", () => {
       count: 6,
       source: `
         const { openDatabase, writeTx } = await import(${JSON.stringify(
-          fileURLToPath(new URL("../../src/core/db/connection.ts", import.meta.url)),
+          new URL("../../src/core/db/connection.ts", import.meta.url).href,
         )});
         barrier();
         const db = openDatabase(${JSON.stringify(path)});

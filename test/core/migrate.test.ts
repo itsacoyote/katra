@@ -1,5 +1,4 @@
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase, writeTx } from "../../src/core/db/connection.js";
 import { type Migration, migrate, readSchemaVersion } from "../../src/core/db/migrate.js";
@@ -119,8 +118,8 @@ describe("migrate", () => {
     // SQLITE_BUSY here before any transaction exists to absorb it.
     const path = tempDbPath();
     const modules = {
-      connection: fileURLToPath(new URL("../../src/core/db/connection.ts", import.meta.url)),
-      migrate: fileURLToPath(new URL("../../src/core/db/migrate.ts", import.meta.url)),
+      connection: new URL("../../src/core/db/connection.ts", import.meta.url).href,
+      migrate: new URL("../../src/core/db/migrate.ts", import.meta.url).href,
     };
 
     const outcomes = await runConcurrent<{ applied: number; version: number }>({

@@ -13,7 +13,7 @@
 import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 /** Marks the one line a worker uses to report its result. */
 const RESULT_PREFIX = "__KATRA_RESULT__";
@@ -72,6 +72,10 @@ export interface ConcurrentOptions {
   /**
    * ESM module source. It may `import` anything the project can resolve, and
    * two bindings are already in scope:
+   * Module specifiers handed to `import()` inside the snippet must be **file
+   * URLs**, not paths — see the callers, which pass `new URL(…).href`. A bare
+   * Windows path is not a valid specifier.
+   *
    *   `INDEX`   — this process's 0-based number
    *   `barrier` — call **after** your imports to sync with the other processes
    *   `report`  — call once with a JSON-serialisable result
@@ -136,7 +140,10 @@ function runOne<T>(
   env: Readonly<Record<string, string>> | undefined,
 ): Promise<ProcessOutcome<T>> {
   return new Promise((resolve) => {
-    const child = spawn(process.execPath, ["--import", hookPath, workerPath], {
+    // `--import` takes a module specifier, not a path: an absolute Windows
+    // path parses as a URL with scheme "c:" and Node rejects it. The worker
+    // itself is argv[1] and is correctly a plain path.
+    const child = spawn(process.execPath, ["--import", pathToFileURL(hookPath).href, workerPath], {
       ...(cwd === undefined ? {} : { cwd }),
       env: {
         ...process.env,

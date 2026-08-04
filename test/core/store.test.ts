@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { readSchemaVersion } from "../../src/core/db/migrate.js";
 import { isKatraException } from "../../src/core/errors.js";
@@ -174,7 +173,7 @@ describe("openStore", () => {
     // ten — measured by deleting the retry and re-running. The retry logic
     // itself is pinned deterministically in test/core/retry.test.ts; this
     // test covers its application at the real call site.
-    const storePath = fileURLToPath(new URL("../../src/core/store.ts", import.meta.url));
+    const storePath = new URL("../../src/core/store.ts", import.meta.url).href;
 
     for (let round = 0; round < 3; round++) {
       const r = repo();

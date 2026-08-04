@@ -1,4 +1,3 @@
-import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
@@ -203,8 +202,8 @@ describe("concurrent writers", () => {
     // decision to write.
     const id = seedTask(fixture.store, { id: "kt-race01" });
     const modules = {
-      store: fileURLToPath(new URL("../../src/core/store.ts", import.meta.url)),
-      lifecycle: fileURLToPath(new URL("../../src/core/tasks/lifecycle.ts", import.meta.url)),
+      store: new URL("../../src/core/store.ts", import.meta.url).href,
+      lifecycle: new URL("../../src/core/tasks/lifecycle.ts", import.meta.url).href,
     };
 
     const outcomes = await runConcurrent<{ ok: boolean; conflict: boolean }>({

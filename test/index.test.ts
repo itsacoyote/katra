@@ -121,7 +121,10 @@ describe("the public barrel", () => {
     // size check would still pass if the walk found *different* files. If a
     // module joins or leaves the published graph, that is a deliberate act and
     // this list is where it gets acknowledged.
-    expect([...visited].map((file) => relative(root, file)).sort()).toEqual([
+    // Separators normalised: `relative` yields `core\\contract.ts` on Windows,
+    // so a POSIX-looking expectation would fail there for no real reason.
+    const seen = [...visited].map((file) => relative(root, file).replaceAll("\\", "/")).sort();
+    expect(seen).toEqual([
       "core/contract.ts",
       "core/enums.ts",
       "core/errors.ts",

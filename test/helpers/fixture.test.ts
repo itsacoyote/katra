@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createGitRepo, createNonRepoDir, git } from "./fixture.js";
@@ -52,10 +52,17 @@ describe("git fixture", () => {
   it("hands back symlink-resolved paths that match what git reports", () => {
     // On macOS mkdtemp returns /var/... while git reports /private/var/...,
     // so an unresolved fixture path would fail every path-equality assertion.
+    //
+    // Windows needs a second normalisation: git prints forward slashes and the
+    // long form of a path, while Node hands back backslashes and — under a
+    // temp directory — the 8.3 short form (RUNNER~1). Comparing the resolved,
+    // separator-normalised paths is the claim; the spelling is not.
     const repo = createGitRepo();
     cleanups.push(() => repo.cleanup());
 
-    expect(git(repo.dir, "rev-parse", "--show-toplevel")).toBe(repo.dir);
+    const normalise = (path: string) => realpathSync(path).replaceAll("\\", "/").toLowerCase();
+
+    expect(normalise(git(repo.dir, "rev-parse", "--show-toplevel"))).toBe(normalise(repo.dir));
   });
 
   it("removes a repository whose working tree still has files in it", () => {
