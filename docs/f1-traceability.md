@@ -2,9 +2,16 @@
 
 Acceptance criterion 30 requires that every criterion maps to at least one named test that could fail. This is that audit.
 
-It is a real check, not a formality: the plan review found four criteria whose tests could never fail — one compared a value to itself, one asserted something vacuously true, one was scoped to a single field where four were required, and one had no owner at all. Each is now marked ✅ below because a test was written or rewritten, not because the criterion looked satisfied.
+It is a real check, not a formality. Two review passes have now found tests here that could never fail:
 
-**Result: 46 of 46 covered.** `pnpm check` passes with 367 tests.
+- **Plan review** found four — one compared a value to itself, one asserted something vacuously true, one was scoped to a single field where four were required, and one had no owner at all.
+- **Senior review** found ten more, including the `rowid` tie-break (criterion 45), which this document had claimed as covered when the assertion held whether or not the tie-break existed.
+
+Each row below is marked covered because a test was written or rewritten, not because the criterion looked satisfied.
+
+**Result: 46 of 46 covered.** `pnpm check` passes with 380 tests.
+
+Where a criterion cannot be fully proven by a black-box test, that is stated in the row rather than papered over — see criterion 45.
 
 ## Store and location
 
@@ -25,15 +32,18 @@ It is a real check, not a formality: the plan review found four criteria whose t
 | 6 | Six concurrent processes, zero `SQLITE_BUSY` | "completes all writes from six concurrent processes with no SQLITE_BUSY" | `test/core/connection.test.ts` |
 | 7 | Two processes adding opposite edges — one succeeds | "allows only one of two processes adding opposite edges" | `test/core/deps.test.ts` |
 | 8 | Two processes racing `init` — migration applied once | "survives several processes racing to create the same store" · "applies the migration exactly once when several processes race a new store" | `test/core/store.test.ts`, `test/core/migrate.test.ts` |
+| 42a | Two processes closing the same task — exactly one succeeds | "lets exactly one of two processes close the same task" | `test/core/lifecycle.test.ts` |
 
 > Both 6 and 7 are mutation-verified: removing `.immediate()` fails 4/4 runs, and moving the cycle check outside the transaction fails 4/4. The WAL-retry test at criterion 8 is probabilistic — 3 rounds catch a missing retry roughly 2 times in 3, and the retry logic itself is pinned deterministically in `test/core/retry.test.ts`.
+
+> Criterion 42a is new, from the senior review. `close`, `cancel`, `reopen`, `update` and `delete` all read the task and checked its state **before** opening their transaction. `BEGIN IMMEDIATE` protects the write, not the decision to write: two worktrees closing the same task both passed the refuse-if-terminal guard and both wrote, so the loser's timestamp and reason silently replaced the winner's with nobody told. Worse for `update`, whose write never touches `closed_at` — a task could end up in an active lane carrying a close timestamp, a state the schema's `CHECK` cannot catch because it enforces terminal ⇒ `closed_at` and never the converse. Every guard now reads inside its own transaction, and `update` clears the close columns whenever it sets a lane. Mutation-verified: moving the guard back outside fails 3/3 runs.
 
 ## Identity
 
 | # | Criterion | Named test | File |
 | --- | --- | --- | --- |
-| 9 | `kt-` ids, 2,000 distinct, retry path exercised | "generates an id matching kt- followed by six base36 characters" · "produces two thousand distinct ids" · "retries and succeeds when the first generated id already exists" | `test/core/ids.test.ts` |
-| 10 | Unique prefix resolves; ambiguous lists candidates; no match is distinct | "resolves a unique prefix to exactly one task" · "returns every candidate when a prefix matches more than one task" · "reports no match distinctly from an ambiguous match" | `test/core/ids.test.ts` |
+| 9 | `kt-` ids, 2,000 distinct, retry path exercised | "generates an id matching kt- followed by six base36 characters" · "produces two thousand distinct ids" · "retries and succeeds when the first generated id already exists" · "matches the error code a real duplicate id actually raises" | `test/core/ids.test.ts` |
+| 10 | Unique prefix resolves; ambiguous lists candidates; no match is distinct | "resolves a unique prefix to exactly one task" · "returns every candidate when a prefix matches more than one task" · "says so when more candidates matched than it will list" · "reports no match distinctly from an ambiguous match" | `test/core/ids.test.ts` |
 | 11 | A prefix below the minimum is rejected | "rejects a prefix shorter than the minimum length" | `test/core/ids.test.ts` |
 
 ## Model integrity
@@ -49,6 +59,8 @@ It is a real check, not a formality: the plan review found four criteria whose t
 | 41 | A terminal lane can never carry a NULL `closed_at`, even by raw SQL | "rejects Done without closed_at even via raw SQL" · "rejects an UPDATE that moves a task to Done without closed_at" · "rejects clearing closed_at while the lane is still terminal" | `test/core/schema.test.ts` |
 
 > Criterion 15 previously read `expect(MIGRATIONS[0].sql).toBe(buildInitDdl())` — a value compared to itself. Criterion 12 previously tested one field of four.
+
+> Criterion 10 previously reported a *capped* candidate list as though it were the whole set — `"ab" matches 20 tasks` when fifty did. The resolution now carries `truncated`, and the refusal says `more than 20`.
 
 ## Lifecycle
 
@@ -83,17 +95,21 @@ It is a real check, not a formality: the plan review found four criteria whose t
 | 26 | `next` exits non-zero naming the blockers when nothing is ready | "exits non-zero and names the blockers when everything planned is stuck" | `test/cli/feature.test.ts` |
 | 27 | `next --kind` never returns another kind | "returns only tasks of the requested kind" · "narrows by kind without returning more than one item" | `test/core/next.test.ts`, `test/cli/feature.test.ts` |
 | 28 | Every read accepts `--json`, valid, no human text | as criterion 35 | `test/cli/feature.test.ts` |
-| 29 | Each of the four exit codes produced on a real path | "produces each of the four exit codes on a real path" · "reaches the conflict code by all three routes the spec names" | `test/cli/feature.test.ts` |
+| 29 | Each of the four exit codes produced on a real path | "produces each of the four exit codes on a real path" · "reaches the conflict code by all three routes the spec names" · "emits a structured usage document under --json rather than an empty stdout" | `test/cli/feature.test.ts` |
 | 35 | Every data-returning command emits valid JSON, verified across the whole set | "emits parseable JSON with no prose from every command that returns data" | `test/cli/feature.test.ts` |
 | 36 | Identical results from root, subdirectory and worktree, through the CLI | "produces identical results from the root, a subdirectory and a linked worktree" | `test/cli/feature.test.ts` |
 | 37 | ISO-8601 `Z` timestamps; deterministic ordering on a tie | "produces a fixed-width ISO-8601 timestamp ending in Z" · "breaks a created_at tie by rowid" | `test/core/clock.test.ts`, `test/core/list.test.ts`, `test/core/next.test.ts` |
 | 38 | All twelve commands registered and reachable | "registers all twelve commands on the program" | `test/cli/feature.test.ts` |
 | 39 | A `GIT_COMMON_DIR` warning reaches the user from a non-`init` command | "surfaces the GIT_COMMON_DIR warning from show, not only from init" | `test/cli/add-show.test.ts` |
 | 44 | `--body-file` resolves relative to the invoking directory | "reads --body-file relative to the invoking directory, not the repo root" | `test/cli/add-show.test.ts` |
-| 45 | Rows sharing a `created_at` are ordered by `rowid` in `list` and `next` | "breaks a created_at tie by rowid" · "breaks a created_at tie by rowid, deterministically" | `test/core/list.test.ts`, `test/core/next.test.ts` |
+| 45 | Rows sharing a `created_at` are ordered deterministically in `list` and `next` | "breaks a created_at tie by insertion order, not by id" (×2) · "agrees with next about which of two tied tasks comes first" | `test/core/list.test.ts`, `test/core/next.test.ts` |
 | 30 | `pnpm check` passes and every criterion maps to a named test | this document, plus the suite | — |
 
 > Criteria 35 and 38 previously had no owner: every task added a *per-command* test, and nobody was assigned the aggregate. Both now iterate the program's own command list rather than a hand-written one, so a command added later and left unwired fails the suite.
+
+> **Criterion 29 changed behaviour, not just its test.** A cycle mapped to exit 1; the spec says 3. The test named "reaches the conflict code by all three routes the spec names" exercised two routes and then asserted the third produced a *different* code — and this document cited it as covering the criterion, so the audit reported green on its own violation. `cycle` now maps to `EXIT.conflict`: both ids exist and the command is well formed, so only the current shape of the graph refuses it, which is exactly what separates 3 from 1.
+
+> **Criterion 45 is partially structural, and that is a measured limit rather than an oversight.** Deleting `t.rowid` from the `ORDER BY` does **not** fail the two tie-break tests: SQLite's only tie order *is* rowid, so a plan without the clause returns identical rows in identical order. Both `PRAGMA reverse_unordered_selects` and opposing the id order against the insertion order were tried and neither separates the two implementations. What the clause buys is that the order is *specified* — SQLite documents the order of equal `ORDER BY` keys as undefined and free to change with the query plan. The falsifiable half is the cross-command test: `list` and `next` must pick the same winner among tied rows, which fails the moment either query's ordering changes.
 
 ## What is deliberately not covered
 

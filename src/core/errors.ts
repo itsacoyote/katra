@@ -31,12 +31,20 @@ export type KatraErrorCode = (typeof KATRA_ERROR_CODES)[number];
 export type KatraErrorDetail =
   /** No entity matched the given id or prefix. */
   | { readonly code: "not_found"; readonly message: string; readonly id: string }
-  /** A partial id matched more than one entity; every candidate is listed. */
+  /**
+   * A partial id matched more than one entity.
+   *
+   * `candidates` is capped, so `truncated` says whether it is the whole set.
+   * Without it a caller cannot tell "these are the only matches" from "these
+   * are the first twenty of some larger number", and would narrow its search
+   * against a list that was never complete.
+   */
   | {
       readonly code: "ambiguous_id";
       readonly message: string;
       readonly input: string;
       readonly candidates: readonly string[];
+      readonly truncated: boolean;
     }
   /** A value fell outside what the model allows. */
   | {
@@ -70,6 +78,13 @@ export class KatraException extends Error {
  * Narrows an unknown caught value. The CLI's single catch site uses this to
  * separate katra's deliberate failures from genuine crashes — the two deserve
  * very different output.
+ *
+ * A value this rejects is a fault, not a refusal. The CLI still reports it in
+ * the `--json` error envelope, but under the code `"internal"`, which is
+ * deliberately **not** a `KatraErrorCode`: it carries no structured payload and
+ * nothing about it is part of the contract except that it means katra broke.
+ * Consumers switching over {@link KatraErrorDetail} should treat any code
+ * outside {@link KATRA_ERROR_CODES} as exactly that.
  */
 export function isKatraException(value: unknown): value is KatraException {
   return value instanceof KatraException;

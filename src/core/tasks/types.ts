@@ -38,6 +38,17 @@ export interface TaskSummary {
   readonly lane: Lane;
 }
 
+/**
+ * Narrows a task to its summary.
+ *
+ * Lives beside the two types rather than in each caller: `close`, `cancel` and
+ * `delete` all report released dependents, and three copies of the same
+ * projection is three places a new summary field can be forgotten.
+ */
+export function summarise(task: Task): TaskSummary {
+  return { id: task.id, title: task.title, level: task.level, lane: task.lane };
+}
+
 /** What `show` returns. */
 export interface TaskDetail {
   readonly task: Task;

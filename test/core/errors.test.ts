@@ -8,6 +8,7 @@ describe("KatraException", () => {
       message: "prefix 5c4 matches 3 tasks",
       input: "5c4",
       candidates: ["kt-5c4a1b", "kt-5c4f09", "kt-5c4zz2"],
+      truncated: false,
     });
 
     expect(err.detail.code).toBe("ambiguous_id");
@@ -15,6 +16,7 @@ describe("KatraException", () => {
     if (err.detail.code !== "ambiguous_id") throw new Error("unreachable");
     expect(err.detail.candidates).toHaveLength(3);
     expect(err.detail.input).toBe("5c4");
+    expect(err.detail.truncated).toBe(false);
   });
 
   it("narrows a KatraException detail by its code discriminant", () => {
@@ -76,7 +78,10 @@ describe("KatraException", () => {
     expect(thrown).toBeInstanceOf(KatraException);
     expect(thrown).toBeInstanceOf(Error);
     expect((thrown as Error).name).toBe("KatraException");
-    expect((thrown as Error).stack).toBeTruthy();
+    // `.stack` is truthy on every V8 Error, so asserting only that proves
+    // nothing. What matters is that the trace is labelled with the subclass's
+    // own name — which it only is when `this.name` is set before it is read.
+    expect((thrown as Error).stack).toContain("KatraException: boom");
   });
 
   it("identifies its own exceptions and rejects foreign errors", () => {

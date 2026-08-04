@@ -6,6 +6,7 @@ import {
   ID_RETRY_ATTEMPTS,
   ID_SUFFIX_LENGTH,
   insertWithRetry,
+  MAX_CANDIDATES,
   MIN_PREFIX_LENGTH,
   requireId,
   resolveId,
@@ -107,6 +108,28 @@ describe("insertWithRetry", () => {
     expect(calls).toBe(ID_RETRY_ATTEMPTS + 1);
   });
 
+  it("matches the error code a real duplicate id actually raises", () => {
+    // The retry only fires on SQLITE_CONSTRAINT_PRIMARYKEY, and every other
+    // test here feeds it a hand-built error object carrying that code. If
+    // SQLite ever reported a duplicate primary key differently, the retry
+    // would stop working and nothing else in the suite would notice.
+    const insert = (id: string): void => {
+      fixture.store.db
+        .prepare(
+          "INSERT INTO tasks (id,level,kind,title,created_at,updated_at) VALUES (?,?,?,?,?,?)",
+        )
+        .run(id, "task", "feat", "dup", "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:00.000Z");
+    };
+
+    insert("kt-dup001");
+    try {
+      insert("kt-dup001");
+      expect.unreachable("a duplicate primary key should have thrown");
+    } catch (error) {
+      expect((error as { code?: string }).code).toBe("SQLITE_CONSTRAINT_PRIMARYKEY");
+    }
+  });
+
   it("works against the real table", () => {
     const id = insertWithRetry((candidate) => {
       fixture.store.db
@@ -153,6 +176,33 @@ describe("resolveId", () => {
     expect(result.kind).toBe("ambiguous");
     if (result.kind !== "ambiguous") throw new Error("unreachable");
     expect(result.candidates).toEqual(["kt-5c4a1b", "kt-5c4f09", "kt-5c4zz2"]);
+    expect(result.truncated).toBe(false);
+  });
+
+  it("says so when more candidates matched than it will list", () => {
+    // The candidate list is capped. Reporting a capped list as though it were
+    // the whole set tells the caller it has seen every match when it has not —
+    // and an agent narrowing its search against that list will never find the
+    // task it wants.
+    for (let i = 0; i < MAX_CANDIDATES + 5; i++) {
+      seedTask(fixture.store, { id: `kt-ab${String(i).padStart(4, "0")}` });
+    }
+
+    const result = resolveId(fixture.store, "ab");
+
+    if (result.kind !== "ambiguous") throw new Error("unreachable");
+    expect(result.candidates).toHaveLength(MAX_CANDIDATES);
+    expect(result.truncated).toBe(true);
+
+    // And the refusal must not state a count it cannot know.
+    try {
+      requireId(fixture.store, "ab");
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.message).not.toMatch(new RegExp(`matches ${MAX_CANDIDATES} tasks`));
+      expect(error.message).toContain(`more than ${MAX_CANDIDATES}`);
+    }
   });
 
   it("reports no match distinctly from an ambiguous match", () => {

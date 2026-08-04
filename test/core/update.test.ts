@@ -113,13 +113,37 @@ describe("updateTask", () => {
     expect(updateTask(fixture.store, id, { parentId: null }).parentId).toBeNull();
   });
 
+  it("clears closed_at whenever it sets a lane", () => {
+    // The schema enforces terminal ⇒ closed_at, never the converse, so an
+    // active lane carrying a close timestamp is a state nothing else catches.
+    // It is reachable by a lost update: another worktree closes the task
+    // between this one's guard and its write. Setting the columns
+    // unconditionally makes the invariant structural instead of timing-
+    // dependent.
+    const id = seedTask(fixture.store);
+    fixture.store.db
+      .prepare("UPDATE tasks SET closed_at = ?, close_reason = ? WHERE id = ?")
+      .run("2026-01-02T00:00:00.000Z", "stale", id);
+
+    const updated = updateTask(fixture.store, id, { lane: "Planned" });
+
+    expect(updated.lane).toBe("Planned");
+    expect(updated.closedAt).toBeNull();
+    expect(updated.closeReason).toBeNull();
+  });
+
   it("refuses to reparent onto a task rather than an epic", () => {
     const other = seedTask(fixture.store);
     const id = seedTask(fixture.store);
 
-    expect(() => updateTask(fixture.store, id, { parentId: other })).toThrowError(
-      /must reference an epic/,
-    );
+    try {
+      updateTask(fixture.store, id, { parentId: other });
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("validation");
+      expect(error.message).toContain("is a task, not an epic");
+    }
   });
 
   it("accepts a partial id for both the task and its new parent", () => {

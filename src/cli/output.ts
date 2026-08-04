@@ -32,7 +32,11 @@ const EXIT_FOR_ERROR = {
   not_found: EXIT.user,
   ambiguous_id: EXIT.user,
   validation: EXIT.user,
-  cycle: EXIT.user,
+  // A cycle is a conflict, not a malformed request: both ids exist, the edge is
+  // well-formed, and the refusal comes entirely from the shape of the graph as
+  // it stands. Delete one of the existing edges and the identical command
+  // succeeds — which is what separates 3 from 1.
+  cycle: EXIT.conflict,
   conflict: EXIT.conflict,
   usage: EXIT.usage,
 } satisfies Record<KatraErrorCode, number>;

@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
 import { openStore } from "../../src/core/store.js";
+import type { TaskList } from "../../src/core/tasks/repo.js";
 import type { Task, TaskDetail } from "../../src/core/tasks/types.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
@@ -146,8 +147,37 @@ describe("katra add", () => {
 
     expect(result.exitCode).toBe(EXIT.user);
     expect(result.stderr).toMatch(/could not read --body-file/);
-    const list = await runCli(["show", "kt", "--json"], { cwd: repo.dir });
-    expect(list.exitCode).not.toBe(EXIT.ok);
+
+    // The claim is that nothing was written. `show kt` cannot check it — "kt"
+    // is stripped as the id prefix and the remainder is below the minimum
+    // length, so that call fails identically whether or not a task exists.
+    const listed = (await runCli(["list", "--json"], { cwd: repo.dir })).json() as TaskList;
+    expect(listed.tasks).toEqual([]);
+  });
+
+  it("refuses --lane Done with a refusal rather than a constraint dump", async () => {
+    const result = await runCli(["add", "born finished", "--lane", "Done"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).not.toContain("internal error");
+    expect(result.stderr).not.toContain("CHECK constraint");
+    expect(result.stderr).toMatch(/katra close/);
+  });
+
+  it("refuses --parent pointing at a task, in the structured error shape", async () => {
+    const notAnEpic = await add(["an ordinary task"]);
+
+    const result = await runCli(["add", "child", "--parent", notAnEpic, "--json"], {
+      cwd: repo.dir,
+    });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    // The trigger backing this rule can only RAISE(ABORT) with a bare string,
+    // which surfaced as code "internal" — a value KatraErrorCode does not
+    // contain, so a consumer switching over the union could never handle it.
+    const payload = result.json() as { error: { code: string; message: string } };
+    expect(payload.error.code).toBe("validation");
+    expect(payload.error.message).toContain("not an epic");
   });
 
   it("accepts a parent given as a partial id", async () => {

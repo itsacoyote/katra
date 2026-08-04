@@ -8,16 +8,6 @@
 
 import type { Task, TaskDetail } from "../core/tasks/types.js";
 
-/** One line, for listings: `kt-9f3k2a  P0  feat  wire up the parser`. */
-export function formatTaskLine(task: Task): string {
-  return [
-    task.id,
-    `P${task.priority}`,
-    task.level === "epic" ? "epic" : task.kind,
-    task.title,
-  ].join("  ");
-}
-
 function field(label: string, value: string): string {
   return `  ${label.padEnd(12)}${value}`;
 }

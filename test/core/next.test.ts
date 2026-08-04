@@ -38,12 +38,18 @@ describe("nextTask", () => {
     expect(result.task.title).toBe("earlier");
   });
 
-  it("breaks a created_at tie by rowid, deterministically", () => {
-    // Two tasks written in the same millisecond are routine; without the rowid
-    // tiebreak the winner would vary between runs.
+  it("breaks a created_at tie by insertion order, not by id", () => {
+    // Ids descend while insertion order ascends, so "insertion order" is a
+    // distinct claim from "id order". With the default sequential seed ids the
+    // two agreed and the assertion held either way.
+    //
+    // As in the matching list test, dropping `t.rowid` from the query does not
+    // fail this — SQLite's only tie order is rowid. The clause makes the order
+    // specified rather than incidental; the cross-command agreement test in
+    // list.test.ts is the falsifiable half.
     const stamp = seedTime(500);
-    planned("first", { priority: 0, createdAt: stamp });
-    planned("second", { priority: 0, createdAt: stamp });
+    planned("first", { id: "kt-zzzzzz", priority: 0, createdAt: stamp });
+    planned("second", { id: "kt-aaaaaa", priority: 0, createdAt: stamp });
 
     for (let run = 0; run < 5; run++) {
       const result = nextTask(fixture.store);

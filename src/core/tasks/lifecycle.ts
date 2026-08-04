@@ -15,11 +15,11 @@ import { writeTx } from "../db/connection.js";
 import type { Lane } from "../enums.js";
 import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
-import { isReady, listDependents } from "../graph/deps.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { getTask } from "./repo.js";
 import type { Task, TaskSummary } from "./types.js";
+import { reportUnblocked } from "./unblocked.js";
 
 /** The lane `reopen` returns a task to unless told otherwise. */
 export const REOPEN_DEFAULT_LANE: Lane = "Defined";
@@ -36,8 +36,7 @@ export interface LifecycleResult {
   readonly unblocked: readonly TaskSummary[];
 }
 
-function loadOrThrow(store: OpenStore, idInput: string): Task {
-  const id = requireId(store, idInput);
+function loadOrThrow(store: OpenStore, id: string, idInput: string): Task {
   const task = getTask(store, id);
   if (task === undefined) {
     throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
@@ -45,58 +44,48 @@ function loadOrThrow(store: OpenStore, idInput: string): Task {
   return task;
 }
 
-function summarise(task: Task): TaskSummary {
-  return { id: task.id, title: task.title, level: task.level, lane: task.lane };
+/** What a transition decides to do, once it has seen the task's current state. */
+interface Move {
+  readonly lane: Lane;
+  readonly markClosed: boolean;
+  readonly reason: string | null;
 }
 
 /**
  * Applies a lane transition and reports which dependents it released.
  *
- * The before-and-after readiness comparison happens inside the same
- * transaction as the write, so the reported set is exactly what this change
- * caused rather than what a concurrent writer happened to change alongside it.
+ * **The task is loaded and guarded inside the transaction**, not before it.
+ * `BEGIN IMMEDIATE` protects the write; it does not protect the decision to
+ * write. Guarding outside leaves a window in which another worktree closes the
+ * task between the check and the update — the loser's transition is then
+ * silently reverted, and two racing `close`/`cancel` calls both pass a
+ * refuse-if-terminal guard that was supposed to let exactly one through.
+ *
+ * The before-and-after readiness comparison shares that transaction too, so the
+ * reported set is exactly what this change caused rather than what a concurrent
+ * writer happened to change alongside it.
  */
 function transition(
   store: OpenStore,
-  task: Task,
-  lane: Lane,
-  markClosed: boolean,
-  reason: string | null,
+  idInput: string,
+  plan: (task: Task) => Move,
 ): LifecycleResult {
+  const id = requireId(store, idInput);
+
   return writeTx(store.db, (now) => {
-    const wasBlocked = listDependents(store, task.id).filter(
-      (dependent) => !isReady(store, dependent.id),
-    );
+    const task = loadOrThrow(store, id, idInput);
+    const { lane, markClosed, reason } = plan(task);
 
-    store.db
-      .prepare(
-        "UPDATE tasks SET lane = ?, closed_at = ?, close_reason = ?, updated_at = ? WHERE id = ?",
-      )
-      .run(lane, markClosed ? now : null, reason, now, task.id);
+    const { result, unblocked } = reportUnblocked(store, id, () => {
+      store.db
+        .prepare(
+          "UPDATE tasks SET lane = ?, closed_at = ?, close_reason = ?, updated_at = ? WHERE id = ?",
+        )
+        .run(lane, markClosed ? now : null, reason, now, id);
+      return loadOrThrow(store, id, idInput);
+    });
 
-    const unblocked = wasBlocked
-      .filter((dependent) => isReady(store, dependent.id))
-      .map((dependent) => {
-        const full = getTask(store, dependent.id);
-        return full === undefined
-          ? {
-              id: dependent.id,
-              title: dependent.title,
-              level: "task" as const,
-              lane: dependent.lane,
-            }
-          : summarise(full);
-      });
-
-    const updated = getTask(store, task.id);
-    if (updated === undefined) {
-      throw new KatraException({
-        code: "not_found",
-        message: `task ${task.id} vanished`,
-        id: task.id,
-      });
-    }
-    return { task: updated, unblocked };
+    return { task: result, unblocked };
   });
 }
 
@@ -112,9 +101,10 @@ function refuseIfTerminal(task: Task, verb: string): void {
 
 /** Marks work finished. */
 export function closeTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
-  const task = loadOrThrow(store, idInput);
-  refuseIfTerminal(task, "close");
-  return transition(store, task, "Done", true, reason ?? null);
+  return transition(store, idInput, (task) => {
+    refuseIfTerminal(task, "close");
+    return { lane: "Done", markClosed: true, reason: reason ?? null };
+  });
 }
 
 /**
@@ -125,9 +115,10 @@ export function closeTask(store: OpenStore, idInput: string, reason?: string): L
  * same approach being proposed again.
  */
 export function cancelTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
-  const task = loadOrThrow(store, idInput);
-  refuseIfTerminal(task, "cancel");
-  return transition(store, task, "Cancelled", true, reason ?? null);
+  return transition(store, idInput, (task) => {
+    refuseIfTerminal(task, "cancel");
+    return { lane: "Cancelled", markClosed: true, reason: reason ?? null };
+  });
 }
 
 /**
@@ -138,16 +129,9 @@ export function cancelTask(store: OpenStore, idInput: string, reason?: string): 
  * guessing.
  */
 export function reopenTask(store: OpenStore, idInput: string, lane?: Lane): LifecycleResult {
-  const task = loadOrThrow(store, idInput);
-
-  if (!isTerminal(task.lane)) {
-    throw new KatraException({
-      code: "conflict",
-      message: `${task.id} is ${task.lane}, which is already active — nothing to reopen`,
-      reason: `lane is ${task.lane}`,
-    });
-  }
-
+  // Argument validation, so it fails before a write lock is taken. It depends
+  // on nothing the database holds; the state guard below does, and lives
+  // inside the transaction.
   const target = lane ?? REOPEN_DEFAULT_LANE;
   if (isTerminal(target)) {
     // Otherwise reopen becomes a second path into a terminal lane, bypassing
@@ -162,5 +146,14 @@ export function reopenTask(store: OpenStore, idInput: string, lane?: Lane): Life
     });
   }
 
-  return transition(store, task, target, false, null);
+  return transition(store, idInput, (task) => {
+    if (!isTerminal(task.lane)) {
+      throw new KatraException({
+        code: "conflict",
+        message: `${task.id} is ${task.lane}, which is already active — nothing to reopen`,
+        reason: `lane is ${task.lane}`,
+      });
+    }
+    return { lane: target, markClosed: false, reason: null };
+  });
 }

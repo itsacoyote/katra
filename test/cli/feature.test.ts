@@ -139,12 +139,26 @@ describe("exit codes", () => {
     await runCli(["close", closed], { cwd: repo.dir });
     expect((await runCli(["close", closed], { cwd: repo.dir })).exitCode).toBe(EXIT.conflict);
 
-    // A cycle is exit 1, not 3 — it is a malformed relationship rather than a
-    // state conflict. Pinned so the distinction is deliberate.
+    // Adding a dependency that would close a cycle. Both ids exist and the
+    // command is well formed; only the current shape of the graph refuses it,
+    // and removing the opposing edge makes the identical command succeed.
     await runCli(["dep", a, "--blocked-by", b], { cwd: repo.dir });
     expect((await runCli(["dep", b, "--blocked-by", a], { cwd: repo.dir })).exitCode).toBe(
-      EXIT.user,
+      EXIT.conflict,
     );
+  });
+
+  it("emits a structured usage document under --json rather than an empty stdout", async () => {
+    // Commander owns argument parsing and writes prose. Under --json that
+    // prose must not reach either stream, and the failure still has to be
+    // readable — an exit code with nothing on stdout is not.
+    const result = await runCli(["add", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+    expect(result.stderr).toBe("");
+    const payload = result.json() as { error: { code: string; message: string } };
+    expect(payload.error.code).toBe("usage");
+    expect(payload.error.message).toMatch(/title/);
   });
 });
 
@@ -234,7 +248,13 @@ describe("katra next", () => {
   it("distinguishes an empty backlog from a blocked one", async () => {
     const empty = await runCli(["next", "--json"], { cwd: repo.dir });
     expect((empty.json() as { blocked: unknown[] }).blocked).toEqual([]);
-    expect(empty.stdout).not.toContain("blocked:");
+
+    // In text mode too — and that is where it matters, since "blocked" only
+    // ever appears in the human renderer. Asserting its absence from --json
+    // output, as this used to, was true of any implementation.
+    const text = await runCli(["next"], { cwd: repo.dir });
+    expect(text.stdout).not.toContain("blocked");
+    expect(text.stdout).toMatch(/nothing/i);
   });
 
   it("narrows by kind without returning more than one item", async () => {

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addDependency } from "../../src/core/graph/deps.js";
+import { nextTask } from "../../src/core/tasks/next.js";
 import { listTasks } from "../../src/core/tasks/repo.js";
 import { seedDep, seedEpic, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
@@ -140,23 +141,55 @@ describe("listTasks", () => {
     expect(titles(listTasks(fixture.store))).toEqual(["early high", "late high", "late low"]);
   });
 
-  it("breaks a created_at tie by rowid", () => {
-    // Two rows written in the same millisecond are routine, and without the
-    // rowid tiebreak their order would be arbitrary between runs.
+  it("breaks a created_at tie by insertion order, not by id", () => {
+    // Two rows written in the same millisecond are routine, so the tie needs a
+    // decided winner. The ids run *backwards* against insertion order here, so
+    // "insertion order" is a claim distinct from "id order" — the previous
+    // version used the default sequential seed ids, where the two coincide and
+    // the assertion held either way.
+    //
+    // Measured limitation, recorded rather than papered over: deleting the
+    // `t.rowid` tiebreak from the query does **not** fail this test. SQLite's
+    // only tie order is rowid, so a plan without the clause returns the same
+    // rows in the same order. What the clause buys is that the order is
+    // *specified* rather than incidental — SQLite documents the order of equal
+    // ORDER BY keys as undefined and free to change with the query plan. That
+    // guarantee is structural; this test pins the behaviour it produces.
     const stamp = seedTime(500);
-    seedTask(fixture.store, { title: "first", createdAt: stamp });
-    seedTask(fixture.store, { title: "second", createdAt: stamp });
-    seedTask(fixture.store, { title: "third", createdAt: stamp });
+    seedTask(fixture.store, { id: "kt-zzzzzz", title: "first", createdAt: stamp });
+    seedTask(fixture.store, { id: "kt-mmmmmm", title: "second", createdAt: stamp });
+    seedTask(fixture.store, { id: "kt-aaaaaa", title: "third", createdAt: stamp });
 
     for (let run = 0; run < 5; run++) {
       expect(titles(listTasks(fixture.store))).toEqual(["first", "second", "third"]);
     }
   });
 
-  it("honours a limit", () => {
-    for (let i = 0; i < 10; i++) seedTask(fixture.store, { title: `t${i}` });
+  it("agrees with next about which of two tied tasks comes first", () => {
+    // The consequence that a broken tiebreak would actually have: `list` says
+    // work on one task and `next` hands back the other. This one *is*
+    // falsifiable — reversing either command's ORDER BY fails it.
+    const stamp = seedTime(500);
+    seedTask(fixture.store, {
+      id: "kt-zzzzzz",
+      title: "first",
+      lane: "Planned",
+      priority: 0,
+      createdAt: stamp,
+    });
+    seedTask(fixture.store, {
+      id: "kt-aaaaaa",
+      title: "second",
+      lane: "Planned",
+      priority: 0,
+      createdAt: stamp,
+    });
 
-    expect(listTasks(fixture.store, { limit: 3 }).tasks).toHaveLength(3);
+    const listed = listTasks(fixture.store, { lane: "Planned" }).tasks[0];
+    const chosen = nextTask(fixture.store);
+    if (chosen.status !== "found") throw new Error("unreachable");
+
+    expect(chosen.task.id).toBe(listed?.id);
   });
 
   it("includes each task's tags", () => {

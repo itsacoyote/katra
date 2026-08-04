@@ -66,7 +66,9 @@ describe("katra dep", () => {
 
     const result = await runCli(["dep", b, "--blocked-by", a], { cwd: repo.dir });
 
-    expect(result.exitCode).toBe(EXIT.user);
+    // A conflict, not a user error: the command is well formed and both ids
+    // exist — only the graph as it currently stands refuses the edge.
+    expect(result.exitCode).toBe(EXIT.conflict);
     expect(result.stderr).toMatch(/dependency cycle/);
     // The path, not merely the fact — otherwise the reader has to find it.
     expect(result.stderr).toContain(`cycle: ${b} -> ${a} -> ${b}`);

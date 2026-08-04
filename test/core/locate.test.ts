@@ -105,9 +105,12 @@ describe("resolveStoreLocation", () => {
     } catch (error) {
       if (!isKatraException(error)) throw error;
       // "no repo" and "broken worktree link" are different problems with
-      // different fixes, so the message must not be flattened into one.
+      // different fixes, so the message must not be flattened into one. The
+      // second assertion was implied by the first; what actually matters is
+      // that git's own path survives into the message, since that path is the
+      // only thing telling the user which worktree link is broken.
       expect(error.message).toContain("worktrees");
-      expect(error.message).toMatch(/worktree/i);
+      expect(error.message).toContain("/gone/.git/worktrees/wt");
     }
   });
 

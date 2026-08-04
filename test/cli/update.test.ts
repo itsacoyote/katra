@@ -83,7 +83,11 @@ describe("katra update", () => {
   });
 
   it("replaces the description from a piped body", async () => {
+    // The task starts *with* a description. Created without one it was null,
+    // so an implementation that appended rather than replaced would satisfy
+    // the assertion below just as well — "replaces" was untested.
     const id = await add(["a task"]);
+    await runCli(["update", id], { cwd: repo.dir, stdin: "the original description" });
 
     await runCli(["update", id], { cwd: repo.dir, stdin: "a new description" });
 

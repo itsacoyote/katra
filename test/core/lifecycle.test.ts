@@ -1,9 +1,11 @@
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { addDependency, isReady } from "../../src/core/graph/deps.js";
 import { cancelTask, closeTask, reopenTask } from "../../src/core/tasks/lifecycle.js";
 import { getTask } from "../../src/core/tasks/repo.js";
+import { runConcurrent } from "../helpers/concurrent.js";
 import { seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
@@ -188,5 +190,46 @@ describe("reopenTask", () => {
     reopenTask(fixture.store, blocker);
 
     expect(isReady(fixture.store, dependent)).toBe(false);
+  });
+});
+
+describe("concurrent writers", () => {
+  it("lets exactly one of two processes close the same task", { timeout: 60_000 }, async () => {
+    // The guard and the write have to share a transaction. Guarded outside
+    // it, both processes read a non-terminal lane, both pass
+    // refuseIfTerminal, and both write — so the second close silently
+    // overwrites the first's timestamp and reason, and neither caller is
+    // told. BEGIN IMMEDIATE protects the write; it does not protect the
+    // decision to write.
+    const id = seedTask(fixture.store, { id: "kt-race01" });
+    const modules = {
+      store: fileURLToPath(new URL("../../src/core/store.ts", import.meta.url)),
+      lifecycle: fileURLToPath(new URL("../../src/core/tasks/lifecycle.ts", import.meta.url)),
+    };
+
+    const outcomes = await runConcurrent<{ ok: boolean; conflict: boolean }>({
+      count: 2,
+      source: `
+        const { openStore } = await import(${JSON.stringify(modules.store)});
+        const { closeTask } = await import(${JSON.stringify(modules.lifecycle)});
+        const { store } = openStore(${JSON.stringify(fixture.repo.dir)}, {});
+        barrier();
+        let ok = false, conflict = false;
+        try { closeTask(store, ${JSON.stringify(id)}, "closed by " + INDEX); ok = true; }
+        catch (e) { conflict = /already/i.test(String(e && e.message)); }
+        store.close();
+        report({ ok, conflict });
+      `,
+    });
+
+    const results = outcomes.map((o) => o.value).filter((v) => v !== undefined);
+    expect(results).toHaveLength(2);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => r.conflict)).toHaveLength(1);
+
+    // And the surviving row is the winner's, not a blend of both.
+    const task = getTask(fixture.store, id);
+    expect(task?.lane).toBe("Done");
+    expect(task?.closeReason).toMatch(/^closed by [01]$/);
   });
 });

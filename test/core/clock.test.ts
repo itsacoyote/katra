@@ -42,8 +42,12 @@ describe("clock", () => {
     const fromEpoch = toIso(new Date(1_770_000_000_000));
     const fromOffsetString = toIso(new Date("2026-02-02T02:40:00.000+02:00"));
 
+    // Compared against a literal, not against `toIso` of an equivalent Date:
+    // the latter is the function under test on both sides, so any
+    // deterministic implementation — including one that never converts to UTC
+    // at all — satisfies it.
     expect(fromEpoch.endsWith("Z")).toBe(true);
-    expect(fromOffsetString).toBe(toIso(new Date("2026-02-02T00:40:00.000Z")));
+    expect(fromOffsetString).toBe("2026-02-02T00:40:00.000Z");
   });
 
   it("rejects an invalid date rather than emitting 'Invalid Date'", () => {

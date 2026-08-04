@@ -7,6 +7,7 @@
  */
 
 import { Command, CommanderError } from "commander";
+import { KatraException } from "../core/errors.js";
 import { VERSION } from "../version.js";
 import { readPipedStdin } from "./body.js";
 import { registerAdd } from "./commands/add.js";
@@ -49,6 +50,13 @@ export interface CreateProgramOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly readStdin?: () => string | undefined;
   readonly onExitCode?: (code: number) => void;
+  /**
+   * Whether `--json` was asked for.
+   *
+   * Commander does not read katra's flags, so it has to be told: its usage
+   * errors are prose, and under `--json` prose must not reach either stream.
+   */
+  readonly json?: boolean;
 }
 
 /** Builds the program. Registering a command is a one-line call per module. */
@@ -75,9 +83,15 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
 
   // Route commander's own output through the injected streams so tests capture
   // it and `--json` output never gets help text mixed into stdout.
+  //
+  // Under --json commander's prose is dropped entirely: `run` catches the same
+  // CommanderError and re-emits it as a structured `usage` document, so letting
+  // the sentence through as well would put human text on stderr next to it.
   program.configureOutput({
     writeOut: (text) => context.streams.out(text),
-    writeErr: (text) => context.streams.err(text),
+    writeErr: (text) => {
+      if (options.json !== true) context.streams.err(text);
+    },
   });
 
   registerInit(program, context);
@@ -103,10 +117,12 @@ export async function run(
   options: CreateProgramOptions = {},
 ): Promise<number> {
   const streams = options.streams ?? processStreams;
+  const json = argv.includes("--json");
   let requested: number = EXIT.ok;
   const program = createProgram({
     ...options,
     streams,
+    json,
     onExitCode: (code) => {
       requested = code;
     },
@@ -119,9 +135,17 @@ export async function run(
     if (error instanceof CommanderError) {
       // `--help` and `--version` arrive here too; commander has already
       // written them and reports exit code 0.
-      return error.exitCode === 0 ? EXIT.ok : EXIT.usage;
+      if (error.exitCode === 0) return EXIT.ok;
+      // A malformed invocation is still a failure a `--json` caller has to be
+      // able to read. Commander's own message was suppressed above, so this is
+      // the only thing written — as the same error envelope every other
+      // failure uses, rather than a bare non-zero exit and an empty stdout.
+      if (!json) return EXIT.usage;
+      return emitError(new KatraException({ code: "usage", message: error.message }), {
+        json,
+        streams,
+      });
     }
-    const json = argv.includes("--json");
     return emitError(error, { json, streams });
   }
 }

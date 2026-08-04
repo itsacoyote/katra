@@ -125,11 +125,14 @@ describe("seedMany", () => {
     expect(new Set(ids).size).toBe(500);
     expect(count("tasks")).toBe(500);
 
+    // Ordered by id, not by created_at: ordering by the column under test
+    // supplies the very property being asserted, so the old version passed
+    // against a seeder that stamped every row identically.
     const stamps = fixture.store.db
-      .prepare("SELECT created_at FROM tasks ORDER BY created_at")
+      .prepare("SELECT created_at FROM tasks ORDER BY id")
       .all()
       .map((r) => (r as { created_at: string }).created_at);
-    expect(stamps[0]).toBe(seedTime(0));
-    expect(new Set(stamps).size).toBe(500);
+
+    expect(stamps).toEqual(ids.map((_, i) => seedTime(i)));
   });
 });

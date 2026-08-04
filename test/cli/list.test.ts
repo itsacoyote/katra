@@ -104,9 +104,15 @@ describe("katra list", () => {
     const lines = result.stdout.trim().split("\n");
 
     expect(lines).toHaveLength(2);
-    // Highest priority first, and the lane column padded to a common width.
+    // Highest priority first.
     expect(lines[0]).toContain("P0");
-    expect(lines[0]).toContain("a much longer title");
+
+    // And the columns actually line up. The previous version asserted only
+    // that the row contained its own priority and title, which is true of
+    // unaligned output too — deleting both `padEnd` calls from the formatter
+    // left it passing. Comparing where the title starts is the property.
+    expect(lines[1]).toContain("Defined    "); // "Defined" padded to "In Progress"
+    expect(lines[0]?.indexOf("a much longer title")).toBe(lines[1]?.indexOf("short"));
   });
 
   it("emits list output that parses as JSON with no human text mixed in", async () => {

@@ -86,7 +86,13 @@ export function insertWithRetry(insert: (id: string) => void): string {
 /** What looking up a partial id produced. */
 export type IdResolution =
   | { readonly kind: "found"; readonly id: string }
-  | { readonly kind: "ambiguous"; readonly input: string; readonly candidates: readonly string[] }
+  | {
+      readonly kind: "ambiguous";
+      readonly input: string;
+      readonly candidates: readonly string[];
+      /** True when more than {@link MAX_CANDIDATES} matched and the list was cut. */
+      readonly truncated: boolean;
+    }
   | { readonly kind: "not_found"; readonly input: string };
 
 /** How many candidates an ambiguous result lists before truncating. */
@@ -132,10 +138,15 @@ export function resolveId(store: OpenStore, input: string): IdResolution {
 
   if (rows.length === 0) return { kind: "not_found", input: trimmed };
   if (rows.length === 1 && rows[0] !== undefined) return { kind: "found", id: rows[0].id };
+
+  // The query asks for one row more than it will report, purely so this is
+  // knowable. Reporting `candidates.length` as the match count without it
+  // states a number that is simply wrong once the cap is hit.
   return {
     kind: "ambiguous",
     input: trimmed,
     candidates: rows.slice(0, MAX_CANDIDATES).map((row) => row.id),
+    truncated: rows.length > MAX_CANDIDATES,
   };
 }
 
@@ -153,9 +164,13 @@ export function requireId(store: OpenStore, input: string): string {
     case "ambiguous":
       throw new KatraException({
         code: "ambiguous_id",
-        message: `"${resolution.input}" matches ${resolution.candidates.length} tasks`,
+        message: resolution.truncated
+          ? `"${resolution.input}" matches more than ${MAX_CANDIDATES} tasks — ` +
+            `here are the first ${MAX_CANDIDATES}; give more characters to narrow it`
+          : `"${resolution.input}" matches ${resolution.candidates.length} tasks`,
         input: resolution.input,
         candidates: resolution.candidates,
+        truncated: resolution.truncated,
       });
     case "not_found":
       throw new KatraException({

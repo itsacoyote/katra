@@ -62,12 +62,39 @@ describe("createTask", () => {
     expect(task.parentId).toBe(epic);
   });
 
-  it("refuses a parent that is not an epic", () => {
+  it.each(["Done", "Cancelled"] as const)("refuses to create a task in %s", (lane) => {
+    // `add` is the third lane-setting path after `update` and `reopen`, and it
+    // was the one without a guard. The schema still refuses the row, but as a
+    // raw CHECK-constraint dump reported under the code "internal" — which is
+    // not a KatraErrorCode, so a consumer switching over the union hits a
+    // value the type says cannot exist.
+    try {
+      createTask(fixture.store, { title: "born finished", lane });
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("validation");
+      expect(error.message).not.toContain("CHECK constraint");
+      expect(error.message).toContain("katra close");
+      expect(error.message).toContain("katra cancel");
+    }
+  });
+
+  it("refuses a parent that is not an epic, naming what it actually is", () => {
     const other = seedTask(fixture.store, { id: "kt-tk1234" });
 
-    expect(() => createTask(fixture.store, { title: "child", parentId: other })).toThrowError(
-      /must reference an epic/,
-    );
+    try {
+      createTask(fixture.store, { title: "child", parentId: other });
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      // A validation refusal, not the trigger's RAISE(ABORT) leaking through:
+      // the trigger's bare string reached the user as an internal error, which
+      // reads as a katra crash rather than as a rejected argument.
+      expect(error.detail.code).toBe("validation");
+      expect(error.message).toContain("is a task, not an epic");
+      expect(error.message).toContain(other);
+    }
   });
 
   it("reports an unknown parent as not found rather than as a constraint failure", () => {

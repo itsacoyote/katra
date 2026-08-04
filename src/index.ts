@@ -5,10 +5,18 @@
  * logic gets written. A later MCP surface imports from here rather than
  * reaching into `src/core/`.
  *
- * Note what is deliberately absent: `OpenStore` and the `better-sqlite3`
- * handle it carries. Publishing those would make the storage engine's concrete
- * type part of katra's API, so a consumer would need better-sqlite3's types
- * resolvable just to hold a store.
+ * **What this is useful for today: reading katra's `--json` output.** Every
+ * type below describes a document one of the twelve commands prints, so a
+ * consumer can `JSON.parse` a command's stdout and hold the result in a checked
+ * shape. The functions are the ones that need no store to run — the value sets,
+ * their predicates, and the error types.
+ *
+ * Note what is deliberately absent: `openStore` and everything that takes an
+ * `OpenStore`. Those carry the `better-sqlite3` handle, so publishing them
+ * would make the storage engine's concrete type part of katra's API and force a
+ * consumer to have better-sqlite3's types resolvable just to call katra. The
+ * in-process API lands when there is a store handle worth publishing; until
+ * then the CLI is the interface and these types describe what it says.
  */
 
 export type { StoreWarning } from "./core/db/locate.js";
@@ -41,29 +49,22 @@ export {
   type KatraErrorDetail,
   KatraException,
 } from "./core/errors.js";
-// The dependency graph. Readiness is defined once by the task_readiness view
-// created with the schema; nothing re-derives it.
+// A blocker, as `next` and `show` report one. Readiness itself is defined once
+// by the task_readiness view created with the schema; nothing re-derives it.
 export type { Blocker } from "./core/graph/deps.js";
-// The store handle, as a type only.
-//
-// `openStore` is deliberately NOT re-exported yet: it returns an `OpenStore`,
-// which carries the better-sqlite3 handle, so publishing it would put the
-// storage engine's concrete type back into the public API through the return
-// value — the exact leak this barrel exists to prevent. A public entry point
-// lands alongside the task API, once there is something for a consumer to do
-// with a store.
-export type { Store } from "./core/store.js";
-// Identity. `resolveId` and `requireId` are not re-exported for the same
-// reason as `openStore`: they take an `OpenStore`, so publishing them would
-// put the storage handle back into the public API through a parameter.
-export {
-  generateId,
-  ID_PREFIX,
-  ID_SUFFIX_LENGTH,
-  type IdResolution,
-  MIN_PREFIX_LENGTH,
-} from "./core/tasks/ids.js";
-// The task model. The core functions that operate on these take an OpenStore,
-// so they are not re-exported here for the same reason as openStore.
-export type { NewTask, Task, TaskDetail, TaskSummary } from "./core/tasks/types.js";
+// What `delete` prints.
+export type { DeleteResult } from "./core/tasks/delete.js";
+// Identity. `resolveId` and `requireId` are not re-exported: they take an
+// `OpenStore`, so publishing them would put the storage handle into the public
+// API through a parameter. `generateId` needs no store and is genuinely usable.
+export { generateId, ID_PREFIX, ID_SUFFIX_LENGTH, MIN_PREFIX_LENGTH } from "./core/tasks/ids.js";
+// What `close`, `cancel` and `reopen` print.
+export type { LifecycleResult } from "./core/tasks/lifecycle.js";
+// What `next` prints — a discriminated union, so the empty case still carries
+// the blocked tasks rather than being indistinguishable from "no work left".
+export type { BlockedTask, NextResult } from "./core/tasks/next.js";
+// What `list` prints.
+export type { TaskList } from "./core/tasks/repo.js";
+// The task model: what `add` and `show` print.
+export type { Task, TaskDetail, TaskSummary } from "./core/tasks/types.js";
 export { VERSION } from "./version.js";

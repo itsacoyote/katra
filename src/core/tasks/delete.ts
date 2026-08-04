@@ -10,11 +10,11 @@
 
 import { writeTx } from "../db/connection.js";
 import { KatraException } from "../errors.js";
-import { isReady, listDependents } from "../graph/deps.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { getTask } from "./repo.js";
-import type { Task, TaskSummary } from "./types.js";
+import type { TaskSummary } from "./types.js";
+import { reportUnblocked } from "./unblocked.js";
 
 export interface DeleteResult {
   readonly id: string;
@@ -35,10 +35,6 @@ function countChildren(store: OpenStore, id: string): number {
   ).c;
 }
 
-function summarise(task: Task): TaskSummary {
-  return { id: task.id, title: task.title, level: task.level, lane: task.lane };
-}
-
 /**
  * Deletes a task and reports what its removal released.
  *
@@ -48,45 +44,35 @@ function summarise(task: Task): TaskSummary {
  * constraint error. Note the violation arrives as
  * `SQLITE_CONSTRAINT_TRIGGER`, not `SQLITE_CONSTRAINT_FOREIGNKEY`, because
  * SQLite implements foreign-key actions through an internal trigger.
+ *
+ * The child count is read **inside the transaction**. Counted before it, a
+ * concurrent `add --parent` could slip a child in between the count and the
+ * delete; the database would still refuse, but as a raw constraint error
+ * instead of the message that names how many children are in the way.
  */
 export function deleteTask(store: OpenStore, idInput: string): DeleteResult {
   const id = requireId(store, idInput);
-  const task = getTask(store, id);
-  if (task === undefined) {
-    throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
-  }
-
-  const children = countChildren(store, id);
-  if (children > 0) {
-    throw new KatraException({
-      code: "conflict",
-      message:
-        `${id} is an epic with ${children} ${children === 1 ? "child" : "children"} — ` +
-        "reparent or delete them first, or cancel the epic instead of deleting it",
-      reason: `${children} children`,
-    });
-  }
 
   return writeTx(store.db, () => {
-    const wasBlocked = listDependents(store, id).filter(
-      (dependent) => !isReady(store, dependent.id),
-    );
+    const task = getTask(store, id);
+    if (task === undefined) {
+      throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
+    }
 
-    store.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
-
-    const unblocked = wasBlocked
-      .filter((dependent) => isReady(store, dependent.id))
-      .map((dependent) => {
-        const full = getTask(store, dependent.id);
-        return full === undefined
-          ? {
-              id: dependent.id,
-              title: dependent.title,
-              level: "task" as const,
-              lane: dependent.lane,
-            }
-          : summarise(full);
+    const children = countChildren(store, id);
+    if (children > 0) {
+      throw new KatraException({
+        code: "conflict",
+        message:
+          `${id} is an epic with ${children} ${children === 1 ? "child" : "children"} — ` +
+          "reparent or delete them first, or cancel the epic instead of deleting it",
+        reason: `${children} children`,
       });
+    }
+
+    const { unblocked } = reportUnblocked(store, id, () => {
+      store.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);
+    });
 
     return { id, title: task.title, unblocked };
   });

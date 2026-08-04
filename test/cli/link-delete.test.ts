@@ -76,6 +76,11 @@ describe("katra link", () => {
     const payload = result.json() as LinkResult;
     expect(payload.action).toBe("linked");
     expect([payload.a, payload.b]).toEqual([a, b].sort());
+    // The pair was passed in as (b, a). Ids are random, so roughly half the
+    // time b already sorts before a and an implementation that simply echoed
+    // its arguments would satisfy the assertion above by luck. This is the
+    // canonical-order claim itself, and it holds on every run.
+    expect(payload.a < payload.b).toBe(true);
   });
 });
 

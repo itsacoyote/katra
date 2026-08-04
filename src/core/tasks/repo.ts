@@ -10,7 +10,7 @@
 
 import { writeTx } from "../db/connection.js";
 import type { Kind, Lane, Level, Priority } from "../enums.js";
-import { PRIORITY_DEFAULT } from "../enums.js";
+import { isTerminal, PRIORITY_DEFAULT } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { READINESS_VIEW } from "../graph/deps.js";
 import { listLinks } from "../graph/links.js";
@@ -83,6 +83,34 @@ function summarise(store: OpenStore, id: string): TaskSummary | null {
 }
 
 /**
+ * Resolves a partial id and proves it names an epic.
+ *
+ * Shared by `add --parent` and `update --parent` because both are the same
+ * question. The database enforces the rule regardless — through a trigger,
+ * since SQLite forbids subqueries in a `CHECK` — but a trigger can only
+ * `RAISE(ABORT)` with a bare string, which reaches the user as an internal
+ * error rather than a refusal naming what went wrong.
+ */
+export function requireEpicId(store: OpenStore, input: string): string {
+  const id = requireId(store, input);
+  const parent = getTask(store, id);
+  if (parent === undefined) {
+    throw new KatraException({ code: "not_found", message: `no task matches "${input}"`, id });
+  }
+  if (parent.level !== "epic") {
+    throw new KatraException({
+      code: "validation",
+      message:
+        `${id} is a ${parent.level}, not an epic — only an epic can hold children. ` +
+        `Promote it with \`katra update ${id} --level epic\` first.`,
+      field: "parent",
+      value: id,
+    });
+  }
+  return id;
+}
+
+/**
  * Creates a task or epic and returns it.
  *
  * The task row and its tags share one timestamp and one transaction, so items
@@ -105,12 +133,28 @@ export function createTask(store: OpenStore, input: NewTask): Task {
   const lane = narrowLane(input.lane ?? "Defined");
   const priority = narrowPriority(input.priority ?? PRIORITY_DEFAULT);
 
-  // Resolved before the write so a partial parent id is accepted and a bad one
-  // is reported as "no such task" rather than as a constraint violation.
+  // `add` is the third path that sets a lane, alongside `update` and `reopen`,
+  // and terminal lanes belong to `close` and `cancel` on all three. Without
+  // this the schema still refuses the row — a terminal lane demands a
+  // closed_at that creation never writes — but as a raw CHECK-constraint dump.
+  if (isTerminal(lane)) {
+    throw new KatraException({
+      code: "validation",
+      message:
+        `a new task cannot start in ${lane} — create it, then use \`katra close\` ` +
+        "to finish it or `katra cancel` to abandon it, so the closing time is recorded",
+      field: "lane",
+      value: lane,
+    });
+  }
+
+  // Resolved before the write so a partial parent id is accepted, and checked
+  // for level so a task given as a parent is refused by name rather than by
+  // the trigger that backs the same rule.
   const parentId =
     input.parentId === undefined || input.parentId === null
       ? null
-      : requireId(store, input.parentId);
+      : requireEpicId(store, input.parentId);
 
   const id = writeTx(store.db, (now) =>
     insertWithRetry((candidate) => {
@@ -187,7 +231,6 @@ export interface TaskFilters {
   readonly priority?: Priority;
   /** true keeps only ready tasks, false only blocked ones. */
   readonly ready?: boolean;
-  readonly limit?: number;
 }
 
 /** What `list` returns. This type is the `--json` contract. */
@@ -232,8 +275,6 @@ export function listTasks(store: OpenStore, filters: TaskFilters = {}): TaskList
   }
 
   const where = conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`;
-  const limit = filters.limit === undefined ? "" : "LIMIT ?";
-  if (filters.limit !== undefined) params.push(filters.limit);
 
   // rowid breaks the remaining tie: two rows written in the same millisecond
   // are routine, and without it their order would be arbitrary.
@@ -242,8 +283,7 @@ export function listTasks(store: OpenStore, filters: TaskFilters = {}): TaskList
       `SELECT t.* FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
        ${where}
-       ORDER BY t.priority, t.created_at, t.rowid
-       ${limit}`,
+       ORDER BY t.priority, t.created_at, t.rowid`,
     )
     .all(...params) as TaskRow[];
 

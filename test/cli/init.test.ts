@@ -97,8 +97,10 @@ describe("katra init", () => {
     const payload = result.json() as { error: { code: string; message: string } };
     expect(payload.error.code).toBe("validation");
     expect(payload.error.message).toMatch(/not inside a git repository/i);
-    // Nothing human-readable may be mixed into stdout under --json.
-    expect(() => JSON.parse(result.stdout)).not.toThrow();
+    // Nothing human-readable may reach either stream under --json. Re-parsing
+    // stdout, as this used to, only repeats what `result.json()` above already
+    // did; the untested half was stderr.
+    expect(result.stderr).toBe("");
   });
 
   it("emits valid JSON with no prose on success", async () => {

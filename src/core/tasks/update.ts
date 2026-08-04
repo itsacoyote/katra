@@ -8,11 +8,11 @@
 
 import { writeTx } from "../db/connection.js";
 import type { Kind, Lane, Priority } from "../enums.js";
-import { isTerminal, TERMINAL_LANES } from "../enums.js";
+import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
-import { getTask } from "./repo.js";
+import { getTask, requireEpicId } from "./repo.js";
 import type { Task } from "./types.js";
 
 /** The fields `update` can change. Anything omitted is left alone. */
@@ -57,27 +57,31 @@ export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch):
     });
   }
 
-  const existing = getTask(store, id);
-  if (existing === undefined) {
-    throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
-  }
-
-  // A task already in a terminal lane has to come back through `reopen`, which
-  // clears closed_at; editing it in place would leave the two disagreeing.
-  if (isTerminal(existing.lane) && patch.lane !== undefined) {
-    throw new KatraException({
-      code: "conflict",
-      message: `${id} is ${existing.lane} — use \`katra reopen\` before changing its lane`,
-      reason: `lane is ${existing.lane}`,
-    });
-  }
-
-  const parentId =
-    patch.parentId === undefined || patch.parentId === null
-      ? patch.parentId
-      : requireId(store, patch.parentId);
-
   return writeTx(store.db, (now) => {
+    // Loaded and guarded inside the transaction. Outside it, another worktree
+    // could close the task between this check and the UPDATE below, and the
+    // write — which never touches closed_at — would leave an active lane
+    // carrying a close timestamp while silently reverting the close.
+    const existing = getTask(store, id);
+    if (existing === undefined) {
+      throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
+    }
+
+    // A task already in a terminal lane has to come back through `reopen`, which
+    // clears closed_at; editing it in place would leave the two disagreeing.
+    if (isTerminal(existing.lane) && patch.lane !== undefined) {
+      throw new KatraException({
+        code: "conflict",
+        message: `${id} is ${existing.lane} — use \`katra reopen\` before changing its lane`,
+        reason: `lane is ${existing.lane}`,
+      });
+    }
+
+    const parentId =
+      patch.parentId === undefined || patch.parentId === null
+        ? patch.parentId
+        : requireEpicId(store, patch.parentId);
+
     const assignments: string[] = [];
     const params: unknown[] = [];
 
@@ -100,7 +104,15 @@ export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch):
       set("title", title);
     }
     if (patch.description !== undefined) set("description", patch.description);
-    if (patch.lane !== undefined) set("lane", patch.lane);
+    if (patch.lane !== undefined) {
+      set("lane", patch.lane);
+      // Guaranteed non-terminal by the check above, so the close columns cannot
+      // be left behind pointing at a lane that no longer means "finished".
+      // Structural rather than argued: the schema enforces terminal ⇒ closed_at,
+      // never the converse, so nothing else would catch it.
+      set("closed_at", null);
+      set("close_reason", null);
+    }
     if (patch.priority !== undefined) set("priority", patch.priority);
     if (patch.kind !== undefined) set("kind", patch.kind);
     if (patch.assignee !== undefined) set("assignee", patch.assignee);
@@ -132,6 +144,3 @@ export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch):
     return updated;
   });
 }
-
-/** The lanes `update` refuses, for messages that name them. */
-export const LANES_REQUIRING_A_COMMAND = TERMINAL_LANES;

@@ -142,8 +142,12 @@ function explainGitFailure(failure: GitFailure): KatraException {
  * would open a store belonging to a different project without a word.
  *
  * The check only runs when one of the variables is actually present, and it
- * must not fire for a linked worktree, whose common dir legitimately differs
- * from its own toplevel.
+ * asks the question directly: **would git resolve somewhere else without
+ * them?** Anything else has to guess at the shape of a git dir, and the shapes
+ * are not guessable — a plain clone's is `<toplevel>/.git`, a linked
+ * worktree's lives under `worktrees/`, and a submodule's is
+ * `<superproject>/.git/modules/<name>`. Comparing against `<toplevel>/.git`,
+ * as this used to, reports a correctly-resolved submodule as a foreign repo.
  */
 function checkAmbientRedirect(
   cwd: string,
@@ -153,19 +157,29 @@ function checkAmbientRedirect(
   const named = ["GIT_COMMON_DIR", "GIT_DIR"].filter((name) => env[name] !== undefined);
   if (named.length === 0) return [];
 
-  const toplevel = runGit(cwd, env, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
-  const gitDir = runGit(cwd, env, ["rev-parse", "--path-format=absolute", "--git-dir"]);
+  const clean: NodeJS.ProcessEnv = { ...env };
+  for (const name of named) delete clean[name];
 
-  const isOwnRepo = commonDir === join(toplevel, ".git");
-  const isLinkedWorktree = gitDir.startsWith(join(commonDir, "worktrees"));
-  if (isOwnRepo || isLinkedWorktree) return [];
+  let unredirected: string;
+  try {
+    unredirected = runGit(cwd, clean, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  } catch {
+    // Without the variables this directory is not a repository at all, so they
+    // are not redirecting resolution — they are the only reason it works here.
+    // That is deliberate use, not an accident worth warning about.
+    return [];
+  }
 
+  if (unredirected === commonDir) return [];
+
+  const toplevel = runGit(cwd, clean, ["rev-parse", "--path-format=absolute", "--show-toplevel"]);
   return [
     {
       code: "ambient-git-dir",
       message:
         `${named.join(" and ")} in the environment redirected katra's store to ` +
-        `${commonDir}, which does not belong to the repository at ${toplevel}. ` +
+        `${commonDir}, which does not belong to the repository at ${toplevel} ` +
+        `(that one resolves to ${unredirected}). ` +
         "Unset it if that was not deliberate — katra is reading a different project's tasks.",
     },
   ];

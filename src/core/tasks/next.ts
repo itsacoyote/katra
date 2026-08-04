@@ -10,11 +10,13 @@
  */
 
 import type { Kind, Level } from "../enums.js";
+import { KatraException } from "../errors.js";
 import type { Blocker } from "../graph/deps.js";
 import { listBlockers, READINESS_VIEW } from "../graph/deps.js";
 import type { OpenStore } from "../store.js";
 import { getTask } from "./repo.js";
 import type { Task, TaskSummary } from "./types.js";
+import { summarise } from "./types.js";
 
 /** The lane `next` draws from: work that has been planned but not started. */
 export const NEXT_LANE = "Planned";
@@ -91,17 +93,23 @@ export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResul
 
   if (candidate !== undefined) {
     const task = getTask(store, candidate.id);
-    if (task !== undefined) {
-      const parent = task.parentId === null ? null : getTask(store, task.parentId);
-      return {
-        status: "found",
-        task,
-        epic:
-          parent === undefined || parent === null
-            ? null
-            : { id: parent.id, title: parent.title, level: parent.level, lane: parent.lane },
-      };
+    if (task === undefined) {
+      // The row was returned by the query one statement ago. Falling through to
+      // the blocked query here, as this used to, would answer "nothing is
+      // ready" — indistinguishable from a genuinely stuck backlog, and an agent
+      // reading that stops working.
+      throw new KatraException({
+        code: "not_found",
+        message: `task ${candidate.id} disappeared between being selected and being read`,
+        id: candidate.id,
+      });
     }
+    const parent = task.parentId === null ? null : getTask(store, task.parentId);
+    return {
+      status: "found",
+      task,
+      epic: parent === undefined || parent === null ? null : summarise(parent),
+    };
   }
 
   // Nothing startable. Say what is planned but blocked, so the answer points
