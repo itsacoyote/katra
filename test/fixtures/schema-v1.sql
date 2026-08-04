@@ -6,8 +6,13 @@ CREATE TABLE tasks (
   title        TEXT NOT NULL,
   description  TEXT,
   lane         TEXT NOT NULL DEFAULT 'Defined' CHECK (lane IN ('Defined','Researching','Planned','In Progress','In Review','Done','Cancelled')),
+  -- typeof, not just the range: SQLite's flexible typing stores 2.5 in an
+  -- INTEGER column, and BETWEEN accepts it. The row then throws from
+  -- narrowPriority the next time anything reads it, which is a corrupt store
+  -- rather than a rejected write.
   priority     INTEGER NOT NULL DEFAULT 2
-               CHECK (priority BETWEEN 0 AND 4),
+               CHECK (typeof(priority) = 'integer'
+                      AND priority BETWEEN 0 AND 4),
   assignee     TEXT,
   -- RESTRICT, not SET NULL: SET NULL orphans an epic's children with no error,
   -- no lane change and no trace. RESTRICT makes refusing that deletion a

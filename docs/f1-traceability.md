@@ -10,7 +10,9 @@ It is a real check, not a formality. Two review passes have now found tests here
 
 Each row below is marked covered because a test was written or rewritten, not because the criterion looked satisfied.
 
-**Result: 47 of 47 covered.** `pnpm check` passes with 401 tests.
+**Result: all 46 acceptance criteria covered**, plus requirement 55 (the tie-break on the join-driven listings), which had no criterion of its own and no test. `pnpm check` passes with 403 tests.
+
+Rows marked † are not numbered acceptance criteria — they are requirements the reviews found uncovered, given a row here so they are not lost again.
 
 Where a criterion cannot be fully proven by a black-box test, that is stated in the row rather than papered over — see criterion 45.
 
@@ -22,7 +24,9 @@ Where a criterion cannot be fully proven by a black-box test, that is stated in 
 | 2 | Outside a repo exits non-zero; missing git and a broken worktree are distinct | "exits non-zero with a not-a-repository message outside a git repo" · "throws a distinct error when the git binary is absent from PATH" · "surfaces git's own stderr when a worktree's main repository has moved" | `test/cli/init.test.ts`, `test/core/locate.test.ts` |
 | 3 | Identical from root, subdirectory and worktree | "resolves the same absolute store path from the repo root, a subdirectory, and a linked worktree" | `test/core/locate.test.ts` |
 | 4 | `git status` byte-identical across a lifecycle | "stays byte-identical across a representative lifecycle" | `test/cli/feature.test.ts` |
-| 5 | Foreign keys on, non-zero busy timeout, every connection | "reports foreign_keys enabled on every new connection" · "sets a non-zero busy_timeout on every new connection" · "actually enforces foreign keys rather than merely reporting them on" | `test/core/connection.test.ts` |
+| 5 | Foreign keys on, katra's busy timeout, every connection | "issues the foreign_keys pragma on every new connection" · "sets katra's own busy_timeout on every new connection" · "actually enforces foreign keys rather than merely reporting them on" | `test/core/connection.test.ts` |
+
+> **Criterion 5 had no falsifiable test until the third review pass.** Deleting *both* per-connection pragmas from `openDatabase` left the whole file green: better-sqlite3's defaults are `busy_timeout = 5000` — which `BUSY_TIMEOUT_MS` also was — and this build compiles with `DEFAULT_FOREIGN_KEYS`, so `PRAGMA foreign_keys` already reads 1 with no pragma issued. `BUSY_TIMEOUT_MS` is now 7500 so the value distinguishes, and the foreign-key claim is asserted white-box on the pragma call, since no observable value can. Mutation-verified: removing either pragma now fails.
 
 > AC4 previously asserted the database was invisible to `git status` — vacuously true for anything inside `.git/`, so no implementation could fail it. See ADR-004.
 
@@ -33,7 +37,7 @@ Where a criterion cannot be fully proven by a black-box test, that is stated in 
 | 6 | Six concurrent processes, zero `SQLITE_BUSY` | "completes all writes from six concurrent processes with no SQLITE_BUSY" | `test/core/connection.test.ts` |
 | 7 | Two processes adding opposite edges — one succeeds | "allows only one of two processes adding opposite edges" | `test/core/deps.test.ts` |
 | 8 | Two processes racing `init` — migration applied once | "survives several processes racing to create the same store" · "applies the migration exactly once when several processes race a new store" | `test/core/store.test.ts`, `test/core/migrate.test.ts` |
-| 42a | Two processes closing the same task — exactly one succeeds | "lets exactly one of two processes close the same task" | `test/core/lifecycle.test.ts` |
+| 42a† | Two processes closing the same task — exactly one succeeds | "lets exactly one of two processes close the same task" | `test/core/lifecycle.test.ts` |
 
 > Both 6 and 7 are mutation-verified: removing `.immediate()` fails 4/4 runs, and moving the cycle check outside the transaction fails 4/4. The WAL-retry test at criterion 8 is probabilistic — 3 rounds catch a missing retry roughly 2 times in 3, and the retry logic itself is pinned deterministically in `test/core/retry.test.ts`.
 
@@ -104,7 +108,7 @@ Where a criterion cannot be fully proven by a black-box test, that is stated in 
 | 39 | A `GIT_COMMON_DIR` warning reaches the user from a non-`init` command | "surfaces the GIT_COMMON_DIR warning from show, not only from init" | `test/cli/add-show.test.ts` |
 | 44 | `--body-file` resolves relative to the invoking directory | "reads --body-file relative to the invoking directory, not the repo root" | `test/cli/add-show.test.ts` |
 | 45 | Rows sharing a `created_at` are ordered deterministically in `list` and `next` | "breaks a created_at tie by insertion order, not by id" (×2) · "agrees with next about which of two tied tasks comes first" | `test/core/list.test.ts`, `test/core/next.test.ts` |
-| 55 | The same tie-break holds on every dependency and link listing | "breaks a created_at tie among dependents / dependencies / blockers / links by task insertion order" | `test/core/deps.test.ts`, `test/core/links.test.ts` |
+| 55† | The same tie-break holds on every dependency and link listing | "breaks a created_at tie among dependents / dependencies / blockers / links by task insertion order" | `test/core/deps.test.ts`, `test/core/links.test.ts` |
 | 30 | `pnpm check` passes and every criterion maps to a named test | this document, plus the suite | — |
 
 > Criteria 35 and 38 previously had no owner: every task added a *per-command* test, and nobody was assigned the aggregate. Both now iterate the program's own command list rather than a hand-written one, so a command added later and left unwired fails the suite.

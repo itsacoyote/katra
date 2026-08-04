@@ -207,8 +207,15 @@ describe("--json is parsed, not string-matched", () => {
   });
 
   it("ignores --json after a bare double dash", async () => {
-    const result = await runCli(["add", "--", "--json"], { cwd: repo.dir });
-    expect(result.stdout).toMatch(/^kt-/);
+    // Observed on a *failing* invocation, because that is the only place
+    // wantsJson's answer is visible. Asserting that `add -- --json` creates a
+    // task only observes commander's own `--` handling: deleting the
+    // terminator logic from wantsJson left that version passing.
+    const result = await runCli(["show", "--", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).not.toBe(EXIT.ok);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).not.toBe("");
   });
 
   it("keeps stdout parseable for --help", async () => {

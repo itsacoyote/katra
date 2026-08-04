@@ -116,6 +116,24 @@ describe("database-level rejection of every constrained field", () => {
       /CHECK constraint failed/,
     );
   });
+
+  it("rejects a priority that is in range but not an integer", () => {
+    // SQLite's typing is flexible: without `typeof(priority) = 'integer'` an
+    // INTEGER column stores 2.5 happily and `BETWEEN 0 AND 4` accepts it. The
+    // row is then rejected by narrowPriority on every subsequent read — a
+    // store that is already corrupt rather than a write that was refused.
+    expect(() => rawInsert(db, baseTask({ priority: 2.5 }))).toThrowError(
+      /CHECK constraint failed/,
+    );
+    expect(() => rawInsert(db, baseTask({ id: "kt-cccccc", priority: 0.5 }))).toThrowError(
+      /CHECK constraint failed/,
+    );
+
+    // A numeric string is a different case and must still be accepted:
+    // INTEGER affinity converts "2" to the integer 2 losslessly, so the stored
+    // value is exactly what a caller passing 2 would have written.
+    expect(() => rawInsert(db, baseTask({ id: "kt-dddddd", priority: "2" }))).not.toThrow();
+  });
 });
 
 describe("hierarchy rules", () => {

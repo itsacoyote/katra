@@ -54,15 +54,20 @@ export function addLink(
   firstInput: string,
   secondInput: string,
 ): { a: string; b: string } {
-  const [a, b] = resolvePair(store, firstInput, secondInput);
+  return writeTx(store.db, (now) => {
+    // Resolved inside the transaction, as in `addDependency`: a concurrent
+    // delete between resolution and the INSERT raises a raw foreign-key
+    // violation — `INSERT OR IGNORE` does not suppress one — which reaches the
+    // caller as `internal` and exit 4, meaning "retry" when the task is gone
+    // for good.
+    const [a, b] = resolvePair(store, firstInput, secondInput);
 
-  writeTx(store.db, (now) => {
     store.db
       .prepare("INSERT OR IGNORE INTO links (a_id, b_id, created_at) VALUES (?,?,?)")
       .run(a, b, now);
-  });
 
-  return { a, b };
+    return { a, b };
+  });
 }
 
 /** Removes a link. Works from either direction, since the pair is one row. */

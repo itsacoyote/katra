@@ -177,11 +177,14 @@ describe("updateTask", () => {
     expect(after.task.updatedAt).not.toBe(after.task.createdAt);
   });
 
-  it("leaves updated_at alone when a tag edit changed nothing", () => {
+  it.each([
+    ["adding a tag it already has", { addTags: ["already"] }],
+    ["removing a tag it never had", { removeTags: ["never-had-this"] }],
+  ])("leaves updated_at alone when %s", (_name, patch) => {
     const id = seedTask(fixture.store, { tags: ["already"] });
     const before = getTask(fixture.store, id);
 
-    const after = updateTask(fixture.store, id, { addTags: ["already"] });
+    const after = updateTask(fixture.store, id, patch);
 
     expect(after.task.updatedAt).toBe(before?.updatedAt);
   });

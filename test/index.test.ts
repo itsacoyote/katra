@@ -93,7 +93,11 @@ describe("the public barrel", () => {
         forbidden,
       );
 
-      for (const match of source.matchAll(/from\s+"(\.[^"]+)\.js"/g)) {
+      // Both `from "…"` and the `import("…")` type-position form. Matching
+      // only the `from` keyword left a bypass: `export type X =
+      // import("./core/store.js").X` is invisible to it, and re-added the
+      // better-sqlite3 leak while this test stayed green.
+      for (const match of source.matchAll(/(?:\bfrom\s+|\bimport\s*\(\s*)"(\.[^"]+)\.js"/g)) {
         const specifier = match[1];
         if (specifier === undefined) continue;
         walk(resolve(dirname(file), `${specifier}.ts`), path);

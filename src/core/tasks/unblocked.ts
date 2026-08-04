@@ -71,8 +71,11 @@ export function reportReadinessChange<T>(
   const unblocked: TaskSummary[] = [];
   const reblocked: TaskSummary[] = [];
   for (const [dependentId, wasReady] of before) {
-    // A dependent deleted by a cascade is neither: it has no readiness to have
-    // changed, and reporting it would name a task that no longer exists.
+    // Defensive, and currently unreachable: `parent_id` is ON DELETE RESTRICT
+    // and the cascades on deps/links/tags remove only their own rows, so no
+    // mutation here can take a dependent task with it. Kept because F2 adds
+    // more edge kinds, and reporting a task that no longer exists would be a
+    // worse failure than skipping it.
     if (getTask(store, dependentId) === undefined) continue;
 
     const nowReady = isReady(store, dependentId);

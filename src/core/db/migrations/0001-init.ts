@@ -56,8 +56,13 @@ CREATE TABLE tasks (
   title        TEXT NOT NULL,
   description  TEXT,
   lane         TEXT NOT NULL DEFAULT 'Defined' CHECK (lane IN (${sqlEnum(sets.lanes)})),
+  -- typeof, not just the range: SQLite's flexible typing stores 2.5 in an
+  -- INTEGER column, and BETWEEN accepts it. The row then throws from
+  -- narrowPriority the next time anything reads it, which is a corrupt store
+  -- rather than a rejected write.
   priority     INTEGER NOT NULL DEFAULT ${sets.priorityDefault}
-               CHECK (priority BETWEEN ${sets.priorityMin} AND ${sets.priorityMax}),
+               CHECK (typeof(priority) = 'integer'
+                      AND priority BETWEEN ${sets.priorityMin} AND ${sets.priorityMax}),
   assignee     TEXT,
   -- RESTRICT, not SET NULL: SET NULL orphans an epic's children with no error,
   -- no lane change and no trace. RESTRICT makes refusing that deletion a

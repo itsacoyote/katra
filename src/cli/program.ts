@@ -51,14 +51,6 @@ export interface CreateProgramOptions {
   readonly readStdin?: () => string | undefined;
   readonly onExitCode?: (code: number) => void;
   /**
-   * Whether `--json` was asked for.
-   *
-   * Commander's own help and usage errors are prose, and under `--json` prose
-   * must not reach either stream — so the program has to be told before it
-   * parses. {@link wantsJson} works this out; do not scan argv by hand.
-   */
-  readonly json?: boolean;
-  /**
    * Where commander's prose goes instead of the real streams.
    *
    * Set by `run` under `--json`. Commander writes help screens and usage
@@ -185,7 +177,6 @@ export async function run(
   const program = createProgram({
     ...options,
     streams,
-    json,
     ...(json
       ? {
           onProse: (text: string) => {

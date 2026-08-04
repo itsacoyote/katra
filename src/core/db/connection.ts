@@ -25,8 +25,12 @@ type DatabaseHandle = Database.Database;
  *
  * Named rather than inlined so the six-process contention test and the runtime
  * cannot drift apart, and so a CI runner under load has one value to tune.
+ *
+ * Deliberately **not** 5000, which is better-sqlite3's own default: a test
+ * asserting the pragma took effect could not fail while the two agreed, and
+ * deleting the pragma entirely left the suite green.
  */
-export const BUSY_TIMEOUT_MS = 5000;
+export const BUSY_TIMEOUT_MS = 7500;
 
 /** Recognises the SQLite error codes that mean "this file is not a usable store". */
 function isUnreadableStore(error: unknown): boolean {

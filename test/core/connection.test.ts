@@ -1,7 +1,8 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BUSY_TIMEOUT_MS, openDatabase, writeTx } from "../../src/core/db/connection.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { runConcurrent } from "../helpers/concurrent.js";
@@ -26,9 +27,34 @@ describe("openDatabase", () => {
     expect(db.pragma("journal_mode", { simple: true })).toBe("wal");
   });
 
-  it("reports foreign_keys enabled on every new connection", () => {
+  it("issues the foreign_keys pragma on every new connection", () => {
     // Per-connection, not stored in the file: a second connection that skipped
     // the pragma would silently lose referential integrity.
+    //
+    // Asserted white-box, on the call rather than the value, because the value
+    // cannot distinguish. This better-sqlite3 build compiles with
+    // DEFAULT_FOREIGN_KEYS, so `PRAGMA foreign_keys` already reads 1 with no
+    // pragma issued at all — deleting the line from openDatabase left the
+    // whole file green. That default is a distribution-specific compile flag,
+    // not portable, and the dependency floats.
+    const spy = vi.spyOn(Database.prototype, "pragma");
+    try {
+      const path = tempDbPath();
+      const first = openDatabase(path);
+      const second = openDatabase(path);
+      cleanups.push(() => {
+        first.close();
+        second.close();
+      });
+
+      const issued = spy.mock.calls.filter((call) => call[0] === "foreign_keys = ON");
+      expect(issued).toHaveLength(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("sets katra's own busy_timeout on every new connection", () => {
     const path = tempDbPath();
     const first = openDatabase(path);
     const second = openDatabase(path);
@@ -37,16 +63,11 @@ describe("openDatabase", () => {
       second.close();
     });
 
-    expect(first.pragma("foreign_keys", { simple: true })).toBe(1);
-    expect(second.pragma("foreign_keys", { simple: true })).toBe(1);
-  });
-
-  it("sets a non-zero busy_timeout on every new connection", () => {
-    const db = openDatabase(tempDbPath());
-    cleanups.push(() => db.close());
-
-    expect(db.pragma("busy_timeout", { simple: true })).toBe(BUSY_TIMEOUT_MS);
-    expect(BUSY_TIMEOUT_MS).toBeGreaterThan(0);
+    // BUSY_TIMEOUT_MS differs from better-sqlite3's 5000 default on purpose:
+    // while they matched, this assertion held whether or not the pragma ran.
+    expect(BUSY_TIMEOUT_MS).not.toBe(5000);
+    expect(first.pragma("busy_timeout", { simple: true })).toBe(BUSY_TIMEOUT_MS);
+    expect(second.pragma("busy_timeout", { simple: true })).toBe(BUSY_TIMEOUT_MS);
   });
 
   it("actually enforces foreign keys rather than merely reporting them on", () => {

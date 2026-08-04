@@ -111,19 +111,25 @@ export function addDependency(
   taskIdInput: string,
   dependsOnInput: string,
 ): { taskId: string; dependsOnId: string } {
-  const taskId = requireId(store, taskIdInput);
-  const dependsOnId = requireId(store, dependsOnInput);
+  return writeTx(store.db, (now) => {
+    // Resolved inside the transaction. Outside it, another worktree deleting
+    // either task before the INSERT turns this into a raw
+    // SQLITE_CONSTRAINT_FOREIGNKEY — `INSERT OR IGNORE` does not suppress a
+    // foreign-key violation — which surfaces as `internal` and exit 4, telling
+    // the caller to retry work that can never succeed. The truth is
+    // `not_found`, and it is final.
+    const taskId = requireId(store, taskIdInput);
+    const dependsOnId = requireId(store, dependsOnInput);
 
-  if (taskId === dependsOnId) {
-    throw new KatraException({
-      code: "validation",
-      message: `a task cannot depend on itself (${taskId})`,
-      field: "depends-on",
-      value: dependsOnId,
-    });
-  }
+    if (taskId === dependsOnId) {
+      throw new KatraException({
+        code: "validation",
+        message: `a task cannot depend on itself (${taskId})`,
+        field: "depends-on",
+        value: dependsOnId,
+      });
+    }
 
-  writeTx(store.db, (now) => {
     const cycle = findCycle(store, taskId, dependsOnId);
     if (cycle !== null) {
       throw new KatraException({
@@ -136,9 +142,9 @@ export function addDependency(
     store.db
       .prepare("INSERT OR IGNORE INTO deps (task_id, depends_on_id, created_at) VALUES (?,?,?)")
       .run(taskId, dependsOnId, now);
-  });
 
-  return { taskId, dependsOnId };
+    return { taskId, dependsOnId };
+  });
 }
 
 /** Removes a dependency edge. Reports when there was nothing to remove. */
