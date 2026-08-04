@@ -76,7 +76,9 @@ describe("the public barrel", () => {
     // and needs no build step. `dist/` is deliberately not consulted: a test
     // that only works after `pnpm build` is a test that silently no-ops.
     const root = fileURLToPath(new URL("../src", import.meta.url));
-    const forbidden = /better-sqlite3|NodeJS\./;
+    // `Buffer` and friends are `@types/node` globals: they need no import,
+    // so no import-form check can catch them, and they leak the same way.
+    const forbidden = /better-sqlite3|NodeJS\.|\bBuffer\b|\bNodeJS\b/;
     // Comments stripped first: several of these modules *explain* the rule, and
     // matching their prose would fail on the documentation rather than the code.
     const code = (source: string): string =>

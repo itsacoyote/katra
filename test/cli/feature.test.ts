@@ -373,6 +373,52 @@ describe("katra next", () => {
     expect(text.stdout).toMatch(/nothing/i);
   });
 
+  it("refuses --epic pointed at a task that is not an epic", async () => {
+    // Same guard as `list --epic`, and it was equally unpinned: swapping
+    // requireEpicId back to requireId left all 413 tests green. An empty
+    // answer here reads as "this epic has nothing ready" rather than "that is
+    // not an epic", which is the more expensive misreading of the two.
+    const notAnEpic = await add(["a plain task", "--lane", "Planned"]);
+
+    const result = await runCli(["next", "--epic", notAnEpic], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/not an epic/);
+  });
+
+  it("narrows to one epic's children", async () => {
+    const wanted = await add(["the wanted epic", "--level", "epic"]);
+    const other = await add(["another epic", "--level", "epic"]);
+    await add(["in the other epic", "--lane", "Planned", "--priority", "0", "--parent", other]);
+    const inWanted = await add([
+      "in the wanted epic",
+      "--lane",
+      "Planned",
+      "--priority",
+      "4",
+      "--parent",
+      wanted,
+    ]);
+
+    const result = await runCli(["next", "--epic", wanted], { cwd: repo.dir });
+
+    // The lower-priority task wins because the filter excluded the other one.
+    expect(result.stdout).toContain(inWanted);
+  });
+
+  it("narrows by level", async () => {
+    // Deleting the --level filter outright left the whole suite green.
+    await add(["a planned task", "--lane", "Planned", "--priority", "0"]);
+    const epic = await add(["a planned epic", "--level", "epic", "--lane", "Planned"]);
+
+    const result = await runCli(["next", "--level", "epic", "--json"], { cwd: repo.dir });
+
+    const payload = result.json() as { status: string; task?: { id: string; level: string } };
+    expect(payload.status).toBe("found");
+    expect(payload.task?.id).toBe(epic);
+    expect(payload.task?.level).toBe("epic");
+  });
+
   it("narrows by kind without returning more than one item", async () => {
     await add(["a feature", "--lane", "Planned", "--kind", "feat", "--priority", "0"]);
     const bug = await add(["a bug", "--lane", "Planned", "--kind", "fix", "--priority", "4"]);

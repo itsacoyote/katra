@@ -11,7 +11,7 @@ It is a real check, not a formality. Two review passes have now found tests here
 
 Each row below is marked covered because a test was written or rewritten, not because the criterion looked satisfied.
 
-**Result: all 46 acceptance criteria covered**, plus requirement 55 (the tie-break on the join-driven listings), which had no criterion of its own and no test. `pnpm check` passes with 413 tests.
+**Result: all 46 acceptance criteria covered**, plus requirement 55 (the tie-break on the join-driven listings), which had no criterion of its own and no test. `pnpm check` passes with 416 tests.
 
 Rows marked † are not numbered acceptance criteria — they are requirements the reviews found uncovered, given a row here so they are not lost again.
 
@@ -26,8 +26,6 @@ Where a criterion cannot be fully proven by a black-box test, that is stated in 
 | 3 | Identical from root, subdirectory and worktree | "resolves the same absolute store path from the repo root, a subdirectory, and a linked worktree" | `test/core/locate.test.ts` |
 | 4 | `git status` byte-identical across a lifecycle | "stays byte-identical across a representative lifecycle" | `test/cli/feature.test.ts` |
 | 5 | Foreign keys on, katra's busy timeout, every connection | "issues the foreign_keys pragma on every new connection" · "sets katra's own busy_timeout on every new connection" · "actually enforces foreign keys rather than merely reporting them on"† | `test/core/connection.test.ts` |
-
-> **Criterion 26 changed behaviour.** It required `next` to exit non-zero when nothing is ready. ADR-005 then defined 1 as "refused, do not retry", which made that a self-contradiction — closing a blocker makes the identical command return a task, so it is the textbook *retry later*. [ADR-006](decisions/ADR-006-next-exits-zero.md) supersedes it: `next` always exits 0 and the distinction lives in the payload, where `status` and `blocked` already carried it.
 
 > **Criterion 5 had no falsifiable test until the third review pass.** Deleting *both* per-connection pragmas from `openDatabase` left the whole file green: better-sqlite3's defaults are `busy_timeout = 5000` — which `BUSY_TIMEOUT_MS` also was — and this build compiles with `DEFAULT_FOREIGN_KEYS`, so `PRAGMA foreign_keys` already reads 1 with no pragma issued. `BUSY_TIMEOUT_MS` is now 7500 so the value distinguishes, and the foreign-key claim is asserted white-box on the pragma call, since no observable value can. Mutation-verified: removing either pragma now fails.
 
@@ -117,6 +115,8 @@ Where a criterion cannot be fully proven by a black-box test, that is stated in 
 | 30 | `pnpm check` passes and every criterion maps to a named test | this document, plus the suite | — |
 
 > Criteria 35 and 38 previously had no owner: every task added a *per-command* test, and nobody was assigned the aggregate. Both now iterate the program's own command list rather than a hand-written one, so a command added later and left unwired fails the suite.
+
+> **Criterion 26 changed behaviour.** It required `next` to exit non-zero when nothing is ready. ADR-005 then defined 1 as "refused, do not retry", which made that a self-contradiction — closing a blocker makes the identical command return a task, so it is the textbook *retry later*. [ADR-006](decisions/ADR-006-next-exits-zero.md) supersedes it: `next` always exits 0 and the distinction lives in the payload, where `status` and `blocked` already carried it.
 
 > **Criterion 29 changed behaviour, not just its test.** A cycle mapped to exit 1; the spec says 3. The test named "reaches the conflict code by all three routes the spec names" exercised two routes and then asserted the third produced a *different* code — and this document cited it as covering the criterion, so the audit reported green on its own violation. `cycle` now maps to `EXIT.conflict`: both ids exist and the command is well formed, so only the current shape of the graph refuses it, which is exactly what separates 3 from 1.
 

@@ -55,7 +55,7 @@ It is **not** a member of `KATRA_ERROR_CODES`, and nothing in `src/core/` throws
 ## Consequences
 
 - An agent can distinguish *do not retry* (1, 2, 3) from *retry or escalate* (4) without reading prose.
-- `exitCodeFor` handles `internal` outside the `satisfies`-checked table, so adding a genuine `KatraErrorCode` without a mapping is still a compile error.
+- `exitCodeFor` takes a `KatraErrorCode` and is total over it, so adding a code without a mapping is still a compile error. `internal` never reaches it: the fault path in `emitError` returns `EXIT.internal` directly, which is the one place a caught non-`KatraException` becomes an exit code.
 - The spec's "four exit codes" wording is superseded. `docs/f1-traceability.md` criterion 29 continues to exercise the original four on real paths; two further tests in the same file — "uses a distinct code for a genuine fault, not the user-error code" and "reports a fault under --json in the same envelope as a refusal" — cover the fifth against a real read-only store.
 - Every future surface — an MCP server, a library API — inherits the distinction, because it lives in the shared error union rather than in the CLI.
 

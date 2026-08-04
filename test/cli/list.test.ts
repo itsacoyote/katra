@@ -121,7 +121,10 @@ describe("katra list", () => {
     // either — `--level epic` was only ever exercised through --json.
     await add(["a fix", "--kind", "fix"]);
     await add(["a chore", "--kind", "chore"]);
-    await add(["an epic", "--level", "epic"]);
+    // Titled "a milestone", not "an epic": with "epic" in the title, the last
+    // assertion below matched the title itself and held whether or not the
+    // column showed the level at all.
+    await add(["a milestone", "--level", "epic"]);
 
     const lines = (await runCli(["list"], { cwd: repo.dir })).stdout.trim().split("\n");
     const titleColumn = (title: string) =>
@@ -130,10 +133,12 @@ describe("katra list", () => {
     // "chore" is the widest, so every title starts at the same column only if
     // the kind is padded to it.
     expect(titleColumn("a fix")).toBe(titleColumn("a chore"));
-    expect(titleColumn("an epic")).toBe(titleColumn("a chore"));
+    expect(titleColumn("a milestone")).toBe(titleColumn("a chore"));
 
     // And an epic shows its level, not the kind it happens to carry.
-    expect(lines.find((line) => line.includes("an epic"))).toMatch(/\bepic\b/);
+    const epicRow = lines.find((line) => line.includes("a milestone"));
+    expect(epicRow).toMatch(/\bepic\b/);
+    expect(epicRow).not.toMatch(/\bfeat\b/);
   });
 
   it("refuses --epic pointed at a task that is not an epic", async () => {
