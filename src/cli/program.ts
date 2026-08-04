@@ -14,6 +14,7 @@ import { registerDep } from "./commands/dep.js";
 import { registerInit } from "./commands/init.js";
 import { registerList } from "./commands/list.js";
 import { registerShow } from "./commands/show.js";
+import { registerUpdate } from "./commands/update.js";
 import type { OutputStreams } from "./output.js";
 import { EXIT, emitError, processStreams } from "./output.js";
 
@@ -69,6 +70,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerShow(program, context);
   registerDep(program, context);
   registerList(program, context);
+  registerUpdate(program, context);
 
   return program;
 }
