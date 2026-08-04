@@ -7,8 +7,21 @@
  * so both narrow through a predicate rather than asserting with `as`.
  */
 
-import type { Kind, Lane, Level, Priority } from "./enums.js";
-import { isKind, isLane, isLevel, isPriority, KINDS, LANES, LEVELS, PRIORITIES } from "./enums.js";
+import type { EventType, Kind, Lane, Level, NoteKind, Priority } from "./enums.js";
+import {
+  EVENT_TYPES,
+  isEventType,
+  isKind,
+  isLane,
+  isLevel,
+  isNoteKind,
+  isPriority,
+  KINDS,
+  LANES,
+  LEVELS,
+  NOTE_KINDS,
+  PRIORITIES,
+} from "./enums.js";
 import { KatraException } from "./errors.js";
 
 function invalid(field: string, value: unknown, allowed: readonly (string | number)[]): never {
@@ -30,6 +43,21 @@ export function narrowKind(value: unknown): Kind {
 
 export function narrowLane(value: unknown): Lane {
   return isLane(value) ? value : invalid("lane", value, LANES);
+}
+
+export function narrowEventType(value: unknown): EventType {
+  return isEventType(value) ? value : invalid("event type", value, EVENT_TYPES);
+}
+
+/**
+ * Narrows a *note's* kind — `general`/`handoff`/… — not a task's.
+ *
+ * The field is called "note kind" rather than "kind" so the refusal says which
+ * of the two sets it means. {@link narrowKind} is the other one; nothing wires
+ * them together and no value belongs to both.
+ */
+export function narrowNoteKind(value: unknown): NoteKind {
+  return isNoteKind(value) ? value : invalid("note kind", value, NOTE_KINDS);
 }
 
 export function narrowPriority(value: unknown): Priority {
