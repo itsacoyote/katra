@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { createGitRepo, createNonRepoDir, git } from "./fixture.js";
@@ -60,7 +60,9 @@ describe("git fixture", () => {
     const repo = createGitRepo();
     cleanups.push(() => repo.cleanup());
 
-    const normalise = (path: string) => realpathSync(path).replaceAll("\\", "/").toLowerCase();
+    // Separators and case only: the fixture already hands back the resolved,
+    // long-form path, so anything more would be normalising away the claim.
+    const normalise = (path: string) => path.replaceAll("\\", "/").toLowerCase();
 
     expect(normalise(git(repo.dir, "rev-parse", "--show-toplevel"))).toBe(normalise(repo.dir));
   });

@@ -31,13 +31,26 @@ export function git(cwd: string, ...args: string[]): string {
 }
 
 /**
- * `mkdtemp` hands back a path that may traverse a symlink — on macOS
- * `/var/folders/...` is a link to `/private/var/folders/...`. git always
- * reports the resolved path, so a test comparing "the path git gave me" with
- * "the path I created" fails on macOS unless both are resolved first.
+ * Resolves a path the way git reports it.
+ *
+ * Two platforms need this, for different reasons:
+ *
+ * - **macOS**: `mkdtemp` returns `/var/folders/...`, a symlink to
+ *   `/private/var/folders/...`, and git always reports the target.
+ * - **Windows**: `tmpdir()` returns the 8.3 short form —
+ *   `C:\Users\RUNNER~1\...` — while git reports the long form
+ *   (`runneradmin`). Plain `realpathSync` does **not** expand a short name;
+ *   only the native variant asks the OS, which does.
+ *
+ * Without this every path-equality assertion in the suite fails on one
+ * platform or the other, which is exactly what the CI matrix caught.
  */
+function resolvePath(path: string): string {
+  return typeof realpathSync.native === "function" ? realpathSync.native(path) : realpathSync(path);
+}
+
 function makeTempDir(prefix: string): string {
-  return realpathSync(mkdtempSync(join(tmpdir(), prefix)));
+  return resolvePath(mkdtempSync(join(tmpdir(), prefix)));
 }
 
 /**
@@ -76,7 +89,7 @@ export function createGitRepo(): GitFixture {
       // empty, and an empty existing directory is accepted.
       git(dir, "worktree", "add", "--quiet", "-b", branch, path);
       worktrees.push(path);
-      return realpathSync(path);
+      return resolvePath(path);
     },
     cleanup(): void {
       for (const path of worktrees) removeTree(path);
