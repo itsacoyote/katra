@@ -1,0 +1,14 @@
+# Normalise line endings in the repository, and check most files out with the
+# platform's own convention.
+* text=auto
+
+# The golden schema is compared **byte for byte** against what `buildInitDdl`
+# emits at runtime, which always uses LF. Checked out as CRLF on Windows, that
+# comparison fails on every line — as it did on the first CI run. Pin it.
+*.sql text eol=lf
+
+# Same reason: these are compared as exact strings or executed as scripts.
+*.md text eol=lf
+*.ts text eol=lf
+*.json text eol=lf
+*.yml text eol=lf

@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The design is settled and written down; the implementation has not started. Nothing here works yet. See [`docs/katra-spec.md`](docs/katra-spec.md).
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, and twelve commands over them. Coordination, search, notes, and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -17,18 +17,45 @@ An AI coding session starts cold every time. It doesn't know what the last sessi
 - **Daemon-free.** No server, no port, no background process. It's a file and a CLI.
 - **External refs are augmentation, never a requirement.** katra links to GitHub issues/PRs (Linear and Jira later) through pluggable providers, and it **only ever reads them**. With no provider installed and no network, every core feature still works.
 
-## Planned surface
+## What works today
+
+```console
+$ katra init
+Created katra store at /your/repo/.git/katra/katra.db
+
+$ epic=$(katra add "core tracker foundation" --level epic)
+$ a=$(katra add "storage layer" --lane Planned --priority 0 --parent $epic)
+$ b=$(katra add "task CRUD"     --lane Planned --priority 1 --parent $epic)
+$ katra dep $b --blocked-by $a
+
+$ katra next
+kt-x93qjo  P0  storage layer
+  lane      Planned
+  blockers  none
+  epic      kt-34vt8g  core tracker foundation
+
+$ katra close $a --reason "shipped"
+kt-x93qjo is now Done
+  reason  shipped
+  unblocked 1:
+    kt-s3l2m4  task CRUD
+```
 
 | Command | What it does |
 | --- | --- |
-| `katra brief <epic\|task>` | The context-pack — item, tasks, blockers, recent activity, notes. The headline feature. |
-| `katra next` | Hand back the highest-priority *ready* task. |
-| `katra search` / `recent` / `stale` | Full-text (SQLite FTS5) plus structured filters. |
-| `katra board` | Recent cross-entity activity; `--digest` at session start. |
-| `katra claim` / `release` | Cross-worktree coordination with atomic compare-and-set. |
-| `katra refresh` / `reconcile` | Read external refs; explicitly advance tasks from them. |
+| `init` | Create the store for this repository |
+| `add` · `show` · `list` | Create and read tasks; `list` filters by lane, kind, level, epic, tag, assignee, priority, and ready/blocked |
+| `update` | Change any mutable field, including reparenting |
+| `close` · `cancel` · `reopen` | Finish, abandon, or revive — and report what each released |
+| `delete` | Remove a task that should never have existed |
+| `dep` · `link` | Blocking dependencies, and associations that don't block |
+| `next` | The one task that can be started right now |
 
-Full command design lives in the [spec](docs/katra-spec.md).
+Every read takes `--json`. Every refusal names what would unblock it — an ambiguous id lists the candidates, a rejected dependency prints the cycle path, and `next` with nothing ready tells you which tasks are blocked and by what.
+
+## Still to come
+
+`brief` (the context-pack), `board` and the session digest, typed notes, FTS5 search, claims and presence for cross-worktree coordination, external refs with pluggable providers, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
 
 ## Install
 
@@ -44,7 +71,7 @@ npx @itsacoyote/katra --help
 
 ## Development
 
-Requires **Node ≥ 20.11** and **pnpm**.
+Requires **Node ≥ 22.12** and **pnpm**.
 
 ```bash
 pnpm install
@@ -52,6 +79,8 @@ pnpm build      # bundle with tsup
 pnpm test       # vitest
 pnpm check      # lint + typecheck + test — what CI runs
 ```
+
+The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. [`docs/f1-traceability.md`](docs/f1-traceability.md) maps every acceptance criterion to the test that covers it.
 
 ## Migrating from beads
 
