@@ -2,10 +2,18 @@ import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { readSchemaVersion } from "../../src/core/db/migrate.js";
+import { MIGRATIONS } from "../../src/core/db/migrations/index.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { openStore } from "../../src/core/store.js";
 import { runConcurrent } from "../helpers/concurrent.js";
 import { createGitRepo } from "../helpers/fixture.js";
+
+/**
+ * Derived, not a literal: "opening a store leaves it fully migrated" is the
+ * claim, and pinning the number means every future migration edits these
+ * assertions to say the same thing again.
+ */
+const CURRENT_VERSION = Math.max(...MIGRATIONS.map((m) => m.version));
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -36,12 +44,12 @@ describe("openStore", () => {
     const { store } = openStore(r.dir, { createIfMissing: true });
     cleanups.push(() => store.close());
 
-    expect(readSchemaVersion(store.db)).toBe(1);
+    expect(readSchemaVersion(store.db)).toBe(CURRENT_VERSION);
     const tables = store.db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all()
       .map((row) => (row as { name: string }).name);
-    expect(tables).toEqual(["deps", "links", "tags", "tasks"]);
+    expect(tables).toEqual(["deps", "events", "links", "notes", "tags", "tasks"]);
   });
 
   it("reports an existing store as not newly created", () => {
@@ -202,7 +210,7 @@ describe("openStore", () => {
       expect(results.filter((r2) => r2.created)).toHaveLength(1);
 
       const { store } = openStore(r.dir);
-      expect(readSchemaVersion(store.db)).toBe(1);
+      expect(readSchemaVersion(store.db)).toBe(CURRENT_VERSION);
       store.close();
     }
   });

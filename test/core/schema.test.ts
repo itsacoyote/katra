@@ -2,13 +2,17 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { beforeEach, describe, expect, it } from "vitest";
+import { migrate, readSchemaVersion } from "../../src/core/db/migrate.js";
+import { migration0001 } from "../../src/core/db/migrations/0001-init.js";
 import {
+  buildEventsDdl,
   buildInitDdl,
+  DEFAULT_EVENT_SETS,
   DEFAULT_SCHEMA_SETS,
   MIGRATIONS,
 } from "../../src/core/db/migrations/index.js";
-import { LANES } from "../../src/core/enums.js";
-import { generateId } from "../../src/core/id-format.js";
+import { EVENT_TYPES, LANES, NOTE_KINDS } from "../../src/core/enums.js";
+import { generateId, NOTE_ID_PREFIX } from "../../src/core/id-format.js";
 
 type DB = Database.Database;
 
@@ -65,8 +69,11 @@ describe("initial schema", () => {
   });
 
   it("is the migration the runner ships as version 1", () => {
-    expect(MIGRATIONS).toHaveLength(1);
     expect(MIGRATIONS[0]?.version).toBe(1);
+    expect(MIGRATIONS[0]?.name).toBe("init");
+    // Ordered, and every version distinct: `migrate` filters and sorts by
+    // version, so a duplicate or a gap would silently skip a step.
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2]);
   });
 
   it("matches the committed schema byte for byte", () => {
@@ -412,6 +419,272 @@ describe("buildInitDdl's own inputs", () => {
     ]) {
       expect(() => buildInitDdl({ ...DEFAULT_SCHEMA_SETS, ...bad })).toThrowError(
         /must be an integer/,
+      );
+    }
+  });
+});
+
+describe("migration 0002 — events and notes", () => {
+  /** A store at exactly v1, as an existing installation would have. */
+  function v1Store(): DB {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(migration0001.sql);
+    db.pragma("user_version = 1");
+    return db;
+  }
+
+  function freshV2(): DB {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, MIGRATIONS);
+    return db;
+  }
+
+  const event = (db: DB, row: Record<string, unknown>): void => {
+    const full = {
+      type: "created",
+      entity_id: "kt-aaaaaa",
+      actor: "main @ /repo",
+      created_at: TS,
+      ...row,
+    };
+    const cols = Object.keys(full);
+    db.prepare(
+      `INSERT INTO events (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+    ).run(...Object.values(full));
+  };
+
+  const note = (db: DB, row: Record<string, unknown> = {}): void => {
+    const full = {
+      id: "nt-aaaaaa",
+      task_id: "kt-aaaaaa",
+      body: "a note",
+      actor: "main @ /repo",
+      created_at: TS,
+      ...row,
+    };
+    const cols = Object.keys(full);
+    db.prepare(
+      `INSERT INTO notes (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+    ).run(...Object.values(full));
+  };
+
+  it("matches the committed v2 schema byte for byte", () => {
+    // Same reason as v1's snapshot: this DDL is rendered from the enum arrays
+    // at import time, and forward-only migration never re-runs a step. A store
+    // created before an enum changes keeps its old CHECK forever, so comparing
+    // the builder to itself could never catch the drift.
+    const golden = readFileSync(
+      fileURLToPath(new URL("../fixtures/schema-v2.sql", import.meta.url)),
+      "utf8",
+    );
+    expect(MIGRATIONS[1]?.sql).toBe(golden);
+    expect(MIGRATIONS[1]?.version).toBe(2);
+  });
+
+  it("leaves migration 1's golden fixture untouched", () => {
+    // Adding a step must not edit an earlier one — an installed store already
+    // ran step 1 and will never run it again.
+    const golden = readFileSync(
+      fileURLToPath(new URL("../fixtures/schema-v1.sql", import.meta.url)),
+      "utf8",
+    );
+    expect(MIGRATIONS[0]?.sql).toBe(golden);
+  });
+
+  it("migrates a v1 store to v2 without touching its tasks", () => {
+    const db = v1Store();
+    rawInsert(db, baseTask({ title: "survives the migration" }));
+
+    expect(readSchemaVersion(db)).toBe(1);
+    expect(migrate(db, MIGRATIONS)).toBe(1);
+    expect(readSchemaVersion(db)).toBe(2);
+
+    expect(db.prepare("SELECT title FROM tasks WHERE id='kt-aaaaaa'").get()).toEqual({
+      title: "survives the migration",
+    });
+    db.close();
+  });
+
+  it("brings a fresh store straight to version 2", () => {
+    const db = new Database(":memory:");
+    expect(readSchemaVersion(db)).toBe(0);
+    expect(migrate(db, MIGRATIONS)).toBe(2);
+    expect(readSchemaVersion(db)).toBe(2);
+
+    const names = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    expect(names).toEqual(["deps", "events", "links", "notes", "tags", "tasks"]);
+    db.close();
+  });
+
+  it("creates the indexes the entity and epic reads depend on", () => {
+    // Nothing prunes events, and the session digest reads them on every start.
+    // Unindexed, log degrades to a full scan as history accumulates.
+    const db = freshV2();
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%event%'")
+      .all()
+      .map((row) => (row as { name: string }).name);
+
+    expect(indexes.sort()).toEqual(["events_entity", "events_epic"]);
+
+    for (const [column, index] of [
+      ["entity_id", "events_entity"],
+      ["epic_id", "events_epic"],
+    ] as const) {
+      const plan = db
+        .prepare(`EXPLAIN QUERY PLAN SELECT * FROM events WHERE ${column} = ?`)
+        .all("kt-aaaaaa") as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join(" ")).toContain(index);
+    }
+    db.close();
+  });
+
+  it("builds the event-type constraint from the array, not a literal", () => {
+    // Asserting the DDL contains the rendered enum would pass against a
+    // hardcoded list, since the two render identically. Only a value invented
+    // at call time can distinguish them.
+    const ddl = buildEventsDdl({
+      ...DEFAULT_EVENT_SETS,
+      eventTypes: [...EVENT_TYPES, "sentinel-event"],
+    });
+    expect(ddl).toContain("'sentinel-event'");
+
+    const db = new Database(":memory:");
+    db.exec(migration0001.sql);
+    db.exec(ddl);
+    expect(() => event(db, { type: "sentinel-event" })).not.toThrow();
+    db.close();
+  });
+
+  it("builds the note-kind constraint from the array, not a literal", () => {
+    const ddl = buildEventsDdl({
+      ...DEFAULT_EVENT_SETS,
+      noteKinds: [...NOTE_KINDS, "sentinel-kind"],
+    });
+    expect(ddl).toContain("'sentinel-kind'");
+
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    db.exec(migration0001.sql);
+    db.exec(ddl);
+    rawInsert(db, baseTask());
+    expect(() => note(db, { kind: "sentinel-kind" })).not.toThrow();
+    db.close();
+  });
+
+  it("rejects an event type outside the generated set", () => {
+    const db = freshV2();
+    expect(() => event(db, { type: "updated" })).toThrowError(/CHECK constraint failed/);
+    db.close();
+  });
+
+  it("accepts an event whose epic_id is null", () => {
+    // A top-level task has no epic, and an epic's own events have none either
+    // since an epic never has a parent. NOT NULL here — the consistent-looking
+    // mirror of entity_id — would reject every event for a task created
+    // without --parent.
+    const db = freshV2();
+    expect(() => event(db, { epic_id: null })).not.toThrow();
+    expect(db.prepare("SELECT COUNT(*) c FROM events").get()).toEqual({ c: 1 });
+    db.close();
+  });
+
+  it("accepts an event for a task that does not exist", () => {
+    // ADR-008: entity_id is a historical reference, not a foreign key. A
+    // helpfully-added REFERENCES clause would make this throw.
+    const db = freshV2();
+    expect(() => event(db, { entity_id: "kt-zzzzzz", type: "deleted" })).not.toThrow();
+    db.close();
+  });
+
+  it("keeps a task's events when the task is deleted", () => {
+    const db = freshV2();
+    rawInsert(db, baseTask());
+    event(db, { entity_id: "kt-aaaaaa" });
+
+    db.prepare("DELETE FROM tasks WHERE id='kt-aaaaaa'").run();
+
+    expect(db.prepare("SELECT COUNT(*) c FROM events WHERE entity_id='kt-aaaaaa'").get()).toEqual({
+      c: 1,
+    });
+    db.close();
+  });
+
+  it("removes a task's notes when the task is deleted", () => {
+    // The opposite case, and deliberately so: history survives, content does
+    // not. A note without its task is unreachable and unreadable.
+    const db = freshV2();
+    rawInsert(db, baseTask());
+    note(db);
+
+    db.prepare("DELETE FROM tasks WHERE id='kt-aaaaaa'").run();
+
+    expect(db.prepare("SELECT COUNT(*) c FROM notes").get()).toEqual({ c: 0 });
+    db.close();
+  });
+
+  it("refuses a note on a task that does not exist", () => {
+    const db = freshV2();
+    expect(() => note(db, { task_id: "kt-zzzzzz" })).toThrowError(/FOREIGN KEY constraint failed/);
+    db.close();
+  });
+
+  it("rejects a note id that does not match the generated nt- pattern", () => {
+    const db = freshV2();
+    rawInsert(db, baseTask());
+
+    for (const bad of ["kt-aaaaaa", "nt-aaaaa", "nt-aaaaaaa", "nt-AAAAAA", "nt-aaa_aa", "aaaaaa"]) {
+      expect(() => note(db, { id: bad }), bad).toThrowError(/CHECK constraint failed/);
+    }
+    expect(() => note(db, { id: generateId(NOTE_ID_PREFIX) })).not.toThrow();
+    db.close();
+  });
+
+  it("rejects an empty note body at the database level", () => {
+    // NOT NULL alone accepts the empty string, and the body IS the note. The
+    // application refuses this too; this is the guarantee under raw SQL.
+    const db = freshV2();
+    rawInsert(db, baseTask());
+
+    expect(() => note(db, { body: "" })).toThrowError(/CHECK constraint failed/);
+    db.close();
+  });
+
+  it("defaults a note's kind to general", () => {
+    const db = freshV2();
+    rawInsert(db, baseTask());
+    db.prepare("INSERT INTO notes (id,task_id,body,actor,created_at) VALUES (?,?,?,?,?)").run(
+      "nt-aaaaaa",
+      "kt-aaaaaa",
+      "a note",
+      "main @ /repo",
+      TS,
+    );
+
+    expect(db.prepare("SELECT kind FROM notes").get()).toEqual({ kind: "general" });
+    db.close();
+  });
+});
+
+describe("buildEventsDdl's own inputs", () => {
+  it("refuses a default note kind outside the constraint it generates", () => {
+    // The kinds go through sqlEnum; the default is interpolated raw into a
+    // DEFAULT clause. A default outside the CHECK makes every insert that
+    // omits a kind fail — at runtime, in a shipped store.
+    expect(() =>
+      buildEventsDdl({ ...DEFAULT_EVENT_SETS, noteKindDefault: "summary" }),
+    ).toThrowError(/noteKindDefault must be one of/);
+  });
+
+  it("refuses a note id prefix that is not a bare lowercase prefix", () => {
+    for (const bad of ["nt", "NT-", "nt-'", "n1-", ""]) {
+      expect(() => buildEventsDdl({ ...DEFAULT_EVENT_SETS, noteIdPrefix: bad }), bad).toThrowError(
+        /noteIdPrefix must be/,
       );
     }
   });
