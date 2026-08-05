@@ -390,7 +390,7 @@ describe("listEvents", () => {
       appendEvent(fixture.store, { type: "closed", entityId: task, actor: ACTOR }, stamp);
     });
 
-    expect(listEvents(fixture.store, { entityId: task }).map((e) => e.type)).toEqual([
+    expect(listEvents(fixture.store, { entityId: task }).events.map((e) => e.type)).toEqual([
       "closed",
       "status-changed",
       "created",
@@ -405,7 +405,9 @@ describe("listEvents", () => {
       appendEvent(fixture.store, { type: "created", entityId: two, actor: ACTOR }, stamp);
     });
 
-    expect(listEvents(fixture.store, { entityId: one }).map((e) => e.entityId)).toEqual([one]);
+    expect(listEvents(fixture.store, { entityId: one }).events.map((e) => e.entityId)).toEqual([
+      one,
+    ]);
   });
 
   it("returns an epic's own events and its children's", () => {
@@ -427,7 +429,7 @@ describe("listEvents", () => {
       appendEvent(fixture.store, { type: "created", entityId: unrelated, actor: ACTOR }, stamp);
     });
 
-    const scoped = listEvents(fixture.store, { entityId: epic });
+    const scoped = listEvents(fixture.store, { entityId: epic }).events;
     expect(scoped.map((e) => e.entityId).sort()).toEqual([child, epic].sort());
   });
 
@@ -446,7 +448,7 @@ describe("listEvents", () => {
       );
     });
 
-    expect(listEvents(fixture.store, { entityId: child })).toHaveLength(1);
+    expect(listEvents(fixture.store, { entityId: child }).events).toHaveLength(1);
   });
 
   it("still returns a deleted task's history", () => {
@@ -468,7 +470,7 @@ describe("listEvents", () => {
     });
     fixture.store.db.prepare("DELETE FROM tasks WHERE id = ?").run(task);
 
-    const history = listEvents(fixture.store, { entityId: task });
+    const history = listEvents(fixture.store, { entityId: task }).events;
     expect(history.map((e) => e.type)).toEqual(["deleted", "created"]);
     expect(history[0]?.title).toBe("a typo");
   });
@@ -492,7 +494,7 @@ describe("listEvents", () => {
     });
     fixture.store.db.prepare("DELETE FROM tasks WHERE id = ?").run(child);
 
-    expect(listEvents(fixture.store, { entityId: epic }).map((e) => e.type)).toEqual([
+    expect(listEvents(fixture.store, { entityId: epic }).events.map((e) => e.type)).toEqual([
       "deleted",
       "created",
     ]);
@@ -505,7 +507,7 @@ describe("listEvents", () => {
     });
     fixture.store.db.prepare("DELETE FROM tasks WHERE id = ?").run(task);
 
-    expect(listEvents(fixture.store)).toHaveLength(1);
+    expect(listEvents(fixture.store).events).toHaveLength(1);
   });
 
   it("reads the whole store when no entity is given", () => {
@@ -516,12 +518,12 @@ describe("listEvents", () => {
       appendEvent(fixture.store, { type: "created", entityId: two, actor: ACTOR }, stamp);
     });
 
-    expect(listEvents(fixture.store)).toHaveLength(2);
+    expect(listEvents(fixture.store).events).toHaveLength(2);
   });
 
   it("says nothing happened rather than erroring on an empty store", () => {
-    expect(listEvents(fixture.store)).toEqual([]);
-    expect(listEvents(fixture.store, { entityId: "kt-zzzzzz" })).toEqual([]);
+    expect(listEvents(fixture.store).events).toEqual([]);
+    expect(listEvents(fixture.store, { entityId: "kt-zzzzzz" }).events).toEqual([]);
   });
 
   it("orders by id so identical timestamps stay deterministic", () => {
@@ -535,11 +537,11 @@ describe("listEvents", () => {
       appendEvent(fixture.store, { type: "closed", entityId: task, actor: ACTOR }, stamp),
     ]);
 
-    const stamps = new Set(listEvents(fixture.store).map((e) => e.createdAt));
+    const stamps = new Set(listEvents(fixture.store).events.map((e) => e.createdAt));
     expect(stamps.size).toBe(1);
 
     for (let run = 0; run < 5; run++) {
-      expect(listEvents(fixture.store).map((e) => e.id)).toEqual([...ids].reverse());
+      expect(listEvents(fixture.store).events.map((e) => e.id)).toEqual([...ids].reverse());
     }
   });
 
@@ -551,7 +553,7 @@ describe("listEvents", () => {
       ),
     );
 
-    const limited = listEvents(fixture.store, { limit: 3 });
+    const limited = listEvents(fixture.store, { limit: 3 }).events;
     expect(limited.map((e) => e.id)).toEqual([...ids].reverse().slice(0, 3));
   });
 
@@ -565,6 +567,6 @@ describe("listEvents", () => {
       }
     });
 
-    expect(listEvents(fixture.store)).toHaveLength(DEFAULT_EVENT_LIMIT);
+    expect(listEvents(fixture.store).events).toHaveLength(DEFAULT_EVENT_LIMIT);
   });
 });

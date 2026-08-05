@@ -12,6 +12,13 @@
  *   returns from inside its transaction; adding two more queries there would
  *   charge every field edit for notes it never displays, and a bulk update by
  *   the number of tasks it touched.
+ *
+ * Dependencies are the deliberate exception to that second rule: `blockers`
+ * and `blocking` live on {@link TaskDetail} and so *are* read by `update`.
+ * They earn it — "what does this change unblock" is the question a lane move
+ * raises, and `close` and `cancel` already report their released dependents
+ * for the same reason. Notes and activity raise no such question, which is why
+ * they stop here.
  */
 
 import { listEvents } from "../events/repo.js";
@@ -49,6 +56,6 @@ export function viewTask(store: OpenStore, idInput: string): TaskView {
     notes: listNotes(store, { taskId: id, limit: SHOW_NOTE_LIMIT }),
     // Scoped to the entity, so an epic's view also carries its children's
     // activity — the same query `log <epicId>` runs.
-    activity: listEvents(store, { entityId: id, limit: SHOW_ACTIVITY_LIMIT }),
+    activity: listEvents(store, { entityId: id, limit: SHOW_ACTIVITY_LIMIT }).events,
   };
 }

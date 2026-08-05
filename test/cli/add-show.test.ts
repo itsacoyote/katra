@@ -512,3 +512,36 @@ describe("katra show — notes and activity", () => {
     expect(view.activity.map((e) => e.type)).toEqual(["note-added", "created"]);
   });
 });
+
+describe("show on an epic", () => {
+  it("names which child each activity row is about", async () => {
+    // An epic's view carries its children's events, so three bare `created`
+    // rows — one of them the epic's own — were indistinguishable from each
+    // other. formatEventLog already carries the id and title for this reason.
+    const epic = await add(["an epic", "--level", "epic"]);
+    const one = await add(["first child", "--parent", epic]);
+    await add(["second child", "--parent", epic]);
+    await runCli(["update", one, "--lane", "Planned"], { cwd: repo.dir });
+
+    const result = await runCli(["show", epic], { cwd: repo.dir });
+    const activity = result.stdout.slice(result.stdout.indexOf("activity ("));
+
+    expect(activity).toContain("first child");
+    expect(activity).toContain("second child");
+    expect(activity).toContain(one);
+  });
+
+  it("leaves the task's own rows unattributed, since they need no naming", async () => {
+    // The subject column disambiguates; repeating the task you asked about on
+    // every one of its own rows is the noise the log already elides.
+    const id = await add(["a plain task"]);
+    await runCli(["update", id, "--lane", "Planned"], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+    const activity = result.stdout.slice(result.stdout.indexOf("activity ("));
+
+    expect(activity).not.toContain("a plain task");
+    expect(activity).not.toContain(id);
+    expect(activity).toContain("status-changed");
+  });
+});

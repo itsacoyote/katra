@@ -36,11 +36,17 @@ The third is uncomfortable in a codebase whose stated discipline is that invaria
 $ katra delete kt-x93 --force
 deleted kt-x93  "a typo"
 
-$ katra log --all
+$ katra log
   16:41  deleted         kt-x93  a typo
   16:22  status-changed  kt-x93  Defined -> Planned
   16:19  created         kt-x93  a typo
 ```
+
+**There is no `--all` flag.** The spec asked for `log --all` and `log --epic`;
+both were folded into the optional id argument, because each would have been a
+second spelling of a read that already has one — bare `log` *is* the whole
+store and `log <epicId>` *is* the epic scope. The examples here use the form
+that exists.
 
 `deleted` is a **seventh event type**, not in the spec's list of nine — that list predates F1's `delete` command. Recorded here rather than added silently.
 
@@ -56,7 +62,7 @@ This is coherent, not a compromise: **history survives, content does not.** `del
 
 ## Consequences
 
-- `katra log --all` remains a complete record of the store's life, including tasks that no longer exist.
+- `katra log` remains a complete record of the store's life, including tasks that no longer exist.
 - `entity_id` and `ref` are **historical references, not foreign keys**. Any read joining events to tasks must use an outer join and handle the miss; a reader that assumes the task exists is the bug this ADR predicts.
 - The events table grows monotonically and nothing prunes it. Acceptable at katra's scale — a busy repo generates thousands of events, not millions — and a retention policy is a decision for whoever first has the problem, with snapshots (F6) the natural home.
 - A test asserts the property directly: delete a task, then read its history back. Without it, someone adds the "missing" foreign key in good faith.

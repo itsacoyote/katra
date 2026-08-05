@@ -161,7 +161,7 @@ function clamp(text: string, width: number): string {
  * single-agent repository it is the same string on every row, which is pure
  * noise; across worktrees it is the whole reason ADR-007 records it.
  */
-export function formatEventLog(events: readonly LoggedEvent[]): string {
+export function formatEventLog(events: readonly LoggedEvent[], truncated = false): string {
   if (events.length === 0) return "nothing has happened yet";
 
   // Reduced rather than `Math.max(...events.map(…))`: spreading the result set
@@ -190,7 +190,7 @@ export function formatEventLog(events: readonly LoggedEvent[]): string {
   const actorWidth = showActor ? width((event) => oneLine(event.actor)) : 0;
   const titleWidth = showTitle ? width(title) : 0;
 
-  return events
+  const rows = events
     .map((event) => {
       const columns = [
         // Minutes, not seconds: a log spanning weeks needs the date, and the
@@ -205,6 +205,10 @@ export function formatEventLog(events: readonly LoggedEvent[]): string {
       return columns.join("  ").trimEnd();
     })
     .join("\n");
+
+  // A bound that cannot report itself is indistinguishable from the end of the
+  // history — and this is the read a session digest is built on.
+  return truncated ? `${rows}\n  … more; raise --limit to see further back` : rows;
 }
 
 /**
@@ -318,7 +322,16 @@ export function formatTaskView(view: TaskView): string {
     lines.push("", `activity (newest first — \`katra log\` for the rest)`);
     for (const event of view.activity) {
       const when = event.createdAt.slice(0, 16).replace("T", " ");
-      lines.push(`  ${when}  ${event.type.padEnd(14)}  ${describeEvent(event)}`.trimEnd());
+      // An epic's view carries its children's events too, so a row about
+      // something other than this task has to name it — three bare `created`
+      // rows under an epic are otherwise indistinguishable from each other.
+      const subject =
+        event.entityId === view.task.id
+          ? ""
+          : `  ${event.entityId}  ${previewBody(event.entityTitle ?? "", TITLE_WIDTH)}`;
+      lines.push(
+        `  ${when}  ${event.type.padEnd(14)}${subject}  ${describeEvent(event)}`.trimEnd(),
+      );
     }
   }
 

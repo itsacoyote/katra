@@ -3,6 +3,7 @@
  */
 
 import type { Command } from "commander";
+import type { UpdateResult } from "../../core/contract.js";
 import { narrowKind, narrowLane, narrowPriority } from "../../core/narrow.js";
 import type { TaskPatch } from "../../core/tasks/update.js";
 import { updateTasks } from "../../core/tasks/update.js";
@@ -83,8 +84,9 @@ export function registerUpdate(program: Command, context: CliContext): void {
       // passing a variable-length list must not get a different document back
       // depending on how many matched. Human output does adapt — one task is
       // worth seeing in full, ten are worth seeing as a list.
+      const document: UpdateResult = { tasks: result };
       emit(
-        { tasks: result },
+        document,
         { json: options.json === true, warnings, streams: context.streams },
         (document) =>
           document.tasks.length === 1 && document.tasks[0] !== undefined

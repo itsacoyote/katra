@@ -41,9 +41,9 @@ export function registerLog(program: Command, context: CliContext): void {
         }),
       );
 
-      const document: EventLog = { events: result };
+      const document: EventLog = { events: result.events, truncated: result.truncated };
       emit(document, { json: options.json === true, warnings, streams: context.streams }, (value) =>
-        formatEventLog(value.events),
+        formatEventLog(value.events, value.truncated),
       );
     });
 }

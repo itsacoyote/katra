@@ -299,3 +299,50 @@ describe("entity titles in the log", () => {
     expect(scoped.stdout).toContain(one);
   });
 });
+
+describe("log reports its own bound", () => {
+  it("says the history was cut short rather than ending mid-story", async () => {
+    // `list` is unbounded precisely because a default cap would have to report
+    // truncating. `log` is bounded, so it owes the same report — and this is
+    // the read a session digest is built on, where a partial history that
+    // looks complete is one an agent acts on.
+    const id = await add(["a task"]);
+    for (let i = 0; i < 4; i++) {
+      await runCli(["note", "add", id, "--body-file", "-"], { cwd: repo.dir, stdin: `n${i}` });
+    }
+
+    const bounded = await runCli(["log", "--limit", "2"], { cwd: repo.dir });
+    expect(bounded.stdout).toMatch(/… more; raise --limit/);
+
+    const full = await runCli(["log", "--limit", "50"], { cwd: repo.dir });
+    expect(full.stdout).not.toMatch(/… more/);
+  });
+
+  it("carries the flag in the JSON document", async () => {
+    const id = await add(["a task"]);
+    await runCli(["update", id, "--lane", "Planned"], { cwd: repo.dir });
+
+    const cut = (
+      await runCli(["log", "--limit", "1", "--json"], { cwd: repo.dir })
+    ).json() as EventLog;
+    const whole = (await runCli(["log", "--json"], { cwd: repo.dir })).json() as EventLog;
+
+    expect(cut).toMatchObject({ truncated: true });
+    expect(cut.events).toHaveLength(1);
+    expect(whole).toMatchObject({ truncated: false });
+  });
+
+  it("does not report truncation when the result exactly fills the limit", async () => {
+    // The off-by-one this over-fetch exists to get right: two events and
+    // `--limit 2` is a complete answer, not a cut one.
+    const id = await add(["a task"]);
+    await runCli(["update", id, "--lane", "Planned"], { cwd: repo.dir });
+
+    const exact = (
+      await runCli(["log", "--limit", "2", "--json"], { cwd: repo.dir })
+    ).json() as EventLog;
+
+    expect(exact.events).toHaveLength(2);
+    expect(exact.truncated).toBe(false);
+  });
+});

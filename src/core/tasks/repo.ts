@@ -161,6 +161,14 @@ export function createTask(store: OpenStore, input: NewTask): Task {
     });
   }
 
+  // Resolved *before* the transaction opens. The resolver is lazy, so the
+  // first call in a process is where two git subprocesses actually spawn —
+  // and inside `writeTx` that happens with the exclusive write lock held,
+  // widening the lock window by a PATH walk plus two process spawns on every
+  // write command. See `actor.ts`, which states this rule and was not being
+  // honoured by any of the five write paths.
+  const actor = store.actor();
+
   const id = writeTx(store.db, (now) => {
     // Resolved inside the transaction, so a partial parent id is accepted and
     // a bad one is refused by name rather than by the trigger backing the same
@@ -215,7 +223,7 @@ export function createTask(store: OpenStore, input: NewTask): Task {
         type: "created",
         entityId: created,
         epicId: epicIdFor({ id: created, level, parentId }),
-        actor: store.actor(),
+        actor,
         title,
       },
       now,

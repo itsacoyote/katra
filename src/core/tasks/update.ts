@@ -96,13 +96,18 @@ export function updateTasks(
     });
   }
 
-  // Resolved before the transaction, and deduped: naming one task twice is a
-  // request to patch it, not to patch it twice.
+  // Both resolved before the transaction opens: the actor because resolving it
+  // spawns two git subprocesses and would hold the write lock across them, the
+  // ids because that is where a partial id is refused by name.
+  const actor = store.actor();
+
+  // Deduped: naming one task twice is a request to patch it, not to patch it
+  // twice.
   const resolved = new Map<string, string>();
   for (const input of idInputs) resolved.set(requireId(store, input), input);
 
   return writeTx(store.db, (now) =>
-    [...resolved].map(([id, idInput]) => applyPatch(store, id, idInput, patch, now)),
+    [...resolved].map(([id, idInput]) => applyPatch(store, id, idInput, patch, now, actor)),
   );
 }
 
@@ -119,127 +124,134 @@ function applyPatch(
   idInput: string,
   patch: TaskPatch,
   now: string,
+  actor: string,
 ): TaskDetail {
-  {
-    // Loaded and guarded inside the transaction. Outside it, another worktree
-    // could close the task between this check and the UPDATE below, and the
-    // write — which never touches closed_at — would leave an active lane
-    // carrying a close timestamp while silently reverting the close.
-    const existing = getTask(store, id);
-    if (existing === undefined) {
-      throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
-    }
+  // Loaded and guarded inside the transaction. Outside it, another worktree
+  // could close the task between this check and the UPDATE below, and the
+  // write — which never touches closed_at — would leave an active lane
+  // carrying a close timestamp while silently reverting the close.
+  const existing = getTask(store, id);
+  if (existing === undefined) {
+    throw new KatraException({ code: "not_found", message: `no task matches "${idInput}"`, id });
+  }
 
-    // A task already in a terminal lane has to come back through `reopen`, which
-    // clears closed_at; editing it in place would leave the two disagreeing.
-    if (isTerminal(existing.lane) && patch.lane !== undefined) {
+  // A task already in a terminal lane has to come back through `reopen`, which
+  // clears closed_at; editing it in place would leave the two disagreeing.
+  if (isTerminal(existing.lane) && patch.lane !== undefined) {
+    throw new KatraException({
+      code: "conflict",
+      message: `${id} is ${existing.lane} — use \`katra reopen\` before changing its lane`,
+      reason: `lane is ${existing.lane}`,
+    });
+  }
+
+  const parentId =
+    patch.parentId === undefined || patch.parentId === null
+      ? patch.parentId
+      : requireEpicId(store, patch.parentId);
+
+  // `undefined` means "not reparenting", `null` means "detach". Collapsing
+  // them with `??` made a detach fall back to the old parent, so
+  // `update --clear-parent --lane X` stamped the epic the task had just left
+  // and `log <oldEpic>` reported an event that no longer belonged to it.
+  const eventEpicId = epicIdFor({
+    id,
+    level: existing.level,
+    parentId: parentId === undefined ? existing.parentId : parentId,
+  });
+
+  const assignments: string[] = [];
+  const params: unknown[] = [];
+
+  // Column names are literals written here; values are always bound.
+  const set = (column: string, value: unknown): void => {
+    assignments.push(`${column} = ?`);
+    params.push(value);
+  };
+
+  if (patch.title !== undefined) {
+    const title = patch.title.trim();
+    if (title === "") {
       throw new KatraException({
-        code: "conflict",
-        message: `${id} is ${existing.lane} — use \`katra reopen\` before changing its lane`,
-        reason: `lane is ${existing.lane}`,
+        code: "validation",
+        message: "a task needs a title",
+        field: "title",
+        value: patch.title,
       });
     }
-
-    const parentId =
-      patch.parentId === undefined || patch.parentId === null
-        ? patch.parentId
-        : requireEpicId(store, patch.parentId);
-
-    const assignments: string[] = [];
-    const params: unknown[] = [];
-
-    // Column names are literals written here; values are always bound.
-    const set = (column: string, value: unknown): void => {
-      assignments.push(`${column} = ?`);
-      params.push(value);
-    };
-
-    if (patch.title !== undefined) {
-      const title = patch.title.trim();
-      if (title === "") {
-        throw new KatraException({
-          code: "validation",
-          message: "a task needs a title",
-          field: "title",
-          value: patch.title,
-        });
-      }
-      set("title", title);
-    }
-    if (patch.description !== undefined) set("description", patch.description);
-    if (patch.lane !== undefined) {
-      set("lane", patch.lane);
-      // Guaranteed non-terminal by the check above, so the close columns cannot
-      // be left behind pointing at a lane that no longer means "finished".
-      // Structural rather than argued: the schema enforces terminal ⇒ closed_at,
-      // never the converse, so nothing else would catch it.
-      set("closed_at", null);
-      set("close_reason", null);
-    }
-    if (patch.priority !== undefined) set("priority", patch.priority);
-    if (patch.kind !== undefined) set("kind", patch.kind);
-    if (patch.assignee !== undefined) set("assignee", patch.assignee);
-    if (parentId !== undefined) set("parent_id", parentId);
-
-    let tagsChanged = false;
-    if (patch.removeTags !== undefined && patch.removeTags.length > 0) {
-      const remove = store.db.prepare("DELETE FROM tags WHERE task_id = ? AND tag = ?");
-      for (const tag of patch.removeTags) {
-        if (remove.run(id, tag.trim()).changes > 0) tagsChanged = true;
-      }
-    }
-    if (patch.addTags !== undefined && patch.addTags.length > 0) {
-      const addTag = store.db.prepare("INSERT OR IGNORE INTO tags (task_id, tag) VALUES (?,?)");
-      for (const tag of patch.addTags) {
-        const trimmed = tag.trim();
-        if (trimmed !== "" && addTag.run(id, trimmed).changes > 0) tagsChanged = true;
-      }
-    }
-
-    // Tags live in their own table, so a tag-only edit used to leave
-    // `updated_at` untouched — and `show` hides the "updated" line when it
-    // equals `created_at`, so both output modes claimed the task had never
-    // been edited. F3's staleness queries would inherit that.
-    if (assignments.length > 0 || tagsChanged) {
-      set("updated_at", now);
-      store.db
-        .prepare(`UPDATE tasks SET ${assignments.join(", ")} WHERE id = ?`)
-        .run(...params, id);
-    }
-
-    // Requirement 11, and the sharp edge of this task: a lane move is the
-    // **only** thing `update` records. Title, priority, kind, assignee, tags
-    // and reparenting all emit nothing — attribute churn would bury the
-    // signal in the very stream that exists to carry it.
-    //
-    // And only when the lane actually moved. `--lane Planned` on an
-    // already-Planned task is a no-op, and a status-changed event whose two
-    // lanes are equal describes nothing that happened.
-    //
-    // Reparenting emitting nothing has a consequence worth stating: a task's
-    // epic_id history splits at the move. Events written before it keep the
-    // old epic, events after it get the new one, and neither epic's history is
-    // complete. That is the spec's stated single-level tradeoff, pinned by a
-    // test so it is not "fixed" into something worse.
-    if (patch.lane !== undefined && patch.lane !== existing.lane) {
-      appendEvent(
-        store,
-        {
-          type: "status-changed",
-          entityId: id,
-          epicId: epicIdFor({ id, level: existing.level, parentId: parentId ?? existing.parentId }),
-          actor: store.actor(),
-          fromLane: existing.lane,
-          toLane: patch.lane,
-        },
-        now,
-      );
-    }
-
-    // Read back inside the transaction, and as the full detail the CLI prints.
-    // Re-reading afterwards through `showTask`, as the command used to, opened
-    // a window where the printed answer was a concurrent writer's state rather
-    // than the result of this update.
-    return showTaskWithin(store, id);
+    set("title", title);
   }
+  if (patch.description !== undefined) set("description", patch.description);
+  if (patch.lane !== undefined) {
+    set("lane", patch.lane);
+    // Guaranteed non-terminal by the check above, so the close columns cannot
+    // be left behind pointing at a lane that no longer means "finished".
+    // Structural rather than argued: the schema enforces terminal ⇒ closed_at,
+    // never the converse, so nothing else would catch it.
+    set("closed_at", null);
+    set("close_reason", null);
+  }
+  if (patch.priority !== undefined) set("priority", patch.priority);
+  if (patch.kind !== undefined) set("kind", patch.kind);
+  if (patch.assignee !== undefined) set("assignee", patch.assignee);
+  if (parentId !== undefined) set("parent_id", parentId);
+
+  let tagsChanged = false;
+  if (patch.removeTags !== undefined && patch.removeTags.length > 0) {
+    const remove = store.db.prepare("DELETE FROM tags WHERE task_id = ? AND tag = ?");
+    for (const tag of patch.removeTags) {
+      if (remove.run(id, tag.trim()).changes > 0) tagsChanged = true;
+    }
+  }
+  if (patch.addTags !== undefined && patch.addTags.length > 0) {
+    const addTag = store.db.prepare("INSERT OR IGNORE INTO tags (task_id, tag) VALUES (?,?)");
+    for (const tag of patch.addTags) {
+      const trimmed = tag.trim();
+      if (trimmed !== "" && addTag.run(id, trimmed).changes > 0) tagsChanged = true;
+    }
+  }
+
+  // Tags live in their own table, so a tag-only edit used to leave
+  // `updated_at` untouched — and `show` hides the "updated" line when it
+  // equals `created_at`, so both output modes claimed the task had never
+  // been edited. F3's staleness queries would inherit that.
+  if (assignments.length > 0 || tagsChanged) {
+    set("updated_at", now);
+    store.db.prepare(`UPDATE tasks SET ${assignments.join(", ")} WHERE id = ?`).run(...params, id);
+  }
+
+  // Requirement 11, and the sharp edge of this task: a lane move is the
+  // **only** thing `update` records. Title, priority, kind, assignee, tags
+  // and reparenting all emit nothing — attribute churn would bury the
+  // signal in the very stream that exists to carry it.
+  //
+  // And only when the lane actually moved. `--lane Planned` on an
+  // already-Planned task is a no-op, and a status-changed event whose two
+  // lanes are equal describes nothing that happened.
+  //
+  // Reparenting emitting nothing has a consequence worth stating: a task's
+  // epic_id history splits at the move. Events written before it keep the
+  // old epic, events after it get the new one, and neither epic's history is
+  // complete. That is the spec's stated single-level tradeoff, pinned by a
+  // test so it is not "fixed" into something worse.
+  if (patch.lane !== undefined && patch.lane !== existing.lane) {
+    appendEvent(
+      store,
+      {
+        type: "status-changed",
+        entityId: id,
+        epicId: eventEpicId,
+        actor,
+        fromLane: existing.lane,
+        toLane: patch.lane,
+      },
+      now,
+    );
+  }
+
+  // Read back inside the transaction, and as the full detail the CLI prints.
+  // Re-reading afterwards through `showTask`, as the command used to, opened
+  // a window where the printed answer was a concurrent writer's state rather
+  // than the result of this update.
+  return showTaskWithin(store, id);
 }

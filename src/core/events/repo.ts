@@ -109,6 +109,12 @@ export function requireEntityId(store: OpenStore, input: string): string {
   );
 }
 
+/** A bounded page of history, and whether the bound cut it short. */
+export interface EventPage {
+  readonly events: LoggedEvent[];
+  readonly truncated: boolean;
+}
+
 export interface EventQuery {
   /**
    * Scope to one entity.
@@ -145,7 +151,7 @@ export interface EventQuery {
  * millisecond. Ordering by the timestamp alone would leave same-millisecond
  * events in whatever order the query plan happened to produce.
  */
-export function listEvents(store: OpenStore, query: EventQuery = {}): LoggedEvent[] {
+export function listEvents(store: OpenStore, query: EventQuery = {}): EventPage {
   const limit = query.limit ?? DEFAULT_EVENT_LIMIT;
   const scoped = query.entityId !== undefined;
 
@@ -163,14 +169,21 @@ export function listEvents(store: OpenStore, query: EventQuery = {}): LoggedEven
         ORDER BY e.id DESC
         LIMIT ?`,
     )
-    .all(...(scoped ? [query.entityId, query.entityId, limit] : [limit])) as Array<
+    .all(...(scoped ? [query.entityId, query.entityId, limit + 1] : [limit + 1])) as Array<
     EventRow & { entity_title: unknown }
   >;
 
-  return rows.map((row) => ({
-    ...rowToEvent(row),
-    entityTitle: narrowNullableText(row.entity_title, "entity_title"),
-  }));
+  // One more row than will be returned, purely so truncation is knowable. The
+  // same trick `resolveId` uses for its candidate cap, and for the same
+  // reason: a bound that cannot report itself is indistinguishable from the
+  // end of the data.
+  return {
+    events: rows.slice(0, limit).map((row) => ({
+      ...rowToEvent(row),
+      entityTitle: narrowNullableText(row.entity_title, "entity_title"),
+    })),
+    truncated: rows.length > limit,
+  };
 }
 
 /**

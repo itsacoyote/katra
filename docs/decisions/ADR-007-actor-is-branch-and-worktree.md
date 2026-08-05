@@ -40,7 +40,7 @@ Resolved per invocation from git, using the same subprocess machinery `locate.ts
 - **In a repository with no commits it exits 128** — `fatal: ambiguous argument 'HEAD'`. `runGit` throws on a non-zero exit, so every write command would die in a freshly `git init`ed repo. `katra init && katra add "set up the project"` works today; `--abbrev-ref` would have regressed exactly the greenfield path katra's cold-start story is about. `symbolic-ref` returns the branch name on an unborn HEAD, verified.
 - **On a detached HEAD it returns the literal string `HEAD`**, so every detached worktree would stamp an identical actor. `symbolic-ref` exits 1 instead, which is a cleaner signal than string-matching, and the fallback to `rev-parse --short HEAD` produces the SHA.
 
-**The path comes from the same `rev-parse` call that already resolves the store**: `rev-parse --path-format=absolute --git-common-dir --show-toplevel` returns both lines in one invocation. One subprocess spawn, not three. The path is `normalize()`d for the same reason `commonDir` is — git reports forward slashes on Windows while `join` produces backslashes, which cost F1 three commits to get right.
+**The path comes from its own `rev-parse --path-format=absolute --show-toplevel`.** An earlier draft of this ADR had it share the call that resolves the store, on the grounds that one invocation could return both lines. Implementation showed why it cannot: `--show-toplevel` exits 128 inside a `.git` directory and in a bare repo, while `--git-common-dir` succeeds in both. Merging them would turn a working invocation — the store resolves fine from there — into a hard failure at the moment it tried to record who did it. Where there is no work tree the actor falls back to the invocation directory. The path is `normalize()`d for the same reason `commonDir` is — git reports forward slashes on Windows while `join` produces backslashes, which cost F1 three commits to get right.
 
 One column rather than two: the pair is a single identity and is only ever read as a whole. Splitting it would invite a query that groups on the path alone, which is precisely the collision this decision exists to avoid.
 
@@ -55,7 +55,8 @@ One column rather than two: the pair is a single identity and is only ever read 
 - Deleting a worktree leaves history readable: the branch still names the work.
 - The actor is a **display string, not a key**. Nothing joins on it, and nothing should — it is provenance, not a foreign key to a session table katra does not have.
 - Two agents sharing one worktree are indistinguishable. That is the spec's stated assumption (*"the default assumption is one active agent per worktree"*), and layering a session id on top later changes only the format of new events.
-- Every event write costs **one** `git rev-parse` (both paths in one call) plus one `symbolic-ref`. Resolved once per process and reused, so the cost is per invocation, not per event — and read-only commands never pay it at all.
+- Resolution costs one `rev-parse` plus one `symbolic-ref` — and a second `rev-parse` only when HEAD is detached. Resolved once per process and reused, so the cost is per invocation rather than per event, and read-only commands never pay it at all.
+- **Resolution happens before the write transaction opens, never inside it.** Those subprocess spawns under `BEGIN IMMEDIATE` would hold the exclusive write lock across both. The resolver is lazy, so the first write in a process is where it fires; every write path forces it first, and a test asserts `db.inTransaction` is false at the moment it runs.
 
 ## Alternatives considered
 

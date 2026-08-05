@@ -111,6 +111,9 @@ function requireNoteTarget(store: OpenStore, input: string): string {
 export function createNote(store: OpenStore, input: NewNote): Note {
   const body = requireBody(input.body);
   const kind = input.kind === undefined ? undefined : narrowNoteKind(input.kind);
+  // Before the transaction: resolving the actor spawns two git subprocesses,
+  // and under `BEGIN IMMEDIATE` that holds the write lock across both.
+  const actor = store.actor();
 
   const id = writeTx(store.db, (now) => {
     // Resolved *inside* the transaction, like `createTask` does for a parent
@@ -118,15 +121,16 @@ export function createNote(store: OpenStore, input: NewNote): Note {
     // before the INSERT and the foreign key would fire as a raw
     // SQLITE_CONSTRAINT_FOREIGNKEY under the untyped `internal` code, rather
     // than as a refusal naming the task.
-    const taskId = requireNoteTarget(store, input.taskId);
-    const task = getTask(store, taskId);
+    // One lookup, not two: `requireNoteTarget` resolves against `tasks` inside
+    // this same transaction, so a second existence check here could not fail.
+    const task = getTask(store, requireNoteTarget(store, input.taskId));
     if (task === undefined) {
       throw new KatraException({
-        code: "not_found",
-        message: `no task matches "${input.taskId}" — create it with \`katra add\` first`,
-        id: input.taskId,
+        code: "internal",
+        message: `task ${input.taskId} disappeared between being resolved and being read`,
       });
     }
+    const taskId = task.id;
 
     const noteId = insertWithRetry((candidate) => {
       store.db
@@ -134,7 +138,7 @@ export function createNote(store: OpenStore, input: NewNote): Note {
           `INSERT INTO notes (id, task_id, kind, body, actor, created_at)
            VALUES (?,?,?,?,?,?)`,
         )
-        .run(candidate, taskId, kind ?? "general", body, store.actor(), now);
+        .run(candidate, taskId, kind ?? "general", body, actor, now);
     }, NOTE_ID_PREFIX);
 
     appendEvent(
@@ -143,7 +147,7 @@ export function createNote(store: OpenStore, input: NewNote): Note {
         type: "note-added",
         entityId: taskId,
         epicId: epicIdFor(task),
-        actor: store.actor(),
+        actor,
         // The note's id, so the event points at what was added. It dangles
         // once the note cascades away with its task — the same deliberate
         // looseness as `entity_id` (ADR-008).

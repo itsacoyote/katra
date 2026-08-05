@@ -332,3 +332,72 @@ describe("the stream as a whole", () => {
     expect(event.created_at).toBe(row.created_at);
   });
 });
+
+describe("the actor is resolved before the write lock", () => {
+  it("never resolves the actor inside an open transaction", async () => {
+    // `actor.ts` states this rule and every one of the five write paths broke
+    // it: the resolver is lazy, so the first call in a process is where two
+    // git subprocesses spawn — and inside writeTx that happens with BEGIN
+    // IMMEDIATE held, widening the lock window by a PATH walk plus two spawns
+    // on every write command.
+    //
+    // Asserted by recording `db.inTransaction` at the moment the resolver
+    // runs, because the resolved value is identical either way.
+    const { openStore } = await import("../../src/core/store.js");
+    const repo = fixture.repo;
+
+    const seen: boolean[] = [];
+    const { store } = openStore(repo.dir, {
+      actor: () => {
+        seen.push(store.db.inTransaction);
+        return ACTOR;
+      },
+    });
+
+    try {
+      const epic = createTask(store, { title: "an epic", level: "epic" });
+      const task = createTask(store, { title: "a task", parentId: epic.id });
+      updateTask(store, task.id, { lane: "Planned" });
+      closeTask(store, task.id, "done");
+      reopenTask(store, task.id);
+      cancelTask(store, task.id, "no");
+      const doomed = createTask(store, { title: "doomed" });
+      deleteTask(store, doomed.id);
+
+      expect(seen.length).toBeGreaterThan(0);
+      expect(seen).toEqual(seen.map(() => false));
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe("reparenting and the epic stamp", () => {
+  it("stamps null when a lane change accompanies a detach", () => {
+    // `parentId ?? existing.parentId` collapsed "not reparenting" (undefined)
+    // with "detach" (null), so a detach fell back to the old parent — the
+    // event claimed the task moved under an epic it had just left, and
+    // `log <oldEpic>` reported it.
+    const epic = createTask(fixture.store, { title: "an epic", level: "epic" });
+    const task = createTask(fixture.store, { title: "leaves", parentId: epic.id });
+
+    updateTask(fixture.store, task.id, { parentId: null, lane: "Planned" });
+
+    expect(events(task.id).map((e) => ({ type: e.type, epic: e.epic_id }))).toEqual([
+      { type: "created", epic: epic.id },
+      { type: "status-changed", epic: null },
+    ]);
+  });
+
+  it("stamps the new epic when a lane change accompanies a move", () => {
+    // The guard on the guard: a fix that always stamped null would satisfy the
+    // test above and break this one.
+    const before = createTask(fixture.store, { title: "before", level: "epic" });
+    const after = createTask(fixture.store, { title: "after", level: "epic" });
+    const task = createTask(fixture.store, { title: "moves", parentId: before.id });
+
+    updateTask(fixture.store, task.id, { parentId: after.id, lane: "Planned" });
+
+    expect(events(task.id).at(-1)?.epic_id).toBe(after.id);
+  });
+});

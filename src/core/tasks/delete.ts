@@ -42,6 +42,9 @@ function countChildren(store: OpenStore, id: string): number {
  */
 export function deleteTask(store: OpenStore, idInput: string): DeleteResult {
   const id = requireId(store, idInput);
+  // Before the transaction: see `actor.ts` — resolving it spawns two git
+  // subprocesses, which must not happen with the write lock held.
+  const actor = store.actor();
 
   return writeTx(store.db, (now) => {
     const task = getTask(store, id);
@@ -78,7 +81,7 @@ export function deleteTask(store: OpenStore, idInput: string): DeleteResult {
         type: "deleted",
         entityId: id,
         epicId: epicIdFor(task),
-        actor: store.actor(),
+        actor,
         title: task.title,
       },
       now,

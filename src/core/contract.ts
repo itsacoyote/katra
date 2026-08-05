@@ -67,6 +67,16 @@ export interface UpdateResult {
  */
 export interface EventLog {
   readonly events: readonly LoggedEvent[];
+  /**
+   * True when the bound cut the result short.
+   *
+   * `list` is unbounded precisely because a default cap would have to report
+   * truncating; `log` *is* bounded, so it owes the same report. Silence here
+   * is worse than anywhere else in katra: this is the read F3's session digest
+   * builds on, and a partial history that looks complete is one an agent acts
+   * on.
+   */
+  readonly truncated: boolean;
 }
 
 /** What `note list` prints. */

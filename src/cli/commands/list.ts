@@ -46,8 +46,11 @@ export function registerList(program: Command, context: CliContext): void {
     .option("--tag <tag>", "only tasks carrying this tag")
     .option("--assignee <who>", "only tasks assigned to this person")
     .option("--priority <n>", "only tasks at this priority")
-    .option("--ready", "only tasks with no unfinished dependencies")
-    .option("--blocked", "only tasks waiting on something")
+    .option(
+      "--ready",
+      "only startable tasks; excludes epics and finished work unless --level or --lane says otherwise",
+    )
+    .option("--blocked", "only tasks waiting on something; same exclusions as --ready")
     .option("--limit <n>", "return at most this many, highest-ranked first")
     .option("--json", "emit structured output")
     .action((options: ListOptions) => {

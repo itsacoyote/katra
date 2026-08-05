@@ -74,6 +74,9 @@ function transition(
   plan: (task: Task) => Move,
 ): LifecycleResult {
   const id = requireId(store, idInput);
+  // Before the transaction: resolving the actor spawns two git subprocesses,
+  // and doing that under `BEGIN IMMEDIATE` holds the write lock across both.
+  const actor = store.actor();
 
   return writeTx(store.db, (now) => {
     const task = loadOrThrow(store, id, idInput);
@@ -98,7 +101,7 @@ function transition(
         type: event,
         entityId: id,
         epicId: epicIdFor(task),
-        actor: store.actor(),
+        actor,
         fromLane: task.lane,
         toLane: lane,
         reason,
