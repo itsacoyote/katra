@@ -38,6 +38,7 @@ const EXPECTED_COMMANDS = [
   "link",
   "next",
   "log",
+  "note",
 ] as const;
 
 let repo: GitFixture;
@@ -52,7 +53,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all thirteen commands on the program", () => {
+  it("registers all fourteen commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -61,15 +62,25 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(13);
+    expect(registered).toHaveLength(14);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
-    for (const command of createProgram({ cwd: repo.dir }).commands) {
+    // Walked recursively, so a subcommand cannot escape the contract by being
+    // one level down. A command that *has* subcommands is a namespace — it
+    // returns no data of its own and needs no --json, but it still has to say
+    // what it is for.
+    const check = (command: Command): void => {
       expect(command.description(), `${command.name()} has no description`).not.toBe("");
+      if (command.commands.length > 0) {
+        for (const child of command.commands) check(child);
+        return;
+      }
       const flags = command.options.map((option) => option.long);
       expect(flags, `${command.name()} has no --json`).toContain("--json");
-    }
+    };
+
+    for (const command of createProgram({ cwd: repo.dir }).commands) check(command);
   });
 });
 
@@ -99,6 +110,7 @@ describe("--json across every command", () => {
       // Deliberately after `delete`: the history of the task just removed is
       // the read only the event stream can answer.
       ["log", doomed],
+      ["note", "list"],
     ];
 
     const seen = new Set<string>();

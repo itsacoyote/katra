@@ -21,6 +21,7 @@
  */
 
 import type { LoggedEvent } from "./events/types.js";
+import type { Note } from "./notes/types.js";
 import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
 
 /**
@@ -66,6 +67,11 @@ export interface UpdateResult {
  */
 export interface EventLog {
   readonly events: readonly LoggedEvent[];
+}
+
+/** What `note list` prints. */
+export interface NoteList {
+  readonly notes: readonly Note[];
 }
 
 /** What `list` prints. */

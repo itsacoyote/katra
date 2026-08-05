@@ -21,6 +21,7 @@ import { registerLink } from "./commands/link.js";
 import { registerList } from "./commands/list.js";
 import { registerLog } from "./commands/log.js";
 import { registerNext } from "./commands/next.js";
+import { registerNote } from "./commands/note.js";
 import { registerShow } from "./commands/show.js";
 import { registerUpdate } from "./commands/update.js";
 import type { OutputStreams } from "./output.js";
@@ -208,6 +209,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerLink(program, context);
   registerDelete(program, context);
   registerLog(program, context);
+  registerNote(program, context);
   registerNext(program, context);
 
   return program;

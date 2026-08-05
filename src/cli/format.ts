@@ -7,6 +7,7 @@
  */
 
 import type { LoggedEvent } from "../core/events/types.js";
+import type { Note } from "../core/notes/types.js";
 import type { Task, TaskDetail } from "../core/tasks/types.js";
 
 function field(label: string, value: string): string {
@@ -203,5 +204,49 @@ export function formatEventLog(events: readonly LoggedEvent[]): string {
       ];
       return columns.join("  ").trimEnd();
     })
+    .join("\n");
+}
+
+/**
+ * One note's header line: everything about it except the body.
+ *
+ * The actor is always shown here, unlike in the log. A note is something
+ * somebody wrote, and "who wrote this handoff" is the first question its
+ * reader has — a log row is a mechanical record, a note is authorship.
+ */
+function noteHeader(note: Note): string {
+  return `${note.id}  ${note.kind}  ${note.createdAt.slice(0, 16).replace("T", " ")}  ${note.actor}`;
+}
+
+/** A single note, header then body. What `note add` prints back. */
+export function formatNote(note: Note): string {
+  return `${noteHeader(note)}\n\n${note.body.trimEnd()}`;
+}
+
+/**
+ * Notes, newest first, each as a header and its body.
+ *
+ * **Not one line per note**, unlike every other listing katra prints. A note's
+ * body is the reason to read it, so truncating to a row would leave the
+ * command answering a question nobody asked. `--limit` is how the output is
+ * bounded instead.
+ *
+ * Bodies are printed as stored, including their newlines — the one place in
+ * the CLI where multi-line content is the point rather than a hazard. They are
+ * *not* passed through the control-character collapse the log uses: doing so
+ * would corrupt exactly the pasted code and output notes exist to hold. An
+ * agent consuming notes programmatically should read `--json`.
+ */
+export function formatNoteList(notes: readonly Note[]): string {
+  if (notes.length === 0) return "no notes";
+
+  return notes.map((note) => `${noteHeader(note)}\n${indent(note.body.trimEnd())}`).join("\n\n");
+}
+
+/** Indents a body so it reads as belonging to the header above it. */
+function indent(text: string): string {
+  return text
+    .split("\n")
+    .map((line) => (line === "" ? "" : `  ${line}`))
     .join("\n");
 }
