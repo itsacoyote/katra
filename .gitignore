@@ -33,3 +33,6 @@ pnpm-debug.log*
 *.sqlite
 *.sqlite-wal
 *.sqlite-shm
+
+# Agent tooling — not this project's to track
+.claude/

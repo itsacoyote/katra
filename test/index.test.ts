@@ -24,6 +24,11 @@ describe("the public barrel", () => {
     expect(katra.generateId()).toMatch(
       new RegExp(`^${katra.ID_PREFIX}[0-9a-z]{${katra.ID_SUFFIX_LENGTH}}$`),
     );
+    // A consumer holding a Note sees `nt-` ids; the constant naming that space
+    // has to be published too, or the prefix is a magic string on their side.
+    expect(katra.generateId(katra.NOTE_ID_PREFIX)).toMatch(
+      new RegExp(`^${katra.NOTE_ID_PREFIX}[0-9a-z]{${katra.ID_SUFFIX_LENGTH}}$`),
+    );
   });
 
   it("exports predicates that actually narrow", () => {

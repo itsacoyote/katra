@@ -62,25 +62,21 @@ function filtersOnly(filters: NextFilters): Conditions {
   return { sql: parts.join(" AND "), params };
 }
 
-/** Builds the shared filter clause. Column names are literals; values bind. */
+/**
+ * The lane-and-readiness pair, plus the caller's narrowing.
+ *
+ * Built on {@link filtersOnly} rather than repeating it: a fourth filter added
+ * to one and not the other would make `next` and its untriaged count disagree
+ * about which tasks they are talking about, silently.
+ */
 function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
-  const parts = [`t.lane = ?`, `r.is_ready = ?`];
-  const params: unknown[] = [NEXT_LANE, ready ? 1 : 0];
+  const narrowing = filtersOnly(filters);
+  const parts = ["t.lane = ?", "r.is_ready = ?", ...(narrowing.sql === "" ? [] : [narrowing.sql])];
 
-  if (filters.kind !== undefined) {
-    parts.push("t.kind = ?");
-    params.push(filters.kind);
-  }
-  if (filters.level !== undefined) {
-    parts.push("t.level = ?");
-    params.push(filters.level);
-  }
-  if (filters.epic !== undefined) {
-    parts.push("t.parent_id = ?");
-    params.push(filters.epic);
-  }
-
-  return { sql: parts.join(" AND "), params };
+  return {
+    sql: parts.join(" AND "),
+    params: [NEXT_LANE, ready ? 1 : 0, ...narrowing.params],
+  };
 }
 
 /**

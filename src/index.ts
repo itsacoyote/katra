@@ -91,9 +91,12 @@ export {
   ID_PREFIX,
   ID_SUFFIX_LENGTH,
   MIN_PREFIX_LENGTH,
+  NOTE_ID_PREFIX,
 } from "./core/id-format.js";
 // The note model: what `note add` and `note list` print.
 export type { NewNote, Note, NoteFilters } from "./core/notes/types.js";
-// The task model: what `add` and `show` print.
-export type { Task, TaskDetail, TaskSummary } from "./core/tasks/types.js";
+// The task model. `add` prints a Task, `update` a TaskDetail, and `show` a
+// TaskView — the detail plus the notes and activity F2 added. Publishing only
+// the first two left `show --json` with no correct type to read it as.
+export type { Task, TaskDetail, TaskSummary, TaskView } from "./core/tasks/types.js";
 export { VERSION } from "./version.js";
