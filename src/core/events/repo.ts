@@ -69,6 +69,59 @@ export function rowToEvent(row: EventRow): StoredEvent {
   };
 }
 
+/** How many events a read returns when the caller does not say. */
+export const DEFAULT_EVENT_LIMIT = 50;
+
+export interface EventQuery {
+  /**
+   * Scope to one entity.
+   *
+   * For a task this is its own history. For an epic it is the epic's own
+   * events *and* every event stamped under it — the same query serves both,
+   * because no task's id ever appears in another task's `epic_id` unless that
+   * task is the epic. Omit it to read the whole store.
+   */
+  readonly entityId?: string;
+  /** Most recent this many. Defaults to {@link DEFAULT_EVENT_LIMIT}. */
+  readonly limit?: number;
+}
+
+/**
+ * Reads events, newest first.
+ *
+ * **Epic scoping reads the stamped `epic_id` column** — never `tasks WHERE
+ * parent_id = ?` followed by fetching those ids' events. That relational
+ * instinct mirrors `countChildren` and `listTasks` and is wrong twice over: it
+ * drops a deleted child's history, because the child row is gone, and a
+ * reparented child's pre-move history, because the parent link now points
+ * elsewhere. The column is stamped at write time precisely so this read needs
+ * no join.
+ *
+ * There is no join to `tasks` here at all, for the same reason ADR-008
+ * predicts: an event outlives its entity, so any inner join would silently
+ * drop exactly the history a deleted task most needs.
+ *
+ * Ordered by `id`, not `created_at`: the id is assigned inside the write
+ * transaction, so it is a total order even when several events share a
+ * millisecond. Ordering by the timestamp alone would leave same-millisecond
+ * events in whatever order the query plan happened to produce.
+ */
+export function listEvents(store: OpenStore, query: EventQuery = {}): StoredEvent[] {
+  const limit = query.limit ?? DEFAULT_EVENT_LIMIT;
+  const scoped = query.entityId !== undefined;
+
+  const rows = store.db
+    .prepare(
+      `SELECT * FROM events
+        ${scoped ? "WHERE entity_id = ? OR epic_id = ?" : ""}
+        ORDER BY id DESC
+        LIMIT ?`,
+    )
+    .all(...(scoped ? [query.entityId, query.entityId, limit] : [limit])) as EventRow[];
+
+  return rows.map(rowToEvent);
+}
+
 /**
  * Which epic a task's events belong under (requirement 10).
  *

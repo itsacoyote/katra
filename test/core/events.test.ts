@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openDatabase, writeTx } from "../../src/core/db/connection.js";
-import { appendEvent, epicIdFor, rowToEvent } from "../../src/core/events/repo.js";
+import {
+  appendEvent,
+  DEFAULT_EVENT_LIMIT,
+  epicIdFor,
+  listEvents,
+  rowToEvent,
+} from "../../src/core/events/repo.js";
 import { runConcurrent } from "../helpers/concurrent.js";
 import { seedEpic, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
@@ -372,5 +378,193 @@ describe("rowToEvent", () => {
     };
 
     expect(() => rowToEvent(row as never)).toThrowError(/event type must be one of/);
+  });
+});
+
+describe("listEvents", () => {
+  it("returns an entity's events newest first", () => {
+    const task = seedTask(fixture.store);
+    writeTx(fixture.store.db, (stamp) => {
+      appendEvent(fixture.store, { type: "created", entityId: task, actor: ACTOR }, stamp);
+      appendEvent(fixture.store, { type: "status-changed", entityId: task, actor: ACTOR }, stamp);
+      appendEvent(fixture.store, { type: "closed", entityId: task, actor: ACTOR }, stamp);
+    });
+
+    expect(listEvents(fixture.store, { entityId: task }).map((e) => e.type)).toEqual([
+      "closed",
+      "status-changed",
+      "created",
+    ]);
+  });
+
+  it("returns only the entity asked for", () => {
+    const one = seedTask(fixture.store);
+    const two = seedTask(fixture.store);
+    writeTx(fixture.store.db, (stamp) => {
+      appendEvent(fixture.store, { type: "created", entityId: one, actor: ACTOR }, stamp);
+      appendEvent(fixture.store, { type: "created", entityId: two, actor: ACTOR }, stamp);
+    });
+
+    expect(listEvents(fixture.store, { entityId: one }).map((e) => e.entityId)).toEqual([one]);
+  });
+
+  it("returns an epic's own events and its children's", () => {
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    const child = seedTask(fixture.store, { parentId: epic });
+    const unrelated = seedTask(fixture.store);
+
+    writeTx(fixture.store.db, (stamp) => {
+      appendEvent(
+        fixture.store,
+        { type: "created", entityId: epic, epicId: epic, actor: ACTOR },
+        stamp,
+      );
+      appendEvent(
+        fixture.store,
+        { type: "created", entityId: child, epicId: epic, actor: ACTOR },
+        stamp,
+      );
+      appendEvent(fixture.store, { type: "created", entityId: unrelated, actor: ACTOR }, stamp);
+    });
+
+    const scoped = listEvents(fixture.store, { entityId: epic });
+    expect(scoped.map((e) => e.entityId).sort()).toEqual([child, epic].sort());
+  });
+
+  it("returns a plain task's own events only, not other tasks stamped nearby", () => {
+    // The same query serves entity and epic scope. It is safe only because no
+    // task's id appears in another task's epic_id unless that task is the
+    // epic — asserted rather than assumed.
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    const child = seedTask(fixture.store, { parentId: epic });
+
+    writeTx(fixture.store.db, (stamp) => {
+      appendEvent(
+        fixture.store,
+        { type: "created", entityId: child, epicId: epic, actor: ACTOR },
+        stamp,
+      );
+    });
+
+    expect(listEvents(fixture.store, { entityId: child })).toHaveLength(1);
+  });
+
+  it("still returns a deleted task's history", () => {
+    // Acceptance criterion 6, and the reason epic scoping reads the stamped
+    // column. Built as a join to `tasks`, this returns nothing: the row is
+    // gone.
+    const task = seedTask(fixture.store, { title: "a typo" });
+    writeTx(fixture.store.db, (stamp) => {
+      appendEvent(
+        fixture.store,
+        { type: "created", entityId: task, actor: ACTOR, title: "a typo" },
+        stamp,
+      );
+      appendEvent(
+        fixture.store,
+        { type: "deleted", entityId: task, actor: ACTOR, title: "a typo" },
+        stamp,
+      );
+    });
+    fixture.store.db.prepare("DELETE FROM tasks WHERE id = ?").run(task);
+
+    const history = listEvents(fixture.store, { entityId: task });
+    expect(history.map((e) => e.type)).toEqual(["deleted", "created"]);
+    expect(history[0]?.title).toBe("a typo");
+  });
+
+  it("keeps a deleted child's history under its epic", () => {
+    // The sharper half of the same finding: scoping by `tasks.parent_id` would
+    // lose this, because the child no longer exists to be joined to.
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    const child = seedTask(fixture.store, { parentId: epic, title: "gone" });
+    writeTx(fixture.store.db, (stamp) => {
+      appendEvent(
+        fixture.store,
+        { type: "created", entityId: child, epicId: epic, actor: ACTOR, title: "gone" },
+        stamp,
+      );
+      appendEvent(
+        fixture.store,
+        { type: "deleted", entityId: child, epicId: epic, actor: ACTOR, title: "gone" },
+        stamp,
+      );
+    });
+    fixture.store.db.prepare("DELETE FROM tasks WHERE id = ?").run(child);
+
+    expect(listEvents(fixture.store, { entityId: epic }).map((e) => e.type)).toEqual([
+      "deleted",
+      "created",
+    ]);
+  });
+
+  it("still includes a deleted task's events in the whole-store read", () => {
+    const task = seedTask(fixture.store);
+    writeTx(fixture.store.db, (stamp) => {
+      appendEvent(fixture.store, { type: "created", entityId: task, actor: ACTOR }, stamp);
+    });
+    fixture.store.db.prepare("DELETE FROM tasks WHERE id = ?").run(task);
+
+    expect(listEvents(fixture.store)).toHaveLength(1);
+  });
+
+  it("reads the whole store when no entity is given", () => {
+    const one = seedTask(fixture.store);
+    const two = seedTask(fixture.store);
+    writeTx(fixture.store.db, (stamp) => {
+      appendEvent(fixture.store, { type: "created", entityId: one, actor: ACTOR }, stamp);
+      appendEvent(fixture.store, { type: "created", entityId: two, actor: ACTOR }, stamp);
+    });
+
+    expect(listEvents(fixture.store)).toHaveLength(2);
+  });
+
+  it("says nothing happened rather than erroring on an empty store", () => {
+    expect(listEvents(fixture.store)).toEqual([]);
+    expect(listEvents(fixture.store, { entityId: "kt-zzzzzz" })).toEqual([]);
+  });
+
+  it("orders by id so identical timestamps stay deterministic", () => {
+    // Every event in one transaction shares a timestamp by design, so ordering
+    // by created_at alone leaves them in whatever order the query plan
+    // produced. The id is assigned inside the write lock and is total.
+    const task = seedTask(fixture.store);
+    const ids = writeTx(fixture.store.db, (stamp) => [
+      appendEvent(fixture.store, { type: "created", entityId: task, actor: ACTOR }, stamp),
+      appendEvent(fixture.store, { type: "status-changed", entityId: task, actor: ACTOR }, stamp),
+      appendEvent(fixture.store, { type: "closed", entityId: task, actor: ACTOR }, stamp),
+    ]);
+
+    const stamps = new Set(listEvents(fixture.store).map((e) => e.createdAt));
+    expect(stamps.size).toBe(1);
+
+    for (let run = 0; run < 5; run++) {
+      expect(listEvents(fixture.store).map((e) => e.id)).toEqual([...ids].reverse());
+    }
+  });
+
+  it("bounds the result with limit, keeping the newest", () => {
+    const task = seedTask(fixture.store);
+    const ids = writeTx(fixture.store.db, (stamp) =>
+      Array.from({ length: 10 }, () =>
+        appendEvent(fixture.store, { type: "note-added", entityId: task, actor: ACTOR }, stamp),
+      ),
+    );
+
+    const limited = listEvents(fixture.store, { limit: 3 });
+    expect(limited.map((e) => e.id)).toEqual([...ids].reverse().slice(0, 3));
+  });
+
+  it("applies a default bound rather than returning an unbounded history", () => {
+    // Nothing prunes this table (ADR-008), so an unbounded default read grows
+    // without limit for the life of the repository.
+    const task = seedTask(fixture.store);
+    writeTx(fixture.store.db, (stamp) => {
+      for (let i = 0; i < DEFAULT_EVENT_LIMIT + 10; i++) {
+        appendEvent(fixture.store, { type: "note-added", entityId: task, actor: ACTOR }, stamp);
+      }
+    });
+
+    expect(listEvents(fixture.store)).toHaveLength(DEFAULT_EVENT_LIMIT);
   });
 });
