@@ -101,11 +101,27 @@ function valueTakingFlags(argv: readonly string[], program: Command): ReadonlySe
 
   collect(program.options);
 
-  // The first bare token is the subcommand: katra's only program-level options
-  // are `-v`/`--version` and `--help`, neither of which takes a value.
-  const name = argv.find((token) => !token.startsWith("-"));
-  const command = program.commands.find((candidate) => candidate.name() === name);
-  if (command !== undefined) collect(command.options);
+  // Walked down the tree, not looked up once. With `note add`, `--kind` and
+  // `--body-file` are declared on the *child*, so reading only `note`'s
+  // options would report them as not-value-taking — and `wantsJson` would
+  // misparse `note add --kind --json` exactly the way a flat set misparsed
+  // `update --tag --json`.
+  //
+  // A superset of the single lookup it replaces: with no subcommands the loop
+  // stops at the same place, after the first level.
+  let current = program;
+  for (const token of argv) {
+    // The first bare token names a command; katra's only program-level options
+    // are `-v`/`--version` and `--help`, neither of which takes a value.
+    if (token.startsWith("-")) continue;
+    const child = current.commands.find((candidate) => candidate.name() === token);
+    // Not a subcommand, so it is this command's argument — and so is
+    // everything after it. Stopping here is what keeps `log kt-abc` from
+    // hunting for a subcommand called `kt-abc`.
+    if (child === undefined) break;
+    collect(child.options);
+    current = child;
+  }
 
   return flags;
 }

@@ -9,9 +9,10 @@
 
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
-import { createProgram } from "../../src/cli/program.js";
+import { createProgram, wantsJson } from "../../src/cli/program.js";
 import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
@@ -431,5 +432,59 @@ describe("katra next", () => {
 
     expect(result.stdout).toContain(bug);
     expect(result.stdout.match(/kt-[0-9a-z]{6}/g)).toHaveLength(1);
+  });
+});
+
+describe("valueTakingFlags descends into subcommands", () => {
+  /**
+   * A stand-in for the shape T12 introduces.
+   *
+   * katra has no subcommands yet, so the mechanism is exercised against a
+   * program built here. Waiting for `note` to exist would mean shipping the
+   * fix untested and discovering the gap through T12's failures instead.
+   */
+  function probe(): Command {
+    const program = new Command();
+    program.name("probe");
+    program.command("flat").option("--tag <tag>", "a value-taking flag").option("--json", "");
+
+    const parent = program.command("note");
+    parent.command("add").option("--kind <kind>", "a value-taking flag").option("--json", "");
+    parent.command("list").option("--json", "");
+    return program;
+  }
+
+  it("recognises a value-taking flag declared on a subcommand", () => {
+    // `--kind` lives on `add`, not on `note`. Read at the parent level it looks
+    // like a boolean, so `--json` would be counted as a real request when it
+    // is actually `--kind`'s value.
+    expect(wantsJson(["note", "add", "--kind", "--json"], probe())).toBe(false);
+  });
+
+  it("still recognises one declared on a top-level command", () => {
+    // The behaviour the descent replaces, unchanged.
+    expect(wantsJson(["flat", "--tag", "--json"], probe())).toBe(false);
+  });
+
+  it("honours a genuine --json on a subcommand", () => {
+    // The guard on the guard: a descent that swallowed everything would make
+    // the assertions above pass while breaking every real request.
+    expect(wantsJson(["note", "add", "--kind", "handoff", "--json"], probe())).toBe(true);
+    expect(wantsJson(["note", "list", "--json"], probe())).toBe(true);
+    expect(wantsJson(["flat", "--json"], probe())).toBe(true);
+  });
+
+  it("stops descending at a command with no subcommands", () => {
+    // `log kt-abc` must not go hunting for a subcommand named `kt-abc`, and an
+    // argument that happens to match a *sibling* command's name must not pull
+    // that sibling's options into scope.
+    expect(wantsJson(["flat", "note", "--json"], probe())).toBe(true);
+  });
+
+  it("does not treat a parent's own flags as its children's", () => {
+    // `--kind` belongs to `add`. On `list` it is not defined at all, so a
+    // following `--json` is a real request and the invocation is malformed —
+    // which is a usage error, not a silent downgrade to text output.
+    expect(wantsJson(["note", "list", "--kind", "--json"], probe())).toBe(true);
   });
 });
