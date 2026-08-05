@@ -333,6 +333,11 @@ describe("note list refuses bad flag values", () => {
   });
 
   it("refuses a --kind outside the four, naming them", async () => {
+    // End to end, deliberately: `listNotes` narrows the kind again, so this
+    // pins "note list refuses a bad kind" rather than "the CLI layer is what
+    // refuses it". That is defence in depth, not redundancy — but the reach is
+    // wider than the call site it sits next to, and saying so beats implying
+    // otherwise.
     const task = await add(["a task"]);
 
     const result = await runCli(["note", "list", task, "--kind", "summary"], { cwd: repo.dir });
