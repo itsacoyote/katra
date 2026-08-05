@@ -11,6 +11,8 @@
  */
 
 import type { Kind, Lane, Level, Priority } from "../enums.js";
+import type { LoggedEvent } from "../events/types.js";
+import type { Note } from "../notes/types.js";
 
 /** A task or epic, as stored. */
 export interface Task {
@@ -81,6 +83,19 @@ export interface TaskDetail {
   readonly blockers: readonly Blocker[];
   /** Tasks waiting on this one — what finishing it would release. */
   readonly blocking: readonly Blocker[];
+}
+
+/**
+ * What `show` returns: a task detail plus its notes and recent activity.
+ *
+ * Separate from {@link TaskDetail} rather than folded into it, because
+ * `update` returns a detail too and must not be charged two extra queries per
+ * task for content it never prints. Both sections are bounded by fixed
+ * internal caps — see `view.ts` for why they are not `--limit` flags.
+ */
+export interface TaskView extends TaskDetail {
+  readonly notes: readonly Note[];
+  readonly activity: readonly LoggedEvent[];
 }
 
 /**

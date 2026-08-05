@@ -5,7 +5,8 @@ import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
 import { openStore } from "../../src/core/store.js";
 import type { TaskList } from "../../src/core/tasks/repo.js";
-import type { Task, TaskDetail } from "../../src/core/tasks/types.js";
+import type { Task, TaskDetail, TaskView } from "../../src/core/tasks/types.js";
+import { SHOW_ACTIVITY_LIMIT, SHOW_NOTE_LIMIT } from "../../src/core/tasks/view.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
 import { createGitRepo } from "../helpers/fixture.js";
@@ -24,6 +25,16 @@ function seedAmbiguousPair(): void {
   try {
     seedTask(store, { id: "kt-ab0001" });
     seedTask(store, { id: "kt-ab0002" });
+  } finally {
+    store.close();
+  }
+}
+
+/** Seeds a task directly, so it has no created event and no notes. */
+function seedTaskWithoutHistory(): void {
+  const { store } = openStore(repo.dir, {});
+  try {
+    seedTask(store, { id: "kt-qu1et0", title: "nothing has happened to me" });
   } finally {
     store.close();
   }
@@ -371,5 +382,133 @@ describe("warnings from a non-init command", () => {
     expect(result.exitCode).toBe(EXIT.ok);
     expect(result.stdout).toContain("belongs to the other repo");
     expect(result.stderr).toMatch(/GIT_COMMON_DIR/);
+  });
+});
+
+describe("katra show — notes and activity", () => {
+  /** Attaches a note from stdin. */
+  async function note(id: string, body: string, kind = "general"): Promise<void> {
+    const result = await runCli(["note", "add", id, "--kind", kind, "--body-file", "-"], {
+      cwd: repo.dir,
+      stdin: body,
+    });
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+  }
+
+  it("lists a task's notes with kind and a one-line preview", async () => {
+    const id = await add(["a task"]);
+    await note(id, "first line of the handoff\nsecond line never shown here", "handoff");
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/notes \(1/);
+    expect(result.stdout).toContain("handoff");
+    expect(result.stdout).toContain("first line of the handoff");
+    // A preview is one line: the body's later lines belong to `note list`.
+    expect(result.stdout).not.toContain("second line never shown here");
+    // And the output says where to find them.
+    expect(result.stdout).toContain("katra note list");
+  });
+
+  it("shows recent activity newest first", async () => {
+    const id = await add(["a task"]);
+    await runCli(["update", id, "--lane", "Planned"], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+    const activity = result.stdout.slice(result.stdout.indexOf("activity ("));
+
+    expect(activity).toContain("status-changed");
+    expect(activity).toContain("created");
+    expect(activity.indexOf("status-changed")).toBeLessThan(activity.indexOf("created"));
+    expect(result.stdout).toContain("katra log");
+  });
+
+  it("caps both sections regardless of how much history exists", async () => {
+    const id = await add(["a busy task"]);
+    for (let i = 0; i < 12; i++) await note(id, `note ${i}`);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    // 12 notes written and 13 events, but both sections stay at their fixed
+    // internal caps: `show` is a summary, not a dump.
+    expect(view.notes).toHaveLength(SHOW_NOTE_LIMIT);
+    expect(view.activity).toHaveLength(SHOW_ACTIVITY_LIMIT);
+
+    const listed = (await runCli(["note", "list", id, "--json"], { cwd: repo.dir })).json() as {
+      notes: unknown[];
+    };
+    expect(listed.notes).toHaveLength(12);
+  });
+
+  it("keeps the newest notes when it caps, not the oldest", async () => {
+    const id = await add(["a task"]);
+    for (let i = 0; i < SHOW_NOTE_LIMIT + 3; i++) await note(id, `note ${i}`);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes[0]?.body).toBe(`note ${SHOW_NOTE_LIMIT + 2}`);
+  });
+
+  it("strips control characters from a note preview", async () => {
+    // Notes are where fetched content and model output get pasted, and F3's
+    // brief will hand handoff notes to other agents as their first context. A
+    // raw escape executes on whatever renders it.
+    const id = await add(["a task"]);
+    await note(id, "\u001B[31mred and \u001B[2Jcleared");
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).toContain("[31mred");
+  });
+
+  it("strips control characters from a note body in note list too", async () => {
+    // The same property one command over: `note list` prints whole bodies, so
+    // it is the larger surface. Newlines and tabs survive, so pasted code
+    // still reads correctly — that was the whole objection to sanitising.
+    const id = await add(["a task"]);
+    await note(id, "line one\n\tindented \u001B[31mred\u001B[0m\nline three");
+
+    const result = await runCli(["note", "list", id], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).toContain("line one");
+    expect(result.stdout).toContain("line three");
+    expect(result.stdout).toContain("\tindented");
+  });
+
+  it("keeps the body verbatim under --json", async () => {
+    // `--json` is the programmatic path: its consumer is not a terminal, and a
+    // value altered on the way out is no longer what was stored.
+    const id = await add(["a task"]);
+    const body = "\u001B[31mred\nsecond line";
+    await note(id, body);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes[0]?.body).toBe(body);
+  });
+
+  it("omits both sections for a task with neither", async () => {
+    // An empty heading is a line saying nothing happened, which the absence
+    // already says. Seeded rather than added, because `add` writes a created
+    // event and there would be activity to show.
+    seedTaskWithoutHistory();
+
+    const result = await runCli(["show", "kt-qu1et0"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).not.toContain("notes (");
+    expect(result.stdout).not.toContain("activity (");
+  });
+
+  it("carries notes and activity in the JSON document", async () => {
+    const id = await add(["a task"]);
+    await note(id, "a note", "decision");
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes[0]).toMatchObject({ kind: "decision", body: "a note" });
+    expect(view.activity.map((e) => e.type)).toEqual(["note-added", "created"]);
   });
 });

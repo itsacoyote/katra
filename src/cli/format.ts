@@ -8,7 +8,7 @@
 
 import type { LoggedEvent } from "../core/events/types.js";
 import type { Note } from "../core/notes/types.js";
-import type { Task, TaskDetail } from "../core/tasks/types.js";
+import type { Task, TaskDetail, TaskView } from "../core/tasks/types.js";
 
 function field(label: string, value: string): string {
   return `  ${label.padEnd(12)}${value}`;
@@ -208,6 +208,38 @@ export function formatEventLog(events: readonly LoggedEvent[]): string {
 }
 
 /**
+ * Removes control characters a terminal would act on, keeping the two that
+ * carry meaning.
+ *
+ * Notes are where fetched content and model output get pasted, and F3's
+ * `brief` will surface handoff notes to *other agents* as their first context.
+ * A raw ANSI escape in a body executes on whatever renders it — it can repaint
+ * the screen, hide what follows, or misreport what a task says.
+ *
+ * Newline and tab survive, so indentation and line structure — the reason
+ * pasted code is in a note at all — come through intact. `--json` is
+ * deliberately not sanitised: it is the programmatic path, its consumer is not
+ * a terminal, and a value altered on the way out would no longer be what was
+ * stored.
+ */
+function sanitizeBody(text: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
+  return text.replaceAll(/[\u0000-\u0008\u000B-\u001F\u007F]+/g, "");
+}
+
+/**
+ * A note reduced to a single line, for a summary that has no room for the body.
+ *
+ * The first line only, then the full control-character collapse — a preview
+ * has no use for the newline and tab {@link sanitizeBody} keeps, and either
+ * would break the row.
+ */
+function previewBody(text: string, width: number): string {
+  const [first = ""] = text.split("\n");
+  return clamp(oneLine(first), width);
+}
+
+/**
  * One note's header line: everything about it except the body.
  *
  * The actor is always shown here, unlike in the log. A note is something
@@ -220,7 +252,7 @@ function noteHeader(note: Note): string {
 
 /** A single note, header then body. What `note add` prints back. */
 export function formatNote(note: Note): string {
-  return `${noteHeader(note)}\n\n${note.body.trimEnd()}`;
+  return `${noteHeader(note)}\n\n${sanitizeBody(note.body).trimEnd()}`;
 }
 
 /**
@@ -231,16 +263,19 @@ export function formatNote(note: Note): string {
  * command answering a question nobody asked. `--limit` is how the output is
  * bounded instead.
  *
- * Bodies are printed as stored, including their newlines — the one place in
- * the CLI where multi-line content is the point rather than a hazard. They are
- * *not* passed through the control-character collapse the log uses: doing so
- * would corrupt exactly the pasted code and output notes exist to hold. An
- * agent consuming notes programmatically should read `--json`.
+ * Bodies keep their newlines and tabs — the one place in the CLI where
+ * multi-line content is the point rather than a hazard — but everything else a
+ * terminal would act on is removed. Keeping indentation was the whole
+ * objection to sanitising, and {@link sanitizeBody} keeps it, so the objection
+ * does not survive: an ANSI escape pasted into a note would otherwise execute
+ * on whoever read it back. `--json` stays verbatim.
  */
 export function formatNoteList(notes: readonly Note[]): string {
   if (notes.length === 0) return "no notes";
 
-  return notes.map((note) => `${noteHeader(note)}\n${indent(note.body.trimEnd())}`).join("\n\n");
+  return notes
+    .map((note) => `${noteHeader(note)}\n${indent(sanitizeBody(note.body).trimEnd())}`)
+    .join("\n\n");
 }
 
 /** Indents a body so it reads as belonging to the header above it. */
@@ -249,4 +284,43 @@ function indent(text: string): string {
     .split("\n")
     .map((line) => (line === "" ? "" : `  ${line}`))
     .join("\n");
+}
+
+/** How much of a note's body a `show` preview carries. */
+const PREVIEW_WIDTH = 56;
+
+/**
+ * The full `show` block: the task detail, then its notes and recent activity.
+ *
+ * Notes appear as **metadata plus a one-line preview**, not as bodies. `show`
+ * is a compact summary of one task, and a long-lived task accumulates notes
+ * without bound — inlining them turns the summary into a dump on exactly the
+ * tasks most worth summarising. `katra note list <id>` prints whole bodies and
+ * `katra log <id>` the whole history; both sections here name the command that
+ * shows the rest.
+ *
+ * A task with no notes and no activity gets neither heading: an empty section
+ * is a line that says nothing happened, which the absence already says.
+ */
+export function formatTaskView(view: TaskView): string {
+  const lines = [formatTaskDetail(view)];
+
+  if (view.notes.length > 0) {
+    lines.push("", `notes (${view.notes.length}, newest first — \`katra note list\` for bodies)`);
+    for (const note of view.notes) {
+      lines.push(
+        `  ${note.id}  ${note.kind.padEnd(10)}  ${note.createdAt.slice(0, 16).replace("T", " ")}  ${previewBody(note.body, PREVIEW_WIDTH)}`,
+      );
+    }
+  }
+
+  if (view.activity.length > 0) {
+    lines.push("", `activity (newest first — \`katra log\` for the rest)`);
+    for (const event of view.activity) {
+      const when = event.createdAt.slice(0, 16).replace("T", " ");
+      lines.push(`  ${when}  ${event.type.padEnd(14)}  ${describeEvent(event)}`.trimEnd());
+    }
+  }
+
+  return lines.join("\n");
 }

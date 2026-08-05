@@ -3,8 +3,8 @@
  */
 
 import type { Command } from "commander";
-import { showTask } from "../../core/tasks/repo.js";
-import { formatTaskDetail } from "../format.js";
+import { viewTask } from "../../core/tasks/view.js";
+import { formatTaskView } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
@@ -16,12 +16,12 @@ export function registerShow(program: Command, context: CliContext): void {
     .description("show one task in full")
     .option("--json", "emit structured output")
     .action((id: string, options: { json?: boolean }) => {
-      const { result, warnings } = withStore(context, (store) => showTask(store, id));
+      const { result, warnings } = withStore(context, (store) => viewTask(store, id));
 
       emit(
         result,
         { json: options.json === true, warnings, streams: context.streams },
-        formatTaskDetail,
+        formatTaskView,
       );
     });
 }
