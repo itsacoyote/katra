@@ -49,6 +49,19 @@ export function summarise(task: Task): TaskSummary {
   return { id: task.id, title: task.title, level: task.level, lane: task.lane };
 }
 
+/**
+ * A task standing between another task and readiness.
+ *
+ * Declared here rather than in `contract.ts` because {@link TaskDetail} needs
+ * it: `contract.ts` already imports this module, so defining it there and
+ * importing it back would make the two mutually dependent.
+ */
+export interface Blocker {
+  readonly id: string;
+  readonly title: string;
+  readonly lane: Lane;
+}
+
 /** What `show` returns. */
 export interface TaskDetail {
   readonly task: Task;
@@ -56,6 +69,18 @@ export interface TaskDetail {
   readonly parent: TaskSummary | null;
   /** Tasks associated with this one. Carries no blocking meaning. */
   readonly links: readonly TaskSummary[];
+  /**
+   * Unfinished dependencies — what stops this being started.
+   *
+   * The same set and the same ordering `next` reports, deliberately: an agent
+   * that asks `show` whether it can start a task and one that asks `next` for
+   * something to start must not get different answers. Finished dependencies
+   * are omitted for the same reason they are in `next` — they are no longer in
+   * the way.
+   */
+  readonly blockers: readonly Blocker[];
+  /** Tasks waiting on this one — what finishing it would release. */
+  readonly blocking: readonly Blocker[];
 }
 
 /**

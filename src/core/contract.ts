@@ -20,8 +20,7 @@
  * neither touches the database.
  */
 
-import type { Lane } from "./enums.js";
-import type { Task, TaskSummary } from "./tasks/types.js";
+import type { Blocker, Task, TaskSummary } from "./tasks/types.js";
 
 /**
  * Something worth telling the user that is not fatal.
@@ -36,12 +35,14 @@ export interface StoreWarning {
   readonly message: string;
 }
 
-/** A task standing between another task and readiness. */
-export interface Blocker {
-  readonly id: string;
-  readonly title: string;
-  readonly lane: Lane;
-}
+/**
+ * A task standing between another task and readiness.
+ *
+ * Defined in `tasks/types.ts` and re-exported here so this file stays the one
+ * place to read the `--json` contract. It moved there because `TaskDetail`
+ * needs it, and this module already imports that one.
+ */
+export type { Blocker };
 
 /** What `list` prints. */
 export interface TaskList {

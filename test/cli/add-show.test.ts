@@ -227,6 +227,48 @@ describe("katra show", () => {
     expect(result.stdout).toMatch(/tags\s+alpha, beta/);
   });
 
+  it("names what is blocking the task and what it is blocking", async () => {
+    // Found by dogfooding katra on its own backlog: `show` was the only view
+    // that never mentioned dependencies, so a task blocked by two others
+    // looked exactly like one that could be started.
+    const blocker = await add(["must land first"]);
+    const id = await add(["waits on it"]);
+    const downstream = await add(["waits on me"]);
+    await runCli(["dep", id, "--blocked-by", blocker], { cwd: repo.dir });
+    await runCli(["dep", downstream, "--blocked-by", id], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(
+      new RegExp(`blockers\\s+${blocker}\\s+Defined\\s+must land first`),
+    );
+    expect(result.stdout).toMatch(
+      new RegExp(`blocking\\s+${downstream}\\s+Defined\\s+waits on me`),
+    );
+  });
+
+  it("says blockers are none rather than omitting the line", async () => {
+    // A missing line reads as "this view does not know", which is precisely
+    // what it used to mean.
+    const id = await add(["nothing in the way"]);
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/blockers\s+none/);
+  });
+
+  it("carries blockers and blocking in the JSON document", async () => {
+    const blocker = await add(["must land first"]);
+    const id = await add(["waits on it"]);
+    await runCli(["dep", id, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["show", id, "--json"], { cwd: repo.dir });
+    const detail = result.json() as TaskDetail;
+
+    expect(detail.blockers).toEqual([{ id: blocker, title: "must land first", lane: "Defined" }]);
+    expect(detail.blocking).toEqual([]);
+  });
+
   it("resolves a partial id", async () => {
     const id = await add(["findable"]);
 

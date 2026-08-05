@@ -14,7 +14,7 @@ import type { Kind, Lane, Level, Priority } from "../enums.js";
 import { isTerminal, PRIORITY_DEFAULT } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
-import { READINESS_VIEW } from "../graph/deps.js";
+import { listBlockers, listDependents, READINESS_VIEW } from "../graph/deps.js";
 import { listLinks } from "../graph/links.js";
 import {
   narrowKind,
@@ -263,6 +263,11 @@ export function showTaskWithin(store: OpenStore, id: string): TaskDetail {
     task,
     parent: task.parentId === null ? null : summariseById(store, task.parentId),
     links: listLinks(store, id),
+    // `show` is where an agent decides whether to start something, and it was
+    // the only view that never mentioned dependencies — a blocked task
+    // rendered identically to a startable one.
+    blockers: listBlockers(store, id),
+    blocking: listDependents(store, id),
   };
 }
 

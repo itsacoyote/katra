@@ -25,6 +25,29 @@ export function formatTaskDetail(detail: TaskDetail): string {
 
   if (task.assignee !== null) lines.push(field("assignee", task.assignee));
   if (parent !== null) lines.push(field("epic", `${parent.id}  ${parent.title}`));
+
+  // Blockers before links and tags: "can I start this?" is the question `show`
+  // is usually asked, and the answer should not be below the fold. Stated
+  // explicitly when there are none, because a missing line reads as "this view
+  // does not know" — which is exactly what it used to mean.
+  if (detail.blockers.length === 0) {
+    lines.push(field("blockers", "none"));
+  } else {
+    for (const [index, blocker] of detail.blockers.entries()) {
+      lines.push(
+        field(index === 0 ? "blockers" : "", `${blocker.id}  ${blocker.lane}  ${blocker.title}`),
+      );
+    }
+  }
+  for (const [index, dependent] of detail.blocking.entries()) {
+    lines.push(
+      field(
+        index === 0 ? "blocking" : "",
+        `${dependent.id}  ${dependent.lane}  ${dependent.title}`,
+      ),
+    );
+  }
+
   for (const [index, link] of detail.links.entries()) {
     lines.push(field(index === 0 ? "links" : "", `${link.id}  ${link.title}`));
   }
