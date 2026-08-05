@@ -8,8 +8,8 @@
  * katra spawns anything.
  */
 
-import { chmodSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { findGit, runGit } from "../../src/core/git.js";
@@ -118,5 +118,39 @@ describe("the process-spawning boundary", () => {
     // A guard on the guard: if the regex broke, the sweep above would pass by
     // finding nothing anywhere. The allowed module must still match it.
     expect(spawning.test(code(readFileSync(join(root, allowed), "utf8")))).toBe(true);
+  });
+});
+
+describe("relative PATH entries", () => {
+  it.runIf(onPosix)("skips a relative PATH entry rather than resolving it", () => {
+    // The docstring promises an absolute path, and `join("tools", "git")` is
+    // not one. `execFileSync` resolves a relative `file` against the `cwd` it
+    // is handed — which `runGit` sets to the repository — so a repo shipping
+    // `tools/git` would be executed. On Windows `join(".", "git.exe")`
+    // collapses to a bare name, which is the exact input that makes libuv
+    // probe the current directory first: F1's finding, reintroduced.
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    const bin = join(dir.dir, "tools");
+    mkdirSync(bin, { recursive: true });
+    const planted = join(bin, "git");
+    writeFileSync(planted, "#!/bin/sh\necho hijacked\n", "utf8");
+    chmodSync(planted, 0o755);
+
+    // Relative entries — including "." — must be ignored entirely.
+    expect(findGit({ PATH: "tools" })).toBeUndefined();
+    expect(findGit({ PATH: "." })).toBeUndefined();
+    // The same directory given absolutely is honoured, so this is a rule about
+    // relativity and not about the directory.
+    expect(findGit({ PATH: bin })).toBe(planted);
+  });
+
+  it("returns an absolute path, not merely one containing a separator", () => {
+    // The previous assertion was `toMatch(/[/\\]/)`, which `tools/git`
+    // satisfies — so the guard could not catch the case above.
+    const found = findGit(process.env);
+
+    expect(found).toBeDefined();
+    expect(isAbsolute(found ?? "")).toBe(true);
   });
 });

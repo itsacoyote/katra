@@ -21,7 +21,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { delimiter, join } from "node:path";
+import { delimiter, isAbsolute, join } from "node:path";
 import { KatraException } from "./errors.js";
 
 /** `--path-format` landed in git 2.31; nothing older can resolve the store. */
@@ -41,8 +41,12 @@ interface GitFailure {
  * looking in the *current directory first*, then `PATH` — POSIX `execvp` does
  * not. katra's whole premise is running inside arbitrary repositories, so a
  * repo containing `git.exe`, `git.cmd` or `git.bat` would have that file
- * executed with the user's privileges by every katra command. Passing a path
- * containing a separator makes libuv skip the cwd probe entirely.
+ * executed with the user's privileges by every katra command. Passing an
+ * absolute path makes libuv skip the cwd probe entirely.
+ *
+ * Relative `PATH` entries are skipped rather than resolved: `join("tools",
+ * "git")` is still relative, and `execFileSync` resolves a relative `file`
+ * against the `cwd` it is handed — which is the repository.
  *
  * Returns undefined when nothing matches, so the caller raises katra's own
  * "git is not installed" error rather than a Node internals dump.
@@ -58,7 +62,16 @@ export function findGit(env: NodeJS.ProcessEnv): string | undefined {
       : [""];
 
   for (const dir of path.split(delimiter)) {
-    if (dir === "") continue;
+    // Absolute entries only. `join("tools", "git")` is still relative, and
+    // `execFileSync` resolves a relative `file` against the `cwd` it is given —
+    // which `runGit` sets to the repository. A repo shipping `tools/git` would
+    // be executed. Worse on Windows: `join(".", "git.exe")` collapses to a bare
+    // name with no separator, which is exactly the input that makes libuv probe
+    // the current directory first — F1's original finding, reintroduced.
+    //
+    // A relative PATH entry is a misconfiguration katra has no business
+    // honouring, so it is skipped rather than resolved.
+    if (dir === "" || !isAbsolute(dir)) continue;
     for (const suffix of suffixes) {
       const candidate = join(dir, `git${suffix}`);
       if (existsSync(candidate)) return candidate;

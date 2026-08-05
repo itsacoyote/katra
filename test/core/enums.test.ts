@@ -26,7 +26,13 @@ import {
   sqlEnum,
   TERMINAL_LANES,
 } from "../../src/core/enums.js";
-import { narrowEventType, narrowKind, narrowNoteKind } from "../../src/core/narrow.js";
+import {
+  MAX_COUNT,
+  narrowCount,
+  narrowEventType,
+  narrowKind,
+  narrowNoteKind,
+} from "../../src/core/narrow.js";
 
 describe("fixed value sets", () => {
   it("derives Lane from the LANES array so the two cannot diverge", () => {
@@ -306,6 +312,32 @@ describe("sqlEnum", () => {
       expect(() => db.prepare("INSERT INTO probe (lane) VALUES (?)").run("Sentinel")).not.toThrow();
     } finally {
       db.close();
+    }
+  });
+});
+
+describe("narrowCount", () => {
+  it("accepts zero and ordinary counts", () => {
+    expect(narrowCount("0", "limit")).toBe(0);
+    expect(narrowCount("25", "limit")).toBe(25);
+    expect(narrowCount(7, "limit")).toBe(7);
+  });
+
+  it("refuses a count too large to bind, rather than failing as internal", () => {
+    // `1e21` satisfies Number.isInteger, and better-sqlite3 then refuses to
+    // bind it — surfacing as `internal` and exit 4, which tells an agent to
+    // escalate a broken machine over a typo (ADR-005).
+    for (const huge of ["1e21", String(Number.MAX_SAFE_INTEGER + 2), String(MAX_COUNT + 1)]) {
+      expect(() => narrowCount(huge, "limit"), huge).toThrowError(/whole number of items between/);
+    }
+  });
+
+  it("refuses a blank or nonsense value rather than reading it as zero", () => {
+    // Number("") and Number(" ") are both 0, so these would silently mean
+    // "return nothing" — and zero is a legitimate request, so it cannot double
+    // as the rejection.
+    for (const bad of ["", "   ", "lots", "-1", "2.5"]) {
+      expect(() => narrowCount(bad, "limit"), bad).toThrowError(/whole number of items/);
     }
   });
 });

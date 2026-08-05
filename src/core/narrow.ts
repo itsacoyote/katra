@@ -67,6 +67,14 @@ export function narrowPriority(value: unknown): Priority {
 }
 
 /**
+ * The largest count any `--limit` accepts.
+ *
+ * Far above any real backlog, and low enough that the value always binds
+ * cleanly as a SQLite integer.
+ */
+export const MAX_COUNT = 1_000_000;
+
+/**
  * Narrows a command-line count — a `--limit`, and whatever follows it.
  *
  * Command-line values arrive as strings, and `Number("")`, `Number(" ")` and
@@ -76,12 +84,23 @@ export function narrowPriority(value: unknown): Priority {
  */
 export function narrowCount(value: unknown, field: string): number {
   const candidate = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
-  if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0) {
+  // `Number.isSafeInteger`, not `isInteger`: 1e21 satisfies the latter, then
+  // better-sqlite3 refuses to bind it and the failure surfaces as `internal`
+  // and exit 4 — telling an agent to escalate a broken machine over a typo
+  // (ADR-005). Anything past 2^53 also loses precision silently on the way in.
+  if (
+    typeof candidate === "number" &&
+    Number.isSafeInteger(candidate) &&
+    candidate >= 0 &&
+    candidate <= MAX_COUNT
+  ) {
     return candidate;
   }
   throw new KatraException({
     code: "validation",
-    message: `${field} must be a whole number of items, 0 or more — got ${JSON.stringify(value)}`,
+    message:
+      `${field} must be a whole number of items between 0 and ${MAX_COUNT} — ` +
+      `got ${JSON.stringify(value)}`,
     field,
     value,
   });

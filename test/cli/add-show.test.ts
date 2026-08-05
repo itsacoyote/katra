@@ -590,3 +590,91 @@ describe("show reports its own caps in JSON", () => {
     expect(view.notesTruncated).toBe(false);
   });
 });
+
+describe("stored text never reaches the terminal unsanitised", () => {
+  const ESCAPES = "\u001B[31mred\u001B]0;pwned\u0007 and \u009Bc1";
+  const RLO = "invoice\u202Egnp.js";
+
+  it("strips escapes from a task title in show and list", async () => {
+    // F2 added the sanitizers for note bodies and event fields and left task
+    // fields raw, so the *same* string was safe on one command and not the
+    // next. `--body-file` feeds a task's description too, which is the path
+    // fetched content actually arrives by.
+    const id = await add([`title ${ESCAPES}`]);
+
+    const shown = await runCli(["show", id], { cwd: repo.dir });
+    const listed = await runCli(["list"], { cwd: repo.dir });
+
+    for (const out of [shown.stdout, listed.stdout]) {
+      expect(out).not.toContain("\u001B");
+      expect(out).not.toContain("\u0007");
+      expect(out).not.toContain("\u009B");
+    }
+    expect(shown.stdout).toContain("[31mred");
+  });
+
+  it("strips escapes from a description while keeping its line structure", async () => {
+    const id = await add(
+      ["a task", "--body-file", "-"],
+      "line one\n\tindented \u001B[31mred\nline three",
+    );
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).toContain("line one");
+    expect(result.stdout).toContain("line three");
+    // A description is deliberately multi-line: newlines and tabs survive.
+    expect(result.stdout).toContain("\tindented");
+  });
+
+  it("strips escapes from a close reason, which log already collapsed", async () => {
+    // The same string was rendered raw by `show` and collapsed by `log`.
+    const id = await add(["a task"]);
+    await runCli(["close", id, "--reason", `done \u001B[2Jcleared`], { cwd: repo.dir });
+
+    const shown = await runCli(["show", id], { cwd: repo.dir });
+    const logged = await runCli(["log", id], { cwd: repo.dir });
+
+    expect(shown.stdout).not.toContain("\u001B");
+    expect(logged.stdout).not.toContain("\u001B");
+  });
+
+  it("strips bidirectional overrides, which no control-character filter catches", async () => {
+    // Trojan Source (CVE-2021-42574) applied to a backlog: an override makes a
+    // line render in an order that misstates what it says. These are ordinary
+    // printable codepoints, so stripping C0 does not touch them — and
+    // JSON.stringify does not escape them either.
+    const id = await add([`review ${RLO}`]);
+
+    const listed = await runCli(["list"], { cwd: repo.dir });
+    const shown = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(listed.stdout).not.toContain("\u202E");
+    expect(shown.stdout).not.toContain("\u202E");
+  });
+
+  it("strips bidirectional overrides from a note body too", async () => {
+    const id = await add(["a task"]);
+    await runCli(["note", "add", id, "--body-file", "-"], {
+      cwd: repo.dir,
+      stdin: `handoff ${RLO}`,
+    });
+
+    const result = await runCli(["note", "list", id], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("\u202E");
+    expect(result.stdout).toContain("handoff");
+  });
+
+  it("keeps every character verbatim under --json", async () => {
+    // `--json` is the programmatic path: its consumer is not a terminal, and
+    // JSON.stringify escapes every codepoint below 0x20 on its own, so no raw
+    // ANSI introducer can reach a parser.
+    const id = await add([`title ${ESCAPES}`]);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.task.title).toBe(`title ${ESCAPES}`);
+  });
+});

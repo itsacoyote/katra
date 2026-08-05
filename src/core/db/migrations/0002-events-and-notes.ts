@@ -41,11 +41,13 @@ export const DEFAULT_EVENT_SETS: EventSets = {
 
 /** Renders the events-and-notes DDL for the given value sets. */
 export function buildEventsDdl(sets: EventSets = DEFAULT_EVENT_SETS): string {
-  // The enum sets go through sqlEnum, which doubles quotes so a value cannot
-  // terminate its own literal. The default and the prefix do not: one lands
-  // inside a DEFAULT clause and the other inside a GLOB pattern, both
-  // interpolated raw. Unreachable with DEFAULT_EVENT_SETS — but `sets` is a
-  // parameter precisely so callers can pass their own.
+  // Everything interpolated here is either escaped or validated. The default
+  // goes through sqlEnum like the sets do — membership in `noteKinds` is not
+  // enough on its own, since a caller could supply a matching kind *and* a
+  // default containing a quote. The prefix cannot use sqlEnum (it lands inside
+  // a GLOB pattern, not a string literal), so it is shape-checked below.
+  // Unreachable with DEFAULT_EVENT_SETS — but `sets` is a parameter precisely
+  // so callers can pass their own.
   if (!sets.noteKinds.includes(sets.noteKindDefault)) {
     throw new KatraException({
       code: "validation",
@@ -114,7 +116,7 @@ CREATE TABLE notes (
   -- CASCADE, unlike events: a note is content attached to a live task, not a
   -- record of an occurrence. Without its task it is unreachable.
   task_id    TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-  kind       TEXT NOT NULL DEFAULT '${sets.noteKindDefault}'
+  kind       TEXT NOT NULL DEFAULT ${sqlEnum([sets.noteKindDefault])}
              CHECK (kind IN (${sqlEnum(sets.noteKinds)})),
   -- The body IS the note, so an empty one is a validation refusal rather than
   -- a row. The length check makes that a database guarantee: a NOT NULL column

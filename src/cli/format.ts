@@ -14,19 +14,31 @@ function field(label: string, value: string): string {
   return `  ${label.padEnd(12)}${value}`;
 }
 
+/**
+ * A stored single-line value, on its way to a terminal.
+ *
+ * Every field below goes through this or {@link sanitizeBody}. F2 added the
+ * sanitizers for note bodies and event fields and left task fields raw, which
+ * meant the *same string* was safe on one command and not the next: a
+ * `--reason` was collapsed in `log` and rendered raw in `show`. `--body-file`
+ * feeds a task's description too, so the untrusted-content path the sanitizers
+ * exist for was never note-only.
+ */
+const text = (value: string): string => oneLine(value);
+
 /** The full block `show` prints. */
 export function formatTaskDetail(detail: TaskDetail): string {
   const { task, parent } = detail;
   const lines = [
-    `${task.id}  ${task.title}`,
+    `${task.id}  ${text(task.title)}`,
     field("level", task.level),
     field("kind", task.kind),
     field("lane", task.lane),
     field("priority", `P${task.priority}`),
   ];
 
-  if (task.assignee !== null) lines.push(field("assignee", task.assignee));
-  if (parent !== null) lines.push(field("epic", `${parent.id}  ${parent.title}`));
+  if (task.assignee !== null) lines.push(field("assignee", text(task.assignee)));
+  if (parent !== null) lines.push(field("epic", `${parent.id}  ${text(parent.title)}`));
 
   // Blockers before links and tags: "can I start this?" is the question `show`
   // is usually asked, and the answer should not be below the fold. Stated
@@ -37,7 +49,10 @@ export function formatTaskDetail(detail: TaskDetail): string {
   } else {
     for (const [index, blocker] of detail.blockers.entries()) {
       lines.push(
-        field(index === 0 ? "blockers" : "", `${blocker.id}  ${blocker.lane}  ${blocker.title}`),
+        field(
+          index === 0 ? "blockers" : "",
+          `${blocker.id}  ${blocker.lane}  ${text(blocker.title)}`,
+        ),
       );
     }
   }
@@ -45,23 +60,26 @@ export function formatTaskDetail(detail: TaskDetail): string {
     lines.push(
       field(
         index === 0 ? "blocking" : "",
-        `${dependent.id}  ${dependent.lane}  ${dependent.title}`,
+        `${dependent.id}  ${dependent.lane}  ${text(dependent.title)}`,
       ),
     );
   }
 
   for (const [index, link] of detail.links.entries()) {
-    lines.push(field(index === 0 ? "links" : "", `${link.id}  ${link.title}`));
+    lines.push(field(index === 0 ? "links" : "", `${link.id}  ${text(link.title)}`));
   }
-  if (task.tags.length > 0) lines.push(field("tags", task.tags.join(", ")));
+  if (task.tags.length > 0) lines.push(field("tags", text(task.tags.join(", "))));
 
   lines.push(field("created", task.createdAt));
   if (task.updatedAt !== task.createdAt) lines.push(field("updated", task.updatedAt));
   if (task.closedAt !== null) lines.push(field("closed", task.closedAt));
-  if (task.closeReason !== null) lines.push(field("reason", task.closeReason));
+  if (task.closeReason !== null) lines.push(field("reason", text(task.closeReason)));
 
   if (task.description !== null && task.description.trim() !== "") {
-    lines.push("", task.description.trimEnd());
+    // sanitizeBody, not `text`: a description is deliberately multi-line, so
+    // its newlines and tabs survive while anything a terminal would act on
+    // does not — the same treatment note bodies get.
+    lines.push("", sanitizeBody(task.description).trimEnd());
   }
 
   return lines.join("\n");
@@ -91,7 +109,7 @@ export function formatTaskList(tasks: readonly Task[]): string {
         `P${task.priority}`,
         task.lane.padEnd(laneWidth),
         (task.level === "epic" ? "epic" : task.kind).padEnd(kindWidth),
-        task.title,
+        text(task.title),
       ].join("  "),
     )
     .join("\n");
@@ -110,7 +128,7 @@ export function formatUpdatedTasks(tasks: readonly TaskDetail[]): string {
   const width = tasks.reduce((widest, { task }) => Math.max(widest, task.lane.length), 0);
   return [
     `updated ${tasks.length} tasks`,
-    ...tasks.map(({ task }) => `  ${task.id}  ${task.lane.padEnd(width)}  ${task.title}`),
+    ...tasks.map(({ task }) => `  ${task.id}  ${task.lane.padEnd(width)}  ${text(task.title)}`),
   ].join("\n");
 }
 
@@ -125,10 +143,33 @@ export function formatUpdatedTasks(tasks: readonly TaskDetail[]): string {
  *
  * Note *bodies* are the deliberately-multiline case and are not rendered here.
  */
-function oneLine(text: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: collapsing them is the point
-  return text.replaceAll(/[\u0000-\u001F\u007F]+/g, " ").trim();
+function oneLine(value: string): string {
+  return value.replaceAll(CONTROLS, " ").replaceAll(BIDI, "").trim();
 }
+
+/**
+ * Characters that reorder text without being visible.
+ *
+ * Trojan Source (CVE-2021-42574) applied to a backlog: an override or isolate
+ * inside a title or a note body makes the rendered line read in an order that
+ * misstates what it says. Stripping control characters does not catch these —
+ * they are ordinary printable codepoints — and neither does `JSON.stringify`,
+ * so they survived every other guard in this file.
+ *
+ * Removed rather than replaced with a marker: a marker in the middle of a line
+ * is itself a rendering change, and katra has no styling vocabulary to make it
+ * legible.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
+const CONTROLS = /[\u0000-\u001F\u007F-\u009F]+/g;
+
+/**
+ * The same set minus newline and tab, for text rendered across several lines.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
+const CONTROLS_KEEPING_LAYOUT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]+/g;
+
+const BIDI = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 
 /** What an event says happened, beyond its type and what it is about. */
 function describeEvent(event: LoggedEvent): string {
@@ -231,9 +272,8 @@ export function formatEventLog(events: readonly LoggedEvent[], truncated: boolea
  * a terminal, and a value altered on the way out would no longer be what was
  * stored.
  */
-function sanitizeBody(text: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
-  return text.replaceAll(/[\u0000-\u0008\u000B-\u001F\u007F]+/g, "");
+function sanitizeBody(value: string): string {
+  return value.replaceAll(CONTROLS_KEEPING_LAYOUT, "").replaceAll(BIDI, "");
 }
 
 /**
@@ -256,7 +296,7 @@ function previewBody(text: string, width: number): string {
  * reader has — a log row is a mechanical record, a note is authorship.
  */
 function noteHeader(note: Note): string {
-  return `${note.id}  ${note.kind}  ${note.createdAt.slice(0, 16).replace("T", " ")}  ${note.actor}`;
+  return `${note.id}  ${note.kind}  ${note.createdAt.slice(0, 16).replace("T", " ")}  ${text(note.actor)}`;
 }
 
 /** A single note, header then body. What `note add` prints back. */
