@@ -677,4 +677,34 @@ describe("stored text never reaches the terminal unsanitised", () => {
 
     expect(view.task.title).toBe(`title ${ESCAPES}`);
   });
+
+  it("strips escapes from a linked task's title", async () => {
+    // The one field the sanitisation commit touched without a test. Coverage
+    // showed `formatTaskDetail`'s links line never rendered in text mode by
+    // any test, so a regression here would ship green.
+    const linked = await add(["linked \u001B[31mred\u202Eoverride"]);
+    const id = await add(["a task"]);
+    await runCli(["link", id, linked], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toContain(linked);
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).not.toContain("\u202E");
+    expect(result.stdout).toContain("[31mred");
+  });
+
+  it("strips escapes from a blocker's title", async () => {
+    // Same line of reasoning one field over: blockers and dependents render
+    // through the same helper and had no escape test either.
+    const blocker = await add(["blocker \u001B[4munderline"]);
+    const id = await add(["waits"]);
+    await runCli(["dep", id, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toContain(blocker);
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).toContain("[4munderline");
+  });
 });

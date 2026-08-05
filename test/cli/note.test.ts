@@ -318,3 +318,39 @@ describe("note command registration", () => {
     expect(result.exitCode).toBe(EXIT.ok);
   });
 });
+
+describe("note list refuses bad flag values", () => {
+  it("refuses a --limit that is not a whole count", async () => {
+    // The validators are unit-tested and the same wiring is CLI-tested for
+    // `log --limit` and `note add --kind`, but nothing drove these two
+    // one-line pass-throughs through the actual command.
+    const task = await add(["a task"]);
+
+    const result = await runCli(["note", "list", task, "--limit", "lots"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/whole number of items/);
+  });
+
+  it("refuses a --kind outside the four, naming them", async () => {
+    const task = await add(["a task"]);
+
+    const result = await runCli(["note", "list", task, "--kind", "summary"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/note kind must be one of/);
+    expect(result.stderr).toMatch(/general.*handoff.*decision.*acceptance/s);
+  });
+
+  it("refuses a --limit past the ceiling rather than failing as internal", async () => {
+    // 1e21 satisfies Number.isInteger, and better-sqlite3 then refuses to bind
+    // it — which used to surface as exit 4, telling an agent to escalate a
+    // broken machine over a typo.
+    const task = await add(["a task"]);
+
+    const result = await runCli(["note", "list", task, "--limit", "1e21"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.exitCode).not.toBe(EXIT.internal);
+  });
+});
