@@ -367,7 +367,7 @@ describe("katra next", () => {
     // must stay readable at exit 0.
     const empty = await runCli(["next", "--json"], { cwd: repo.dir });
     expect(empty.exitCode).toBe(EXIT.ok);
-    expect(empty.json()).toEqual({ status: "none", blocked: [] });
+    expect(empty.json()).toEqual({ status: "none", blocked: [], untriaged: 0 });
 
     const blocker = await add(["a blocker"]);
     const blocked = await add(["stuck", "--lane", "Planned"]);
@@ -498,5 +498,57 @@ describe("valueTakingFlags descends into subcommands", () => {
     // following `--json` is a real request and the invocation is malformed —
     // which is a usage error, not a silent downgrade to text output.
     expect(wantsJson(["note", "list", "--kind", "--json"], probe())).toBe(true);
+  });
+});
+
+describe("katra next on an untriaged backlog", () => {
+  it("says how much is waiting and how to plan it", async () => {
+    // Found by dogfooding: eight freshly added tasks, and `next` replied
+    // "nothing is in the Planned lane" — true, and a dead end. `add` puts work
+    // in Defined, so the caller was told about a lane they never chose and
+    // given no way forward.
+    await add(["one"]);
+    await add(["two"]);
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).toMatch(/2 unfinished tasks are waiting to be planned/);
+    // A refusal that names what would unblock it, like every other katra
+    // refusal does.
+    expect(result.stdout).toMatch(/katra update <id> --lane Planned/);
+  });
+
+  it("says plainly when there is no unfinished work at all", async () => {
+    // The third answer, and it must not be confused with the second: an empty
+    // store and an untriaged one are different situations.
+    const done = await add(["finished"]);
+    await runCli(["close", done], { cwd: repo.dir });
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/no unfinished work elsewhere/);
+    expect(result.stdout).not.toMatch(/waiting to be planned/);
+  });
+
+  it("counts one waiting task in the singular", async () => {
+    await add(["only one"]);
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/1 unfinished task is waiting/);
+  });
+
+  it("still reports blockers when something is planned but stuck", async () => {
+    // The untriaged count must not displace the more specific answer.
+    const blocker = await add(["a blocker"]);
+    const blocked = await add(["stuck", "--lane", "Planned"]);
+    await runCli(["dep", blocked, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/1 blocked:/);
+    expect(result.stdout).toContain("waits on");
+    expect(result.stdout).not.toMatch(/waiting to be planned/);
   });
 });

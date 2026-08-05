@@ -23,7 +23,22 @@ function formatNext(result: NextResult): string {
     return lines.join("\n");
   }
 
-  if (result.blocked.length === 0) return `nothing is in the ${NEXT_LANE} lane`;
+  // Three answers hide behind "nothing to do", and the reply has to say which.
+  // Left as a bare "nothing is in the Planned lane", the middle case is a dead
+  // end: `add` puts work in `Defined`, so a caller who has just filled a store
+  // is told about a lane they have never heard of and given no way forward.
+  if (result.blocked.length === 0) {
+    if (result.untriaged === 0) {
+      return `nothing is in the ${NEXT_LANE} lane, and there is no unfinished work elsewhere`;
+    }
+    const count =
+      result.untriaged === 1 ? "1 unfinished task is" : `${result.untriaged} unfinished tasks are`;
+    return (
+      `nothing is in the ${NEXT_LANE} lane — ${count} waiting to be planned.\n` +
+      `  see them with \`katra list --ready\`, then plan one with ` +
+      `\`katra update <id> --lane ${NEXT_LANE}\``
+    );
+  }
 
   // Naming the blockers turns "nothing to do" into "clear this first".
   return [

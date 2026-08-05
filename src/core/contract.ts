@@ -154,7 +154,21 @@ export interface BlockedTask {
  */
 export type NextResult =
   | { readonly status: "found"; readonly task: Task; readonly epic: TaskSummary | null }
-  | { readonly status: "none"; readonly blocked: readonly BlockedTask[] };
+  | {
+      readonly status: "none";
+      readonly blocked: readonly BlockedTask[];
+      /**
+       * Unfinished work outside the `Planned` lane.
+       *
+       * Three answers hide behind "nothing to do", and an agent needs to tell
+       * them apart: everything planned is blocked (`blocked` is non-empty),
+       * nothing has been triaged yet (`blocked` empty, this above zero), or
+       * there is genuinely no work left (both zero). The middle one used to
+       * render as a dead end — `add` puts a task in `Defined`, so a fresh
+       * store answered with a lane the caller had never heard of.
+       */
+      readonly untriaged: number;
+    };
 
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {

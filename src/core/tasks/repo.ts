@@ -11,7 +11,7 @@
 import type { TaskList } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import type { Kind, Lane, Level, Priority } from "../enums.js";
-import { isTerminal, PRIORITY_DEFAULT } from "../enums.js";
+import { isTerminal, PRIORITY_DEFAULT, sqlEnum, TERMINAL_LANES } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
 import { listBlockers, listDependents, READINESS_VIEW } from "../graph/deps.js";
@@ -328,7 +328,29 @@ export function listTasks(store: OpenStore, filters: TaskFilters = {}): TaskList
   if (filters.epic !== undefined) eq("t.parent_id", filters.epic);
   if (filters.assignee !== undefined) eq("t.assignee", filters.assignee);
   if (filters.priority !== undefined) eq("t.priority", filters.priority);
-  if (filters.ready !== undefined) eq("r.is_ready", filters.ready ? 1 : 0);
+  if (filters.ready !== undefined) {
+    eq("r.is_ready", filters.ready ? 1 : 0);
+    // `--ready` and `--blocked` ask about *startable work*, and an epic is a
+    // container rather than something anyone picks up. An epic has no
+    // dependencies of its own, so it satisfies readiness trivially and sorts
+    // to the top by priority — which is how the F2 epic came back as the first
+    // answer to "what can I start?".
+    //
+    // An explicit `--level` wins, so `--ready --level epic` still asks the
+    // literal question. Excluding epics outright would make that combination
+    // return nothing, always, with no way to tell an empty answer from a
+    // suppressed one.
+    if (filters.level === undefined) eq("t.level", "task");
+
+    // Finished and abandoned work is excluded for the same reason, and it is
+    // the larger half of the problem: a `Done` task has no unfinished
+    // dependencies either, so a mature backlog answers "what can I start?"
+    // with everything it has ever completed. An explicit `--lane` wins here
+    // too, so `--ready --lane Done` still asks the literal question.
+    if (filters.lane === undefined) {
+      conditions.push(`t.lane NOT IN (${sqlEnum(TERMINAL_LANES)})`);
+    }
+  }
   if (filters.tag !== undefined) {
     conditions.push("EXISTS (SELECT 1 FROM tags g WHERE g.task_id = t.id AND g.tag = ?)");
     params.push(filters.tag);
