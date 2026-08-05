@@ -10,6 +10,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EVENT_TYPES } from "../../src/core/enums.js";
+import { createNote } from "../../src/core/notes/repo.js";
 import { deleteTask } from "../../src/core/tasks/delete.js";
 import { cancelTask, closeTask, reopenTask } from "../../src/core/tasks/lifecycle.js";
 import { createTask } from "../../src/core/tasks/repo.js";
@@ -361,6 +362,10 @@ describe("the actor is resolved before the write lock", () => {
       closeTask(store, task.id, "done");
       reopenTask(store, task.id);
       cancelTask(store, task.id, "no");
+      // createNote included deliberately: it is the write path F2 added, and
+      // a version of this test without it left the notes path free to resolve
+      // the actor inside its transaction with all 665 tests green.
+      createNote(store, { taskId: task.id, body: "a note" });
       const doomed = createTask(store, { title: "doomed" });
       deleteTask(store, doomed.id);
 

@@ -64,7 +64,7 @@ export interface Blocker {
   readonly lane: Lane;
 }
 
-/** What `show` returns. */
+/** What `update` returns, and the base of what `show` returns. */
 export interface TaskDetail {
   readonly task: Task;
   /** The epic this task belongs to, resolved so output can name it. */
@@ -96,6 +96,17 @@ export interface TaskDetail {
 export interface TaskView extends TaskDetail {
   readonly notes: readonly Note[];
   readonly activity: readonly LoggedEvent[];
+  /**
+   * True when a fixed cap cut that section short.
+   *
+   * The human rendering points at `note list` and `log` unconditionally, so a
+   * reader is never misled; `--json` has no such prose, and F3's digest is
+   * likelier to parse it. The rule `EventLog.truncated` states applies here
+   * verbatim — a bound that cannot report itself is indistinguishable from the
+   * end of the data.
+   */
+  readonly notesTruncated: boolean;
+  readonly activityTruncated: boolean;
 }
 
 /**

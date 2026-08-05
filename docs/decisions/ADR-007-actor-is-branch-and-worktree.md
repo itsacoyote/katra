@@ -33,7 +33,7 @@ The alternative pull is toward something stable and human, like git's `user.name
 feature/auth @ /home/me/repo/wt-auth
 ```
 
-Resolved per invocation from git, using the same subprocess machinery `locate.ts` already owns — including its absolute-path resolution of the `git` binary (the M1 finding in F1's security review).
+Resolved per invocation from git, through the shared subprocess module `src/core/git.ts` — including its absolute-path resolution of the `git` binary (the M1 finding in F1's security review). That machinery was private to `locate.ts` before this feature; it was extracted precisely so actor resolution could not grow a second copy of it.
 
 **The branch comes from `git symbolic-ref --quiet --short HEAD`, not `rev-parse --abbrev-ref HEAD`.** An earlier draft of this ADR specified `--abbrev-ref`, and plan review caught that it is wrong twice:
 

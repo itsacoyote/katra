@@ -16,6 +16,13 @@
  * - **The memoised resolver is per-context, never module scope.** `runCli`
  *   builds a fresh context per test inside one worker process, so a
  *   module-level cache leaks one test's branch into the next one's assertions.
+ *
+ * A consequence worth stating: because every write path resolves before its
+ * guards run, a command that is then *refused* — closing an already-closed
+ * task, deleting an epic with children — still pays the two spawns. That is
+ * the right trade, since the alternative is holding the write lock across
+ * them on every command that succeeds. If it ever matters, hoist the guards
+ * above the resolution rather than pushing the resolution back down.
  */
 
 import { normalize } from "node:path";

@@ -159,10 +159,10 @@ describe("formatEventLog", () => {
     // `--reason` is a plain argument, never routed through readBody, so it can
     // hold newlines — and one of them shifts every following row out of its
     // column for the rest of the log.
-    const rendered = formatEventLog([
-      event({ type: "cancelled", reason: "first line\nsecond line\r\nthird" }),
-      event({ id: 2 }),
-    ]);
+    const rendered = formatEventLog(
+      [event({ type: "cancelled", reason: "first line\nsecond line\r\nthird" }), event({ id: 2 })],
+      false,
+    );
 
     expect(rendered.split("\n")).toHaveLength(2);
     expect(rendered).toContain("first line second line third");
@@ -171,9 +171,10 @@ describe("formatEventLog", () => {
   it("strips control characters that would execute on a terminal", () => {
     // Reasons and titles are where fetched content and model output get
     // pasted. A raw escape sequence runs on whatever renders it.
-    const rendered = formatEventLog([
-      event({ type: "cancelled", reason: "\u001B[31mred\u0007", entityTitle: "\u001B[1mbold" }),
-    ]);
+    const rendered = formatEventLog(
+      [event({ type: "cancelled", reason: "\u001B[31mred\u0007", entityTitle: "\u001B[1mbold" })],
+      false,
+    );
 
     expect(rendered).not.toContain("\u001B");
     expect(rendered).not.toContain("\u0007");
@@ -189,13 +190,14 @@ describe("formatEventLog", () => {
       event({ id: index + 1, entityId: `kt-${String(index).padStart(6, "0")}` }),
     );
 
-    expect(() => formatEventLog(many)).not.toThrow();
+    expect(() => formatEventLog(many, false)).not.toThrow();
   });
 
   it("shows a lane transition with both ends", () => {
-    const rendered = formatEventLog([
-      event({ type: "status-changed", fromLane: "Defined", toLane: "Planned" }),
-    ]);
+    const rendered = formatEventLog(
+      [event({ type: "status-changed", fromLane: "Defined", toLane: "Planned" })],
+      false,
+    );
 
     expect(rendered).toContain("Defined -> Planned");
   });
@@ -203,26 +205,36 @@ describe("formatEventLog", () => {
   it("renders the date as well as the time", () => {
     // A log spanning weeks needs it; ADR-008's illustration showed the time
     // alone because every line in it was from one afternoon.
-    expect(formatEventLog([event()])).toContain("2026-08-05 16:41");
+    expect(formatEventLog([event()], false)).toContain("2026-08-05 16:41");
   });
 
   it("omits the actor column when every event shares one actor", () => {
     // In a single-agent repository it is the same string on every row.
-    const rendered = formatEventLog([event(), event({ id: 2 })]);
+    const rendered = formatEventLog([event(), event({ id: 2 })], false);
 
     expect(rendered).not.toContain("main @ /repo");
   });
 
   it("shows the actor once the log holds more than one", () => {
     // Across worktrees it is the whole reason ADR-007 records it.
-    const rendered = formatEventLog([event(), event({ id: 2, actor: "feature/other @ /repo/wt" })]);
+    const rendered = formatEventLog(
+      [event(), event({ id: 2, actor: "feature/other @ /repo/wt" })],
+      false,
+    );
 
     expect(rendered).toContain("main @ /repo");
     expect(rendered).toContain("feature/other @ /repo/wt");
   });
 
   it("says nothing has happened for an empty log", () => {
-    expect(formatEventLog([])).toBe("nothing has happened yet");
+    expect(formatEventLog([], false)).toBe("nothing has happened yet");
+  });
+
+  it("does not claim completeness when the limit cut everything", () => {
+    // `--limit 0` is a real request, and the one input where truncation is
+    // total. "nothing has happened yet" there is a claim of completeness in
+    // exactly the case the flag exists to prevent.
+    expect(formatEventLog([], true)).toMatch(/… more; raise --limit/);
   });
 });
 

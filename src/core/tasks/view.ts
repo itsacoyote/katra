@@ -51,11 +51,20 @@ export const SHOW_ACTIVITY_LIMIT = 8;
 /** The full read behind `katra show`. */
 export function viewTask(store: OpenStore, idInput: string): TaskView {
   const id = requireId(store, idInput);
+
+  // Both sections ask for one more than they will show, so truncation is
+  // knowable — the same over-fetch `listEvents` and `resolveId` use, done here
+  // rather than in `listNotes` so the note reads keep their simple signature.
+  const notes = listNotes(store, { taskId: id, limit: SHOW_NOTE_LIMIT + 1 });
+  // Scoped to the entity, so an epic's view also carries its children's
+  // activity — the same query `log <epicId>` runs.
+  const activity = listEvents(store, { entityId: id, limit: SHOW_ACTIVITY_LIMIT });
+
   return {
     ...showTaskWithin(store, id),
-    notes: listNotes(store, { taskId: id, limit: SHOW_NOTE_LIMIT }),
-    // Scoped to the entity, so an epic's view also carries its children's
-    // activity — the same query `log <epicId>` runs.
-    activity: listEvents(store, { entityId: id, limit: SHOW_ACTIVITY_LIMIT }).events,
+    notes: notes.slice(0, SHOW_NOTE_LIMIT),
+    notesTruncated: notes.length > SHOW_NOTE_LIMIT,
+    activity: activity.events,
+    activityTruncated: activity.truncated,
   };
 }

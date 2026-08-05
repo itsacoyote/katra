@@ -161,8 +161,13 @@ function clamp(text: string, width: number): string {
  * single-agent repository it is the same string on every row, which is pure
  * noise; across worktrees it is the whole reason ADR-007 records it.
  */
-export function formatEventLog(events: readonly LoggedEvent[], truncated = false): string {
-  if (events.length === 0) return "nothing has happened yet";
+export function formatEventLog(events: readonly LoggedEvent[], truncated: boolean): string {
+  // `--limit 0` is a real request, and it is the one input where truncation is
+  // total — reporting "nothing has happened yet" there would be a claim of
+  // completeness in exactly the case the flag exists to prevent.
+  if (events.length === 0) {
+    return truncated ? "  … more; raise --limit to see further back" : "nothing has happened yet";
+  }
 
   // Reduced rather than `Math.max(...events.map(…))`: spreading the result set
   // as arguments blows the stack somewhere past a hundred thousand rows, and

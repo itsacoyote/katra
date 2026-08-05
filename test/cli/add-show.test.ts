@@ -545,3 +545,48 @@ describe("show on an epic", () => {
     expect(activity).toContain("status-changed");
   });
 });
+
+describe("show reports its own caps in JSON", () => {
+  async function note(id: string, body: string): Promise<void> {
+    await runCli(["note", "add", id, "--body-file", "-"], { cwd: repo.dir, stdin: body });
+  }
+
+  it("says when a section was cut short", async () => {
+    // The human block points at `note list` and `log` unconditionally, so a
+    // reader is never misled. `--json` has no such prose, and a digest is
+    // likelier to parse it.
+    const id = await add(["a busy task"]);
+    // Enough notes to pass both caps: each note is also an event, and the
+    // `created` event makes one more.
+    for (let i = 0; i < SHOW_ACTIVITY_LIMIT + 1; i++) await note(id, `note ${i}`);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes).toHaveLength(SHOW_NOTE_LIMIT);
+    expect(view.notesTruncated).toBe(true);
+    expect(view.activity).toHaveLength(SHOW_ACTIVITY_LIMIT);
+    expect(view.activityTruncated).toBe(true);
+  });
+
+  it("says so when nothing was cut", async () => {
+    const id = await add(["a quiet task"]);
+    await note(id, "the only note");
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes).toHaveLength(1);
+    expect(view.notesTruncated).toBe(false);
+    expect(view.activityTruncated).toBe(false);
+  });
+
+  it("does not report truncation when a section exactly fills its cap", async () => {
+    // The off-by-one the over-fetch exists to get right.
+    const id = await add(["a task"]);
+    for (let i = 0; i < SHOW_NOTE_LIMIT; i++) await note(id, `note ${i}`);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes).toHaveLength(SHOW_NOTE_LIMIT);
+    expect(view.notesTruncated).toBe(false);
+  });
+});
