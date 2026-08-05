@@ -1,9 +1,13 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
+  EVENT_TYPES,
+  type EventType,
+  isEventType,
   isKind,
   isLane,
   isLevel,
+  isNoteKind,
   isPriority,
   isTerminal,
   KINDS,
@@ -12,6 +16,9 @@ import {
   type Lane,
   LEVELS,
   type Level,
+  NOTE_KIND_DEFAULT,
+  NOTE_KINDS,
+  type NoteKind,
   PRIORITIES,
   PRIORITY_DEFAULT,
   PRIORITY_MAX,
@@ -19,6 +26,13 @@ import {
   sqlEnum,
   TERMINAL_LANES,
 } from "../../src/core/enums.js";
+import {
+  MAX_COUNT,
+  narrowCount,
+  narrowEventType,
+  narrowKind,
+  narrowNoteKind,
+} from "../../src/core/narrow.js";
 
 describe("fixed value sets", () => {
   it("derives Lane from the LANES array so the two cannot diverge", () => {
@@ -112,6 +126,136 @@ describe("fixed value sets", () => {
   });
 });
 
+describe("event types", () => {
+  it("derives the event type union from the array", () => {
+    // Same compile-time/runtime pairing as Lane: the exhaustive switch fails to
+    // compile if EVENT_TYPES gains a member the union does not, which is what
+    // proves the type is derived rather than hand-maintained beside it.
+    const category = (type: EventType): string => {
+      switch (type) {
+        case "created":
+        case "note-added":
+          return "additive";
+        case "status-changed":
+        case "closed":
+        case "cancelled":
+        case "reopened":
+          return "lifecycle";
+        case "deleted":
+          return "removal";
+        default: {
+          const exhaustive: never = type;
+          return exhaustive;
+        }
+      }
+    };
+
+    expect(EVENT_TYPES.map(category)).toEqual([
+      "additive",
+      "lifecycle",
+      "additive",
+      "lifecycle",
+      "lifecycle",
+      "lifecycle",
+      "removal",
+    ]);
+  });
+
+  it("declares the seven types F2 actually emits, and no more", () => {
+    // The spec lists nine. `claimed`/`released` are F4 and `ref-linked`/
+    // `ref-status-changed` are F5, so declaring them here would put values in a
+    // CHECK constraint that nothing can ever write — and a forward-only
+    // migration makes that expensive to take back. `deleted` is the seventh,
+    // added by ADR-008 and absent from the spec's list.
+    expect(EVENT_TYPES).toEqual([
+      "created",
+      "status-changed",
+      "note-added",
+      "closed",
+      "cancelled",
+      "reopened",
+      "deleted",
+    ]);
+    expect(EVENT_TYPES).not.toContain("claimed");
+    expect(EVENT_TYPES).not.toContain("ref-linked");
+  });
+
+  it("returns true from isEventType for every declared type and false otherwise", () => {
+    for (const type of EVENT_TYPES) expect(isEventType(type)).toBe(true);
+    for (const bogus of ["Created", "note_added", "updated", "", "closed "]) {
+      expect(isEventType(bogus)).toBe(false);
+    }
+  });
+
+  it("rejects an event type outside the fixed set, naming all seven", () => {
+    try {
+      narrowEventType("updated");
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      // Naming the allowed values is the difference between an error an agent
+      // can recover from and one it can only report.
+      for (const type of EVENT_TYPES) expect(error.message).toContain(type);
+      expect(error.message).toContain("updated");
+    }
+  });
+});
+
+describe("note kinds", () => {
+  it("declares the four kinds with general as the default", () => {
+    expect(NOTE_KINDS).toEqual(["general", "handoff", "decision", "acceptance"]);
+    expect(NOTE_KINDS).toContain(NOTE_KIND_DEFAULT);
+    expect(NOTE_KIND_DEFAULT).toBe("general");
+  });
+
+  it("derives the note kind union from the array", () => {
+    const category = (kind: NoteKind): string => {
+      switch (kind) {
+        case "general":
+          return "free";
+        case "handoff":
+        case "decision":
+        case "acceptance":
+          return "typed";
+        default: {
+          const exhaustive: never = kind;
+          return exhaustive;
+        }
+      }
+    };
+
+    expect(NOTE_KINDS.map(category)).toEqual(["free", "typed", "typed", "typed"]);
+  });
+
+  it("rejects a note kind outside the fixed set, naming all four", () => {
+    try {
+      narrowNoteKind("summary");
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!(error instanceof Error)) throw error;
+      for (const kind of NOTE_KINDS) expect(error.message).toContain(kind);
+      expect(error.message).toContain("summary");
+    }
+  });
+
+  it("keeps note kinds and task kinds separate", () => {
+    // Two things called "kind" one import apart. Wiring either narrower to the
+    // other's set would let `--kind feat` through on a note and `--kind
+    // handoff` through on a task, and both would look like they worked.
+    expect(NOTE_KINDS.some((kind) => (KINDS as readonly string[]).includes(kind))).toBe(false);
+
+    expect(isNoteKind("handoff")).toBe(true);
+    expect(isKind("handoff")).toBe(false);
+    expect(isNoteKind("feat")).toBe(false);
+    expect(isKind("feat")).toBe(true);
+
+    expect(() => narrowNoteKind("feat")).toThrowError(/note kind/);
+    expect(() => narrowKind("handoff")).toThrowError(/kind/);
+    expect(narrowNoteKind("handoff")).toBe("handoff");
+    expect(narrowKind("feat")).toBe("feat");
+  });
+});
+
 describe("priority", () => {
   it("keeps the bounds and default inside the declared set", () => {
     expect(PRIORITIES).toEqual([0, 1, 2, 3, 4]);
@@ -168,6 +312,32 @@ describe("sqlEnum", () => {
       expect(() => db.prepare("INSERT INTO probe (lane) VALUES (?)").run("Sentinel")).not.toThrow();
     } finally {
       db.close();
+    }
+  });
+});
+
+describe("narrowCount", () => {
+  it("accepts zero and ordinary counts", () => {
+    expect(narrowCount("0", "limit")).toBe(0);
+    expect(narrowCount("25", "limit")).toBe(25);
+    expect(narrowCount(7, "limit")).toBe(7);
+  });
+
+  it("refuses a count too large to bind, rather than failing as internal", () => {
+    // `1e21` satisfies Number.isInteger, and better-sqlite3 then refuses to
+    // bind it — surfacing as `internal` and exit 4, which tells an agent to
+    // escalate a broken machine over a typo (ADR-005).
+    for (const huge of ["1e21", String(Number.MAX_SAFE_INTEGER + 2), String(MAX_COUNT + 1)]) {
+      expect(() => narrowCount(huge, "limit"), huge).toThrowError(/whole number of items between/);
+    }
+  });
+
+  it("refuses a blank or nonsense value rather than reading it as zero", () => {
+    // Number("") and Number(" ") are both 0, so these would silently mean
+    // "return nothing" — and zero is a legitimate request, so it cannot double
+    // as the rejection.
+    for (const bad of ["", "   ", "lots", "-1", "2.5"]) {
+      expect(() => narrowCount(bad, "limit"), bad).toThrowError(/whole number of items/);
     }
   });
 });

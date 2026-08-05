@@ -11,6 +11,7 @@
 
 import type { BlockedTask, NextResult } from "../contract.js";
 import type { Kind, Level } from "../enums.js";
+import { sqlEnum, TERMINAL_LANES } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { listBlockers, READINESS_VIEW } from "../graph/deps.js";
 import type { OpenStore } from "../store.js";
@@ -34,10 +35,16 @@ interface Conditions {
   readonly params: readonly unknown[];
 }
 
-/** Builds the shared filter clause. Column names are literals; values bind. */
-function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
-  const parts = [`t.lane = ?`, `r.is_ready = ?`];
-  const params: unknown[] = [NEXT_LANE, ready ? 1 : 0];
+/**
+ * Just the caller's narrowing, without any lane or readiness condition.
+ *
+ * Split out because the untriaged count below asks a different question of the
+ * same subset: not "which planned task is ready" but "how much work is there
+ * that nobody has planned yet".
+ */
+function filtersOnly(filters: NextFilters): Conditions {
+  const parts: string[] = [];
+  const params: unknown[] = [];
 
   if (filters.kind !== undefined) {
     parts.push("t.kind = ?");
@@ -53,6 +60,23 @@ function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
   }
 
   return { sql: parts.join(" AND "), params };
+}
+
+/**
+ * The lane-and-readiness pair, plus the caller's narrowing.
+ *
+ * Built on {@link filtersOnly} rather than repeating it: a fourth filter added
+ * to one and not the other would make `next` and its untriaged count disagree
+ * about which tasks they are talking about, silently.
+ */
+function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
+  const narrowing = filtersOnly(filters);
+  const parts = ["t.lane = ?", "r.is_ready = ?", ...(narrowing.sql === "" ? [] : [narrowing.sql])];
+
+  return {
+    sql: parts.join(" AND "),
+    params: [NEXT_LANE, ready ? 1 : 0, ...narrowing.params],
+  };
 }
 
 /**
@@ -117,5 +141,38 @@ export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResul
       title: row.title,
       blockers: listBlockers(store, row.id),
     })),
+    untriaged: countUntriaged(store, filters),
   };
+}
+
+/**
+ * How much unfinished work sits outside the `Planned` lane.
+ *
+ * "Nothing is planned" and "everything planned is blocked" are different
+ * answers, and the first one used to render as a dead end: `add` puts a task
+ * in `Defined`, so a fresh store answers `next` with a sentence naming a lane
+ * the caller has never heard of and no way forward. This is the number that
+ * makes the difference statable — and distinguishes both from a store with no
+ * work in it at all.
+ *
+ * Terminal lanes are excluded: finished and abandoned work is not waiting to
+ * be triaged.
+ */
+function countUntriaged(store: OpenStore, filters: NextFilters): number {
+  const narrowing = filtersOnly(filters);
+  // Epics are excluded for the same reason `list --ready` excludes them: an
+  // epic is a container, not something anyone picks up, so counting one would
+  // invite the caller to plan work that does not exist. An explicit `--level`
+  // still wins, so `next --level epic` reports about epics.
+  const epics = filters.level === undefined ? "AND t.level = 'task'" : "";
+  const row = store.db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM tasks t
+        WHERE t.lane <> ?
+          AND t.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
+          ${epics}
+          ${narrowing.sql === "" ? "" : `AND ${narrowing.sql}`}`,
+    )
+    .get(NEXT_LANE, ...narrowing.params) as { c: number };
+  return row.c;
 }

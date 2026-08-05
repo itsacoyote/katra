@@ -9,9 +9,10 @@
 
 import { chmodSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
-import { createProgram } from "../../src/cli/program.js";
+import { createProgram, wantsJson } from "../../src/cli/program.js";
 import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
@@ -36,6 +37,8 @@ const EXPECTED_COMMANDS = [
   "dep",
   "link",
   "next",
+  "log",
+  "note",
 ] as const;
 
 let repo: GitFixture;
@@ -50,7 +53,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all twelve commands on the program", () => {
+  it("registers all fourteen commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -59,15 +62,25 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(12);
+    expect(registered).toHaveLength(14);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
-    for (const command of createProgram({ cwd: repo.dir }).commands) {
+    // Walked recursively, so a subcommand cannot escape the contract by being
+    // one level down. A command that *has* subcommands is a namespace — it
+    // returns no data of its own and needs no --json, but it still has to say
+    // what it is for.
+    const check = (command: Command): void => {
       expect(command.description(), `${command.name()} has no description`).not.toBe("");
+      if (command.commands.length > 0) {
+        for (const child of command.commands) check(child);
+        return;
+      }
       const flags = command.options.map((option) => option.long);
       expect(flags, `${command.name()} has no --json`).toContain("--json");
-    }
+    };
+
+    for (const command of createProgram({ cwd: repo.dir }).commands) check(command);
   });
 });
 
@@ -94,6 +107,10 @@ describe("--json across every command", () => {
       ["cancel", blocker, "--reason", "dropped"],
       ["delete", doomed, "--force"],
       ["next"],
+      // Deliberately after `delete`: the history of the task just removed is
+      // the read only the event stream can answer.
+      ["log", doomed],
+      ["note", "list"],
     ];
 
     const seen = new Set<string>();
@@ -350,7 +367,7 @@ describe("katra next", () => {
     // must stay readable at exit 0.
     const empty = await runCli(["next", "--json"], { cwd: repo.dir });
     expect(empty.exitCode).toBe(EXIT.ok);
-    expect(empty.json()).toEqual({ status: "none", blocked: [] });
+    expect(empty.json()).toEqual({ status: "none", blocked: [], untriaged: 0 });
 
     const blocker = await add(["a blocker"]);
     const blocked = await add(["stuck", "--lane", "Planned"]);
@@ -427,5 +444,111 @@ describe("katra next", () => {
 
     expect(result.stdout).toContain(bug);
     expect(result.stdout.match(/kt-[0-9a-z]{6}/g)).toHaveLength(1);
+  });
+});
+
+describe("valueTakingFlags descends into subcommands", () => {
+  /**
+   * A stand-in for the shape T12 introduces.
+   *
+   * katra has no subcommands yet, so the mechanism is exercised against a
+   * program built here. Waiting for `note` to exist would mean shipping the
+   * fix untested and discovering the gap through T12's failures instead.
+   */
+  function probe(): Command {
+    const program = new Command();
+    program.name("probe");
+    program.command("flat").option("--tag <tag>", "a value-taking flag").option("--json", "");
+
+    const parent = program.command("note");
+    parent.command("add").option("--kind <kind>", "a value-taking flag").option("--json", "");
+    parent.command("list").option("--json", "");
+    return program;
+  }
+
+  it("recognises a value-taking flag declared on a subcommand", () => {
+    // `--kind` lives on `add`, not on `note`. Read at the parent level it looks
+    // like a boolean, so `--json` would be counted as a real request when it
+    // is actually `--kind`'s value.
+    expect(wantsJson(["note", "add", "--kind", "--json"], probe())).toBe(false);
+  });
+
+  it("still recognises one declared on a top-level command", () => {
+    // The behaviour the descent replaces, unchanged.
+    expect(wantsJson(["flat", "--tag", "--json"], probe())).toBe(false);
+  });
+
+  it("honours a genuine --json on a subcommand", () => {
+    // The guard on the guard: a descent that swallowed everything would make
+    // the assertions above pass while breaking every real request.
+    expect(wantsJson(["note", "add", "--kind", "handoff", "--json"], probe())).toBe(true);
+    expect(wantsJson(["note", "list", "--json"], probe())).toBe(true);
+    expect(wantsJson(["flat", "--json"], probe())).toBe(true);
+  });
+
+  it("stops descending at a command with no subcommands", () => {
+    // `log kt-abc` must not go hunting for a subcommand named `kt-abc`, and an
+    // argument that happens to match a *sibling* command's name must not pull
+    // that sibling's options into scope.
+    expect(wantsJson(["flat", "note", "--json"], probe())).toBe(true);
+  });
+
+  it("does not treat a parent's own flags as its children's", () => {
+    // `--kind` belongs to `add`. On `list` it is not defined at all, so a
+    // following `--json` is a real request and the invocation is malformed —
+    // which is a usage error, not a silent downgrade to text output.
+    expect(wantsJson(["note", "list", "--kind", "--json"], probe())).toBe(true);
+  });
+});
+
+describe("katra next on an untriaged backlog", () => {
+  it("says how much is waiting and how to plan it", async () => {
+    // Found by dogfooding: eight freshly added tasks, and `next` replied
+    // "nothing is in the Planned lane" — true, and a dead end. `add` puts work
+    // in Defined, so the caller was told about a lane they never chose and
+    // given no way forward.
+    await add(["one"]);
+    await add(["two"]);
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).toMatch(/2 unfinished tasks are waiting to be planned/);
+    // A refusal that names what would unblock it, like every other katra
+    // refusal does.
+    expect(result.stdout).toMatch(/katra update <id> --lane Planned/);
+  });
+
+  it("says plainly when there is no unfinished work at all", async () => {
+    // The third answer, and it must not be confused with the second: an empty
+    // store and an untriaged one are different situations.
+    const done = await add(["finished"]);
+    await runCli(["close", done], { cwd: repo.dir });
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/no unfinished work elsewhere/);
+    expect(result.stdout).not.toMatch(/waiting to be planned/);
+  });
+
+  it("counts one waiting task in the singular", async () => {
+    await add(["only one"]);
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/1 unfinished task is waiting/);
+  });
+
+  it("still reports blockers when something is planned but stuck", async () => {
+    // The untriaged count must not displace the more specific answer.
+    const blocker = await add(["a blocker"]);
+    const blocked = await add(["stuck", "--lane", "Planned"]);
+    await runCli(["dep", blocked, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/1 blocked:/);
+    expect(result.stdout).toContain("waits on");
+    expect(result.stdout).not.toMatch(/waiting to be planned/);
   });
 });

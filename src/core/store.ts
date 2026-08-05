@@ -8,6 +8,7 @@
  */
 
 import { existsSync, mkdirSync } from "node:fs";
+import { createActorResolver } from "./actor.js";
 import type { DatabaseHandle } from "./db/connection.js";
 import { openDatabase } from "./db/connection.js";
 import type { StoreWarning } from "./db/locate.js";
@@ -48,6 +49,20 @@ export interface Store {
  */
 export interface OpenStore extends Store {
   readonly db: DatabaseHandle;
+  /**
+   * Who is writing, per ADR-007. Every event and note stamps it.
+   *
+   * On the store rather than threaded through `createTask`, `updateTask`,
+   * `transition` and `deleteTask` as a parameter: the actor belongs to the
+   * invocation, exactly like the store handle does, and four extra parameters
+   * carrying one unchanging value is noise at every call site.
+   *
+   * A function, not a value, so it stays lazy — resolving it costs two
+   * subprocess spawns, and `list`, `show` and `next` must not pay for an actor
+   * they never stamp. Memoised, so a command writing several events resolves
+   * once.
+   */
+  readonly actor: () => string;
 }
 
 export interface OpenStoreResult {
@@ -78,6 +93,14 @@ export interface OpenStoreOptions {
    * silently conjuring an empty backlog in the wrong repository.
    */
   readonly createIfMissing?: boolean;
+  /**
+   * Who to record as the writer. Defaults to resolving it from `cwd`.
+   *
+   * The CLI passes its own per-invocation resolver so one command resolves
+   * once however many stores or events it touches; a test passes a fixed
+   * string when the actor is the thing being asserted.
+   */
+  readonly actor?: () => string;
 }
 
 /**
@@ -117,6 +140,9 @@ export function openStore(cwd: string, options: OpenStoreOptions = {}): OpenStor
       dbPath: location.dbPath,
       commonDir: location.commonDir,
       db,
+      actor:
+        options.actor ??
+        createActorResolver(options.env === undefined ? { cwd } : { cwd, env: options.env }),
       close: () => db.close(),
     },
     created: applied > 0,

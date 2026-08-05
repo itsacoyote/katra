@@ -20,8 +20,9 @@
  * neither touches the database.
  */
 
-import type { Lane } from "./enums.js";
-import type { Task, TaskSummary } from "./tasks/types.js";
+import type { LoggedEvent } from "./events/types.js";
+import type { Note } from "./notes/types.js";
+import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
 
 /**
  * Something worth telling the user that is not fatal.
@@ -36,11 +37,51 @@ export interface StoreWarning {
   readonly message: string;
 }
 
-/** A task standing between another task and readiness. */
-export interface Blocker {
-  readonly id: string;
-  readonly title: string;
-  readonly lane: Lane;
+/**
+ * A task standing between another task and readiness.
+ *
+ * Defined in `tasks/types.ts` and re-exported here so this file stays the one
+ * place to read the `--json` contract. It moved there because `TaskDetail`
+ * needs it, and this module already imports that one.
+ */
+export type { Blocker };
+
+/**
+ * What `update` prints.
+ *
+ * An envelope rather than a bare {@link TaskDetail}, and deliberately the same
+ * shape for one id as for ten: `update` takes a variable number of ids, and a
+ * script passing a list it did not count must not get a different document
+ * back depending on how many it happened to contain. Human output still adapts
+ * — one task is worth printing in full, ten are worth printing as a list.
+ */
+export interface UpdateResult {
+  readonly tasks: readonly TaskDetail[];
+}
+
+/**
+ * What `log` prints.
+ *
+ * An envelope for the same reason `update`'s is one: the count varies, and a
+ * document whose shape depends on how much happened is not a contract.
+ */
+export interface EventLog {
+  readonly events: readonly LoggedEvent[];
+  /**
+   * True when the bound cut the result short.
+   *
+   * `list` is unbounded precisely because a default cap would have to report
+   * truncating; `log` *is* bounded, so it owes the same report. Silence here
+   * is worse than anywhere else in katra: this is the read F3's session digest
+   * builds on, and a partial history that looks complete is one an agent acts
+   * on.
+   */
+  readonly truncated: boolean;
+}
+
+/** What `note list` prints. */
+export interface NoteList {
+  readonly notes: readonly Note[];
 }
 
 /** What `list` prints. */
@@ -123,7 +164,21 @@ export interface BlockedTask {
  */
 export type NextResult =
   | { readonly status: "found"; readonly task: Task; readonly epic: TaskSummary | null }
-  | { readonly status: "none"; readonly blocked: readonly BlockedTask[] };
+  | {
+      readonly status: "none";
+      readonly blocked: readonly BlockedTask[];
+      /**
+       * Unfinished work outside the `Planned` lane.
+       *
+       * Three answers hide behind "nothing to do", and an agent needs to tell
+       * them apart: everything planned is blocked (`blocked` is non-empty),
+       * nothing has been triaged yet (`blocked` empty, this above zero), or
+       * there is genuinely no work left (both zero). The middle one used to
+       * render as a dead end — `add` puts a task in `Defined`, so a fresh
+       * store answered with a lane the caller had never heard of.
+       */
+      readonly untriaged: number;
+    };
 
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {

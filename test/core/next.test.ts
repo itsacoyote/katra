@@ -119,7 +119,7 @@ describe("nextTask", () => {
     // The whole reason the empty case is a union rather than null: an agent
     // that reads "nothing" as "no work left" stops working.
     const empty = nextTask(fixture.store);
-    expect(empty).toEqual({ status: "none", blocked: [] });
+    expect(empty).toEqual({ status: "none", blocked: [], untriaged: 0 });
 
     const blocker = seedTask(fixture.store, { title: "the blocker", lane: "In Progress" });
     const blocked = planned("stuck");
@@ -131,6 +131,51 @@ describe("nextTask", () => {
     expect(stuck.blocked).toHaveLength(1);
     expect(stuck.blocked[0]?.title).toBe("stuck");
     expect(stuck.blocked[0]?.blockers.map((b) => b.title)).toEqual(["the blocker"]);
+  });
+
+  it("separates nothing-planned from everything-blocked from nothing-at-all", () => {
+    // Three answers hide behind "nothing to do". The first is the one that
+    // used to read as a dead end: `add` puts work in Defined, so a caller who
+    // has just filled a store gets told about a lane they never chose.
+    const nothingAtAll = nextTask(fixture.store);
+    expect(nothingAtAll).toMatchObject({ blocked: [], untriaged: 0 });
+
+    seedTask(fixture.store, { title: "never triaged", lane: "Defined" });
+    seedTask(fixture.store, { title: "also waiting", lane: "Researching" });
+    const nothingPlanned = nextTask(fixture.store);
+    expect(nothingPlanned).toMatchObject({ blocked: [], untriaged: 2 });
+
+    const blocker = seedTask(fixture.store, { title: "the blocker", lane: "In Progress" });
+    const blocked = planned("stuck");
+    addDependency(fixture.store, blocked, blocker);
+    const everythingBlocked = nextTask(fixture.store);
+    if (everythingBlocked.status !== "none") throw new Error("unreachable");
+    expect(everythingBlocked.blocked).toHaveLength(1);
+    // `In Progress` counts as untriaged too — it is unfinished work outside
+    // the Planned lane — but Done and Cancelled never do.
+    expect(everythingBlocked.untriaged).toBe(3);
+  });
+
+  it("does not count finished or abandoned work as waiting to be planned", () => {
+    seedTask(fixture.store, { title: "done", lane: "Done" });
+    seedTask(fixture.store, { title: "dropped", lane: "Cancelled" });
+
+    expect(nextTask(fixture.store)).toMatchObject({ untriaged: 0 });
+  });
+
+  it("counts only what the filters asked about", () => {
+    // `next --epic X` reporting the whole store's untriaged count would name a
+    // number the caller cannot act on from where they are standing.
+    const wanted = seedEpic(fixture.store, { title: "wanted" });
+    const other = seedEpic(fixture.store, { title: "other" });
+    seedTask(fixture.store, { title: "mine", parentId: wanted, lane: "Defined" });
+    seedTask(fixture.store, { title: "theirs", parentId: other, lane: "Defined" });
+
+    expect(nextTask(fixture.store, { epic: wanted })).toMatchObject({ untriaged: 1 });
+    // Two tasks, not four: the two epics holding them are containers, and
+    // telling someone to plan an epic points at work that does not exist.
+    expect(nextTask(fixture.store)).toMatchObject({ untriaged: 2 });
+    expect(nextTask(fixture.store, { level: "epic" })).toMatchObject({ untriaged: 2 });
   });
 
   it("lists every blocked planned task, worst priority first", () => {
@@ -149,7 +194,7 @@ describe("nextTask", () => {
     planned("a feature", { kind: "feat" });
 
     const result = nextTask(fixture.store, { kind: "docs" });
-    expect(result).toEqual({ status: "none", blocked: [] });
+    expect(result).toEqual({ status: "none", blocked: [], untriaged: 0 });
   });
 
   it("becomes available once the blocker is cancelled", () => {

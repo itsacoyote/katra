@@ -10,10 +10,10 @@
  */
 
 import { KatraException } from "../errors.js";
+import { generateId, ID_PREFIX, MIN_PREFIX_LENGTH } from "../id-format.js";
 import type { OpenStore } from "../store.js";
-import { generateId, ID_PREFIX, MIN_PREFIX_LENGTH } from "./id-format.js";
 
-export { generateId, ID_PREFIX, ID_SUFFIX_LENGTH, MIN_PREFIX_LENGTH } from "./id-format.js";
+export { generateId, ID_PREFIX, ID_SUFFIX_LENGTH, MIN_PREFIX_LENGTH } from "../id-format.js";
 
 /** How many times a colliding insert is retried before giving up. */
 export const ID_RETRY_ATTEMPTS = 10;
@@ -33,10 +33,14 @@ function isPrimaryKeyCollision(error: unknown): boolean {
  *
  * Safe to call inside a transaction: SQLite aborts the offending *statement*
  * on a constraint violation, not the surrounding transaction.
+ *
+ * `prefix` selects which id space to mint from — tasks by default, notes when
+ * given {@link NOTE_ID_PREFIX}. Everything else here is already independent of
+ * what is being inserted.
  */
-export function insertWithRetry(insert: (id: string) => void): string {
+export function insertWithRetry(insert: (id: string) => void, prefix: string = ID_PREFIX): string {
   for (let attempt = 0; ; attempt++) {
-    const id = generateId();
+    const id = generateId(prefix);
     try {
       insert(id);
       return id;
@@ -74,6 +78,46 @@ export const MAX_CANDIDATES = 20;
  * caller cannot smuggle a wildcard in through the id.
  */
 export function resolveId(store: OpenStore, input: string): IdResolution {
+  return resolveIdAmong(
+    (lower, upper, limit) =>
+      store.db
+        .prepare("SELECT id FROM tasks WHERE id >= ? AND id < ? ORDER BY id LIMIT ?")
+        .all(lower, upper, limit) as Array<{ id: string }>,
+    input,
+    "a task",
+  );
+}
+
+/**
+ * Fetches the ids in `[lower, upper)`, in order, at most `limit` of them.
+ *
+ * A callback rather than a table name, because the second caller — `log`,
+ * which must resolve ids belonging to *deleted* tasks — needs a union across
+ * two tables and a table name cannot express that. It also keeps the SQL where
+ * its columns are, rather than assembling a query from a string parameter.
+ */
+export type IdCandidates = (lower: string, upper: string, limit: number) => Array<{ id: string }>;
+
+/**
+ * Resolves a full or partial id against whatever `candidates` searches.
+ *
+ * Accepts the id with or without its `kt-` prefix, so both `kt-9f3k2a` and
+ * `9f3k2a` work, as does any unique leading portion of either.
+ *
+ * Lookup uses explicit range bounds rather than `LIKE`. `LIKE 'prefix%'`
+ * forfeits SQLite's index range scan and degenerates into a full index walk —
+ * measured at 5,000 rows, 2,000 `LIKE` lookups took 1.17s against 151ms for a
+ * seek. Range bounds also sidestep pattern metacharacters entirely, so a
+ * caller cannot smuggle a wildcard in through the id.
+ *
+ * `noun` names what was searched, so a refusal says "no task matches" or "no
+ * history matches" rather than making the reader guess which set was empty.
+ */
+export function resolveIdAmong(
+  candidates: IdCandidates,
+  input: string,
+  noun: string,
+): IdResolution {
   const trimmed = input.trim();
   const bare = trimmed.startsWith(ID_PREFIX) ? trimmed.slice(ID_PREFIX.length) : trimmed;
 
@@ -83,7 +127,7 @@ export function resolveId(store: OpenStore, input: string): IdResolution {
     throw new KatraException({
       code: "validation",
       message:
-        `"${trimmed}" is too short to identify a task — ` +
+        `"${trimmed}" is too short to identify ${noun} — ` +
         `give at least ${MIN_PREFIX_LENGTH} characters after "${ID_PREFIX}".`,
       field: "id",
       value: trimmed,
@@ -95,9 +139,7 @@ export function resolveId(store: OpenStore, input: string): IdResolution {
   // the exclusive upper bound of the prefix range.
   const upper = `${lower}￿`;
 
-  const rows = store.db
-    .prepare("SELECT id FROM tasks WHERE id >= ? AND id < ? ORDER BY id LIMIT ?")
-    .all(lower, upper, MAX_CANDIDATES + 1) as Array<{ id: string }>;
+  const rows = candidates(lower, upper, MAX_CANDIDATES + 1);
 
   if (rows.length === 0) return { kind: "not_found", input: trimmed };
   if (rows.length === 1 && rows[0] !== undefined) return { kind: "found", id: rows[0].id };
@@ -120,7 +162,22 @@ export function resolveId(store: OpenStore, input: string): IdResolution {
  * than telling the user only that they were ambiguous.
  */
 export function requireId(store: OpenStore, input: string): string {
-  const resolution = resolveId(store, input);
+  return requireResolved(resolveId(store, input), "task", "tasks");
+}
+
+/**
+ * Turns a resolution into an id or the matching refusal.
+ *
+ * `singular`/`plural` name what was searched. `log` resolves against history
+ * rather than live tasks, and telling someone "no task matches" when they
+ * asked about a task they deliberately deleted is the wrong answer to the
+ * wrong question.
+ */
+export function requireResolved(
+  resolution: IdResolution,
+  singular: string,
+  plural: string,
+): string {
   switch (resolution.kind) {
     case "found":
       return resolution.id;
@@ -128,9 +185,9 @@ export function requireId(store: OpenStore, input: string): string {
       throw new KatraException({
         code: "ambiguous_id",
         message: resolution.truncated
-          ? `"${resolution.input}" matches more than ${MAX_CANDIDATES} tasks — ` +
+          ? `"${resolution.input}" matches more than ${MAX_CANDIDATES} ${plural} — ` +
             `here are the first ${MAX_CANDIDATES}; give more characters to narrow it`
-          : `"${resolution.input}" matches ${resolution.candidates.length} tasks`,
+          : `"${resolution.input}" matches ${resolution.candidates.length} ${plural}`,
         input: resolution.input,
         candidates: resolution.candidates,
         truncated: resolution.truncated,
@@ -138,7 +195,7 @@ export function requireId(store: OpenStore, input: string): string {
     case "not_found":
       throw new KatraException({
         code: "not_found",
-        message: `no task matches "${resolution.input}"`,
+        message: `no ${singular} matches "${resolution.input}"`,
         id: resolution.input,
       });
     default: {

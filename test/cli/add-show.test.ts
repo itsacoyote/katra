@@ -5,7 +5,8 @@ import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
 import { openStore } from "../../src/core/store.js";
 import type { TaskList } from "../../src/core/tasks/repo.js";
-import type { Task, TaskDetail } from "../../src/core/tasks/types.js";
+import type { Task, TaskDetail, TaskView } from "../../src/core/tasks/types.js";
+import { SHOW_ACTIVITY_LIMIT, SHOW_NOTE_LIMIT } from "../../src/core/tasks/view.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
 import { createGitRepo } from "../helpers/fixture.js";
@@ -24,6 +25,16 @@ function seedAmbiguousPair(): void {
   try {
     seedTask(store, { id: "kt-ab0001" });
     seedTask(store, { id: "kt-ab0002" });
+  } finally {
+    store.close();
+  }
+}
+
+/** Seeds a task directly, so it has no created event and no notes. */
+function seedTaskWithoutHistory(): void {
+  const { store } = openStore(repo.dir, {});
+  try {
+    seedTask(store, { id: "kt-qu1et0", title: "nothing has happened to me" });
   } finally {
     store.close();
   }
@@ -227,6 +238,48 @@ describe("katra show", () => {
     expect(result.stdout).toMatch(/tags\s+alpha, beta/);
   });
 
+  it("names what is blocking the task and what it is blocking", async () => {
+    // Found by dogfooding katra on its own backlog: `show` was the only view
+    // that never mentioned dependencies, so a task blocked by two others
+    // looked exactly like one that could be started.
+    const blocker = await add(["must land first"]);
+    const id = await add(["waits on it"]);
+    const downstream = await add(["waits on me"]);
+    await runCli(["dep", id, "--blocked-by", blocker], { cwd: repo.dir });
+    await runCli(["dep", downstream, "--blocked-by", id], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(
+      new RegExp(`blockers\\s+${blocker}\\s+Defined\\s+must land first`),
+    );
+    expect(result.stdout).toMatch(
+      new RegExp(`blocking\\s+${downstream}\\s+Defined\\s+waits on me`),
+    );
+  });
+
+  it("says blockers are none rather than omitting the line", async () => {
+    // A missing line reads as "this view does not know", which is precisely
+    // what it used to mean.
+    const id = await add(["nothing in the way"]);
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/blockers\s+none/);
+  });
+
+  it("carries blockers and blocking in the JSON document", async () => {
+    const blocker = await add(["must land first"]);
+    const id = await add(["waits on it"]);
+    await runCli(["dep", id, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["show", id, "--json"], { cwd: repo.dir });
+    const detail = result.json() as TaskDetail;
+
+    expect(detail.blockers).toEqual([{ id: blocker, title: "must land first", lane: "Defined" }]);
+    expect(detail.blocking).toEqual([]);
+  });
+
   it("resolves a partial id", async () => {
     const id = await add(["findable"]);
 
@@ -329,5 +382,329 @@ describe("warnings from a non-init command", () => {
     expect(result.exitCode).toBe(EXIT.ok);
     expect(result.stdout).toContain("belongs to the other repo");
     expect(result.stderr).toMatch(/GIT_COMMON_DIR/);
+  });
+});
+
+describe("katra show — notes and activity", () => {
+  /** Attaches a note from stdin. */
+  async function note(id: string, body: string, kind = "general"): Promise<void> {
+    const result = await runCli(["note", "add", id, "--kind", kind, "--body-file", "-"], {
+      cwd: repo.dir,
+      stdin: body,
+    });
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+  }
+
+  it("lists a task's notes with kind and a one-line preview", async () => {
+    const id = await add(["a task"]);
+    await note(id, "first line of the handoff\nsecond line never shown here", "handoff");
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/notes \(1/);
+    expect(result.stdout).toContain("handoff");
+    expect(result.stdout).toContain("first line of the handoff");
+    // A preview is one line: the body's later lines belong to `note list`.
+    expect(result.stdout).not.toContain("second line never shown here");
+    // And the output says where to find them.
+    expect(result.stdout).toContain("katra note list");
+  });
+
+  it("shows recent activity newest first", async () => {
+    const id = await add(["a task"]);
+    await runCli(["update", id, "--lane", "Planned"], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+    const activity = result.stdout.slice(result.stdout.indexOf("activity ("));
+
+    expect(activity).toContain("status-changed");
+    expect(activity).toContain("created");
+    expect(activity.indexOf("status-changed")).toBeLessThan(activity.indexOf("created"));
+    expect(result.stdout).toContain("katra log");
+  });
+
+  it("caps both sections regardless of how much history exists", async () => {
+    const id = await add(["a busy task"]);
+    for (let i = 0; i < 12; i++) await note(id, `note ${i}`);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    // 12 notes written and 13 events, but both sections stay at their fixed
+    // internal caps: `show` is a summary, not a dump.
+    expect(view.notes).toHaveLength(SHOW_NOTE_LIMIT);
+    expect(view.activity).toHaveLength(SHOW_ACTIVITY_LIMIT);
+
+    const listed = (await runCli(["note", "list", id, "--json"], { cwd: repo.dir })).json() as {
+      notes: unknown[];
+    };
+    expect(listed.notes).toHaveLength(12);
+  });
+
+  it("keeps the newest notes when it caps, not the oldest", async () => {
+    const id = await add(["a task"]);
+    for (let i = 0; i < SHOW_NOTE_LIMIT + 3; i++) await note(id, `note ${i}`);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes[0]?.body).toBe(`note ${SHOW_NOTE_LIMIT + 2}`);
+  });
+
+  it("strips control characters from a note preview", async () => {
+    // Notes are where fetched content and model output get pasted, and F3's
+    // brief will hand handoff notes to other agents as their first context. A
+    // raw escape executes on whatever renders it.
+    const id = await add(["a task"]);
+    await note(id, "\u001B[31mred and \u001B[2Jcleared");
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).toContain("[31mred");
+  });
+
+  it("strips control characters from a note body in note list too", async () => {
+    // The same property one command over: `note list` prints whole bodies, so
+    // it is the larger surface. Newlines and tabs survive, so pasted code
+    // still reads correctly — that was the whole objection to sanitising.
+    const id = await add(["a task"]);
+    await note(id, "line one\n\tindented \u001B[31mred\u001B[0m\nline three");
+
+    const result = await runCli(["note", "list", id], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).toContain("line one");
+    expect(result.stdout).toContain("line three");
+    expect(result.stdout).toContain("\tindented");
+  });
+
+  it("keeps the body verbatim under --json", async () => {
+    // `--json` is the programmatic path: its consumer is not a terminal, and a
+    // value altered on the way out is no longer what was stored.
+    const id = await add(["a task"]);
+    const body = "\u001B[31mred\nsecond line";
+    await note(id, body);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes[0]?.body).toBe(body);
+  });
+
+  it("omits both sections for a task with neither", async () => {
+    // An empty heading is a line saying nothing happened, which the absence
+    // already says. Seeded rather than added, because `add` writes a created
+    // event and there would be activity to show.
+    seedTaskWithoutHistory();
+
+    const result = await runCli(["show", "kt-qu1et0"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).not.toContain("notes (");
+    expect(result.stdout).not.toContain("activity (");
+  });
+
+  it("carries notes and activity in the JSON document", async () => {
+    const id = await add(["a task"]);
+    await note(id, "a note", "decision");
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes[0]).toMatchObject({ kind: "decision", body: "a note" });
+    expect(view.activity.map((e) => e.type)).toEqual(["note-added", "created"]);
+  });
+});
+
+describe("show on an epic", () => {
+  it("names which child each activity row is about", async () => {
+    // An epic's view carries its children's events, so three bare `created`
+    // rows — one of them the epic's own — were indistinguishable from each
+    // other. formatEventLog already carries the id and title for this reason.
+    const epic = await add(["an epic", "--level", "epic"]);
+    const one = await add(["first child", "--parent", epic]);
+    await add(["second child", "--parent", epic]);
+    await runCli(["update", one, "--lane", "Planned"], { cwd: repo.dir });
+
+    const result = await runCli(["show", epic], { cwd: repo.dir });
+    const activity = result.stdout.slice(result.stdout.indexOf("activity ("));
+
+    expect(activity).toContain("first child");
+    expect(activity).toContain("second child");
+    expect(activity).toContain(one);
+  });
+
+  it("leaves the task's own rows unattributed, since they need no naming", async () => {
+    // The subject column disambiguates; repeating the task you asked about on
+    // every one of its own rows is the noise the log already elides.
+    const id = await add(["a plain task"]);
+    await runCli(["update", id, "--lane", "Planned"], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+    const activity = result.stdout.slice(result.stdout.indexOf("activity ("));
+
+    expect(activity).not.toContain("a plain task");
+    expect(activity).not.toContain(id);
+    expect(activity).toContain("status-changed");
+  });
+});
+
+describe("show reports its own caps in JSON", () => {
+  async function note(id: string, body: string): Promise<void> {
+    await runCli(["note", "add", id, "--body-file", "-"], { cwd: repo.dir, stdin: body });
+  }
+
+  it("says when a section was cut short", async () => {
+    // The human block points at `note list` and `log` unconditionally, so a
+    // reader is never misled. `--json` has no such prose, and a digest is
+    // likelier to parse it.
+    const id = await add(["a busy task"]);
+    // Enough notes to pass both caps: each note is also an event, and the
+    // `created` event makes one more.
+    for (let i = 0; i < SHOW_ACTIVITY_LIMIT + 1; i++) await note(id, `note ${i}`);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes).toHaveLength(SHOW_NOTE_LIMIT);
+    expect(view.notesTruncated).toBe(true);
+    expect(view.activity).toHaveLength(SHOW_ACTIVITY_LIMIT);
+    expect(view.activityTruncated).toBe(true);
+  });
+
+  it("says so when nothing was cut", async () => {
+    const id = await add(["a quiet task"]);
+    await note(id, "the only note");
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes).toHaveLength(1);
+    expect(view.notesTruncated).toBe(false);
+    expect(view.activityTruncated).toBe(false);
+  });
+
+  it("does not report truncation when a section exactly fills its cap", async () => {
+    // The off-by-one the over-fetch exists to get right.
+    const id = await add(["a task"]);
+    for (let i = 0; i < SHOW_NOTE_LIMIT; i++) await note(id, `note ${i}`);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.notes).toHaveLength(SHOW_NOTE_LIMIT);
+    expect(view.notesTruncated).toBe(false);
+  });
+});
+
+describe("stored text never reaches the terminal unsanitised", () => {
+  const ESCAPES = "\u001B[31mred\u001B]0;pwned\u0007 and \u009Bc1";
+  const RLO = "invoice\u202Egnp.js";
+
+  it("strips escapes from a task title in show and list", async () => {
+    // F2 added the sanitizers for note bodies and event fields and left task
+    // fields raw, so the *same* string was safe on one command and not the
+    // next. `--body-file` feeds a task's description too, which is the path
+    // fetched content actually arrives by.
+    const id = await add([`title ${ESCAPES}`]);
+
+    const shown = await runCli(["show", id], { cwd: repo.dir });
+    const listed = await runCli(["list"], { cwd: repo.dir });
+
+    for (const out of [shown.stdout, listed.stdout]) {
+      expect(out).not.toContain("\u001B");
+      expect(out).not.toContain("\u0007");
+      expect(out).not.toContain("\u009B");
+    }
+    expect(shown.stdout).toContain("[31mred");
+  });
+
+  it("strips escapes from a description while keeping its line structure", async () => {
+    const id = await add(
+      ["a task", "--body-file", "-"],
+      "line one\n\tindented \u001B[31mred\nline three",
+    );
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).toContain("line one");
+    expect(result.stdout).toContain("line three");
+    // A description is deliberately multi-line: newlines and tabs survive.
+    expect(result.stdout).toContain("\tindented");
+  });
+
+  it("strips escapes from a close reason, which log already collapsed", async () => {
+    // The same string was rendered raw by `show` and collapsed by `log`.
+    const id = await add(["a task"]);
+    await runCli(["close", id, "--reason", `done \u001B[2Jcleared`], { cwd: repo.dir });
+
+    const shown = await runCli(["show", id], { cwd: repo.dir });
+    const logged = await runCli(["log", id], { cwd: repo.dir });
+
+    expect(shown.stdout).not.toContain("\u001B");
+    expect(logged.stdout).not.toContain("\u001B");
+  });
+
+  it("strips bidirectional overrides, which no control-character filter catches", async () => {
+    // Trojan Source (CVE-2021-42574) applied to a backlog: an override makes a
+    // line render in an order that misstates what it says. These are ordinary
+    // printable codepoints, so stripping C0 does not touch them — and
+    // JSON.stringify does not escape them either.
+    const id = await add([`review ${RLO}`]);
+
+    const listed = await runCli(["list"], { cwd: repo.dir });
+    const shown = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(listed.stdout).not.toContain("\u202E");
+    expect(shown.stdout).not.toContain("\u202E");
+  });
+
+  it("strips bidirectional overrides from a note body too", async () => {
+    const id = await add(["a task"]);
+    await runCli(["note", "add", id, "--body-file", "-"], {
+      cwd: repo.dir,
+      stdin: `handoff ${RLO}`,
+    });
+
+    const result = await runCli(["note", "list", id], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("\u202E");
+    expect(result.stdout).toContain("handoff");
+  });
+
+  it("keeps every character verbatim under --json", async () => {
+    // `--json` is the programmatic path: its consumer is not a terminal, and
+    // JSON.stringify escapes every codepoint below 0x20 on its own, so no raw
+    // ANSI introducer can reach a parser.
+    const id = await add([`title ${ESCAPES}`]);
+
+    const view = (await runCli(["show", id, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.task.title).toBe(`title ${ESCAPES}`);
+  });
+
+  it("strips escapes from a linked task's title", async () => {
+    // The one field the sanitisation commit touched without a test. Coverage
+    // showed `formatTaskDetail`'s links line never rendered in text mode by
+    // any test, so a regression here would ship green.
+    const linked = await add(["linked \u001B[31mred\u202Eoverride"]);
+    const id = await add(["a task"]);
+    await runCli(["link", id, linked], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toContain(linked);
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).not.toContain("\u202E");
+    expect(result.stdout).toContain("[31mred");
+  });
+
+  it("strips escapes from a blocker's title", async () => {
+    // Same line of reasoning one field over: blockers and dependents render
+    // through the same helper and had no escape test either.
+    const blocker = await add(["blocker \u001B[4munderline"]);
+    const id = await add(["waits"]);
+    await runCli(["dep", id, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toContain(blocker);
+    expect(result.stdout).not.toContain("\u001B");
+    expect(result.stdout).toContain("[4munderline");
   });
 });

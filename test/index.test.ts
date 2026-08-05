@@ -24,6 +24,11 @@ describe("the public barrel", () => {
     expect(katra.generateId()).toMatch(
       new RegExp(`^${katra.ID_PREFIX}[0-9a-z]{${katra.ID_SUFFIX_LENGTH}}$`),
     );
+    // A consumer holding a Note sees `nt-` ids; the constant naming that space
+    // has to be published too, or the prefix is a magic string on their side.
+    expect(katra.generateId(katra.NOTE_ID_PREFIX)).toMatch(
+      new RegExp(`^${katra.NOTE_ID_PREFIX}[0-9a-z]{${katra.ID_SUFFIX_LENGTH}}$`),
+    );
   });
 
   it("exports predicates that actually narrow", () => {
@@ -45,6 +50,36 @@ describe("the public barrel", () => {
     expect(katra.isKatraException(error)).toBe(true);
     if (error.detail.code !== "conflict") throw new Error("unreachable");
     expect(error.detail.reason).toBe("3 children");
+  });
+
+  it("publishes a type for every --json document, checked by the compiler", () => {
+    // Every other assertion in this file is blind to types: they have no
+    // runtime keys, so `Object.keys(katra)` cannot see them and the walked-file
+    // set does not change when one is dropped. `TaskView` was left out of the
+    // barrel twice with the whole suite green and `tsc --noEmit` clean — this
+    // tuple is what makes that a compile error instead.
+    type PublishedDocuments = [
+      katra.TaskView,
+      katra.TaskDetail,
+      katra.TaskList,
+      katra.EventLog,
+      katra.NoteList,
+      katra.NextResult,
+      katra.DeleteResult,
+      katra.LifecycleResult,
+      katra.DependencyResult,
+      katra.LinkResult,
+      katra.InitResult,
+      katra.UpdateResult,
+      katra.HelpDocument,
+      katra.VersionDocument,
+      katra.JsonDocument<katra.TaskView>,
+    ];
+
+    // The indexed access keeps the alias used: a bare `type` declaration trips
+    // noUnusedLocals, and exporting it trips the no-exports-in-test rule.
+    const count: PublishedDocuments["length"] = 15;
+    expect(count).toBe(15);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {
@@ -128,7 +163,9 @@ describe("the public barrel", () => {
       "core/contract.ts",
       "core/enums.ts",
       "core/errors.ts",
-      "core/tasks/id-format.ts",
+      "core/events/types.ts",
+      "core/id-format.ts",
+      "core/notes/types.ts",
       "core/tasks/types.ts",
       "index.ts",
       "version.ts",

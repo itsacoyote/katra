@@ -11,6 +11,8 @@
  */
 
 import type { Kind, Lane, Level, Priority } from "../enums.js";
+import type { LoggedEvent } from "../events/types.js";
+import type { Note } from "../notes/types.js";
 
 /** A task or epic, as stored. */
 export interface Task {
@@ -49,13 +51,62 @@ export function summarise(task: Task): TaskSummary {
   return { id: task.id, title: task.title, level: task.level, lane: task.lane };
 }
 
-/** What `show` returns. */
+/**
+ * A task standing between another task and readiness.
+ *
+ * Declared here rather than in `contract.ts` because {@link TaskDetail} needs
+ * it: `contract.ts` already imports this module, so defining it there and
+ * importing it back would make the two mutually dependent.
+ */
+export interface Blocker {
+  readonly id: string;
+  readonly title: string;
+  readonly lane: Lane;
+}
+
+/** What `update` returns, and the base of what `show` returns. */
 export interface TaskDetail {
   readonly task: Task;
   /** The epic this task belongs to, resolved so output can name it. */
   readonly parent: TaskSummary | null;
   /** Tasks associated with this one. Carries no blocking meaning. */
   readonly links: readonly TaskSummary[];
+  /**
+   * Unfinished dependencies — what stops this being started.
+   *
+   * The same set and the same ordering `next` reports, deliberately: an agent
+   * that asks `show` whether it can start a task and one that asks `next` for
+   * something to start must not get different answers. Finished dependencies
+   * are omitted for the same reason they are in `next` — they are no longer in
+   * the way.
+   */
+  readonly blockers: readonly Blocker[];
+  /** Tasks waiting on this one — what finishing it would release. */
+  readonly blocking: readonly Blocker[];
+}
+
+/**
+ * What `show` returns: a task detail plus its notes and recent activity.
+ *
+ * Separate from {@link TaskDetail} rather than folded into it, because
+ * `update` returns a detail too and must not be charged two extra queries per
+ * task for content it never prints. Both sections are bounded by fixed
+ * internal caps — see `view.ts` for why they are not `--limit` flags.
+ */
+export interface TaskView extends TaskDetail {
+  readonly notes: readonly Note[];
+  readonly activity: readonly LoggedEvent[];
+  /**
+   * True when a fixed cap cut that section short.
+   *
+   * The human rendering points at `note list` and `log` unconditionally, so a
+   * reader is never misled; `--json` has no such prose, and F3's digest is
+   * likelier to parse it. The rule `EventLog.truncated` states applies here
+   * verbatim — a bound that cannot report itself is indistinguishable from the
+   * end of the data.
+   */
+  readonly notesTruncated: boolean;
+  readonly activityTruncated: boolean;
 }
 
 /**

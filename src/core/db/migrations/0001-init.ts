@@ -23,7 +23,7 @@ import {
   TERMINAL_LANES,
 } from "../../enums.js";
 import { KatraException } from "../../errors.js";
-import { ID_PREFIX, ID_SUFFIX_LENGTH } from "../../tasks/id-format.js";
+import { ID_PREFIX, idPattern } from "../../id-format.js";
 import type { Migration } from "../migrate.js";
 
 export interface SchemaSets {
@@ -45,17 +45,6 @@ export const DEFAULT_SCHEMA_SETS: SchemaSets = {
   priorityMax: PRIORITY_MAX,
   priorityDefault: PRIORITY_DEFAULT,
 };
-
-/**
- * The `GLOB` pattern an id must match, built from the id format itself.
- *
- * Generated rather than written out, for the same reason `sqlEnum` exists: a
- * hardcoded pattern is a second definition of the id shape that drifts the
- * moment the length changes.
- */
-function idPattern(): string {
-  return `${ID_PREFIX}${"[0-9a-z]".repeat(ID_SUFFIX_LENGTH)}`;
-}
 
 /** Renders the initial DDL for the given value sets. */
 export function buildInitDdl(sets: SchemaSets = DEFAULT_SCHEMA_SETS): string {
@@ -89,7 +78,7 @@ CREATE TABLE tasks (
   -- A single hand-written id defeats cycle detection silently: verified that
   -- with the ids kt-aaaaaa and a, addDependency accepts an edge closing a real
   -- loop, and nothing ever reports it.
-  id           TEXT PRIMARY KEY CHECK (id GLOB '${idPattern()}'),
+  id           TEXT PRIMARY KEY CHECK (id GLOB '${idPattern(ID_PREFIX)}'),
   level        TEXT NOT NULL CHECK (level IN (${sqlEnum(sets.levels)})),
   kind         TEXT NOT NULL CHECK (kind IN (${sqlEnum(sets.kinds)})),
   title        TEXT NOT NULL,

@@ -198,3 +198,130 @@ describe("listTasks", () => {
     expect(listTasks(fixture.store).tasks[0]?.tags).toEqual(["a", "b"]);
   });
 });
+
+describe("listTasks --limit", () => {
+  it("returns at most the requested number, keeping the highest-ranked", () => {
+    seedTask(fixture.store, { title: "first", priority: 0 });
+    seedTask(fixture.store, { title: "second", priority: 1 });
+    seedTask(fixture.store, { title: "third", priority: 2 });
+
+    expect(titles(listTasks(fixture.store, { limit: 2 }))).toEqual(["first", "second"]);
+  });
+
+  it("bounds the result after filtering, not before", () => {
+    // A limit applied first would return two rows and then filter them down to
+    // one, so `--lane Planned --limit 2` could hand back a single task while
+    // more matched.
+    seedTask(fixture.store, { title: "wrong lane", lane: "Defined", priority: 0 });
+    seedTask(fixture.store, { title: "a", lane: "Planned", priority: 1 });
+    seedTask(fixture.store, { title: "b", lane: "Planned", priority: 2 });
+
+    expect(titles(listTasks(fixture.store, { lane: "Planned", limit: 2 }))).toEqual(["a", "b"]);
+  });
+
+  it("returns everything when no limit is given", () => {
+    // Unbounded by default, unlike the event reads: tasks are bounded by how
+    // much work exists, and a default cap would have to report truncation.
+    for (let i = 0; i < 30; i++) seedTask(fixture.store, { title: `t${i}` });
+
+    expect(listTasks(fixture.store).tasks).toHaveLength(30);
+  });
+
+  it("treats a limit of zero as a real answer rather than as unbounded", () => {
+    // The falsy-check bug this exists to prevent: `if (limit)` folds 0 into
+    // the no-limit branch and returns the entire backlog for a request that
+    // asked for none of it.
+    seedTask(fixture.store, { title: "one" });
+
+    expect(listTasks(fixture.store, { limit: 0 }).tasks).toEqual([]);
+  });
+
+  it("refuses a limit that is not a whole count", () => {
+    expect(() => listTasks(fixture.store, { limit: -1 })).toThrowError(/whole number/);
+    expect(() => listTasks(fixture.store, { limit: 2.5 })).toThrowError(/whole number/);
+  });
+
+  it("does not bound the ready and blocked halves differently", () => {
+    const blocker = seedTask(fixture.store, { title: "blocker", priority: 0 });
+    const blocked = seedTask(fixture.store, { title: "blocked", priority: 1 });
+    seedDep(fixture.store, blocked, blocker);
+
+    expect(titles(listTasks(fixture.store, { ready: true, limit: 1 }))).toEqual(["blocker"]);
+    expect(titles(listTasks(fixture.store, { ready: false, limit: 1 }))).toEqual(["blocked"]);
+  });
+});
+
+describe("listTasks --ready and epics", () => {
+  it("leaves epics out of the ready set, which is about startable work", () => {
+    // Found by dogfooding: `list --ready` answered "what can I start?" with the
+    // F2 epic at the top. An epic has no dependencies of its own, so it
+    // satisfies readiness trivially, and P0 sorts it above everything real.
+    seedEpic(fixture.store, { title: "an epic", priority: 0 });
+    seedTask(fixture.store, { title: "real work", priority: 1 });
+
+    expect(titles(listTasks(fixture.store, { ready: true }))).toEqual(["real work"]);
+  });
+
+  it("leaves epics out of the blocked set too", () => {
+    // The two are halves of one filter; excluding epics from only one would
+    // make `--ready` and `--blocked` disagree about what the universe is.
+    const blocker = seedTask(fixture.store, { title: "blocker" });
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    const blocked = seedTask(fixture.store, { title: "blocked", parentId: epic });
+    seedDep(fixture.store, blocked, blocker);
+    seedDep(fixture.store, epic, blocker);
+
+    expect(titles(listTasks(fixture.store, { ready: false }))).toEqual(["blocked"]);
+  });
+
+  it("still answers the literal question when --level epic is explicit", () => {
+    // Excluding epics outright would make this combination return nothing,
+    // always — an empty answer indistinguishable from a suppressed one.
+    const blocker = seedTask(fixture.store, { title: "blocker" });
+    seedEpic(fixture.store, { title: "free epic" });
+    const stuck = seedEpic(fixture.store, { title: "stuck epic" });
+    seedDep(fixture.store, stuck, blocker);
+
+    expect(titles(listTasks(fixture.store, { ready: true, level: "epic" }))).toEqual(["free epic"]);
+    expect(titles(listTasks(fixture.store, { ready: false, level: "epic" }))).toEqual([
+      "stuck epic",
+    ]);
+  });
+
+  it("still lists epics when readiness is not being asked about", () => {
+    // The exclusion belongs to the readiness filters, not to `list` at large.
+    seedEpic(fixture.store, { title: "an epic" });
+    seedTask(fixture.store, { title: "a task" });
+
+    expect(titles(listTasks(fixture.store)).sort()).toEqual(["a task", "an epic"]);
+  });
+});
+
+describe("listTasks --ready and finished work", () => {
+  it("leaves finished and abandoned tasks out of the ready set", () => {
+    // The larger half of the same finding. A Done task has no unfinished
+    // dependencies either, so a mature backlog answered "what can I start?"
+    // with everything it had ever completed — on the dogfood store, seven of
+    // them ahead of the real work.
+    seedTask(fixture.store, { title: "done", lane: "Done" });
+    seedTask(fixture.store, { title: "dropped", lane: "Cancelled" });
+    seedTask(fixture.store, { title: "startable" });
+
+    expect(titles(listTasks(fixture.store, { ready: true }))).toEqual(["startable"]);
+  });
+
+  it("still answers the literal question when --lane is explicit", () => {
+    seedTask(fixture.store, { title: "done", lane: "Done" });
+    seedTask(fixture.store, { title: "startable" });
+
+    expect(titles(listTasks(fixture.store, { ready: true, lane: "Done" }))).toEqual(["done"]);
+  });
+
+  it("still lists finished work when readiness is not being asked about", () => {
+    seedTask(fixture.store, { title: "done", lane: "Done" });
+    seedTask(fixture.store, { title: "open" });
+
+    expect(titles(listTasks(fixture.store)).sort()).toEqual(["done", "open"]);
+    expect(titles(listTasks(fixture.store, { lane: "Done" }))).toEqual(["done"]);
+  });
+});

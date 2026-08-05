@@ -15,9 +15,10 @@
 
 import type { LifecycleResult } from "../contract.js";
 import { writeTx } from "../db/connection.js";
-import type { Lane } from "../enums.js";
+import type { EventType, Lane } from "../enums.js";
 import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
+import { appendEvent, epicIdFor } from "../events/repo.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { getTask } from "./repo.js";
@@ -42,6 +43,15 @@ interface Move {
   readonly lane: Lane;
   readonly markClosed: boolean;
   readonly reason: string | null;
+  /**
+   * Which of the three verbs this is.
+   *
+   * One call site serves close, cancel and reopen, and the stream distinguishes
+   * them — so the verb has to travel with the move rather than being inferred
+   * from the target lane. Inferring would collapse `reopen` into whichever lane
+   * it happened to return the task to.
+   */
+  readonly event: EventType;
 }
 
 /**
@@ -64,10 +74,13 @@ function transition(
   plan: (task: Task) => Move,
 ): LifecycleResult {
   const id = requireId(store, idInput);
+  // Before the transaction: resolving the actor spawns two git subprocesses,
+  // and doing that under `BEGIN IMMEDIATE` holds the write lock across both.
+  const actor = store.actor();
 
   return writeTx(store.db, (now) => {
     const task = loadOrThrow(store, id, idInput);
-    const { lane, markClosed, reason } = plan(task);
+    const { lane, markClosed, reason, event } = plan(task);
 
     const { result, unblocked, reblocked } = reportReadinessChange(store, id, () => {
       store.db
@@ -77,6 +90,24 @@ function transition(
         .run(lane, markClosed ? now : null, reason, now, id);
       return loadOrThrow(store, id, idInput);
     });
+
+    // Both lanes travel on the event as well as the verb. `closed` already
+    // implies the destination, but not where the task came from — and "what
+    // was it doing before someone finished it" is a question the stream should
+    // answer without a second lookup.
+    appendEvent(
+      store,
+      {
+        type: event,
+        entityId: id,
+        epicId: epicIdFor(task),
+        actor,
+        fromLane: task.lane,
+        toLane: lane,
+        reason,
+      },
+      now,
+    );
 
     return { task: result, unblocked, reblocked };
   });
@@ -96,7 +127,7 @@ function refuseIfTerminal(task: Task, verb: string): void {
 export function closeTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
   return transition(store, idInput, (task) => {
     refuseIfTerminal(task, "close");
-    return { lane: "Done", markClosed: true, reason: reason ?? null };
+    return { lane: "Done", markClosed: true, reason: reason ?? null, event: "closed" };
   });
 }
 
@@ -110,7 +141,7 @@ export function closeTask(store: OpenStore, idInput: string, reason?: string): L
 export function cancelTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
   return transition(store, idInput, (task) => {
     refuseIfTerminal(task, "cancel");
-    return { lane: "Cancelled", markClosed: true, reason: reason ?? null };
+    return { lane: "Cancelled", markClosed: true, reason: reason ?? null, event: "cancelled" };
   });
 }
 
@@ -147,6 +178,9 @@ export function reopenTask(store: OpenStore, idInput: string, lane?: Lane): Life
         reason: `lane is ${task.lane}`,
       });
     }
-    return { lane: target, markClosed: false, reason: null };
+    // No reason: `reopenTask` has no reason parameter and never had one —
+    // reopening is not a judgement that needs explaining. Adding one here
+    // would be scope this feature does not have.
+    return { lane: target, markClosed: false, reason: null, event: "reopened" };
   });
 }

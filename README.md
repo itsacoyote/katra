@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, and twelve commands over them. Coordination, search, notes, and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, and fourteen commands over them. Coordination, search, and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -41,6 +41,41 @@ kt-x93qjo is now Done
     kt-s3l2m4  task CRUD
 ```
 
+Every write is recorded, so the next session can read what the last one did:
+
+```console
+$ katra update $b --lane "In Progress"
+
+$ katra note add $b --kind handoff --body-file - <<'EOF'
+Storage layer is done. CRUD is scaffolded but the update path
+still needs the reparenting case.
+EOF
+
+$ katra log $b
+2026-08-05 17:31  note-added      kt-s3l2m4  task CRUD  nt-rxqzhj
+2026-08-05 17:31  status-changed  kt-s3l2m4  task CRUD  Planned -> In Progress
+2026-08-05 17:31  created         kt-s3l2m4  task CRUD
+```
+
+`katra show` puts the same thing beside the task, both sections capped so a
+summary stays a summary:
+
+```console
+$ katra show $b
+kt-s3l2m4  task CRUD
+  lane        In Progress
+  epic        kt-34vt8g  core tracker foundation
+  blockers    none
+
+notes (1, newest first — `katra note list` for bodies)
+  nt-rxqzhj  handoff     2026-08-05 17:31  Storage layer is done. CRUD is scaffolded but the updat…
+
+activity (newest first — `katra log` for the rest)
+  2026-08-05 17:31  note-added      nt-rxqzhj
+  2026-08-05 17:31  status-changed  Planned -> In Progress
+  2026-08-05 17:31  created
+```
+
 | Command | What it does |
 | --- | --- |
 | `init` | Create the store for this repository |
@@ -50,12 +85,22 @@ kt-x93qjo is now Done
 | `delete` | Remove a task that should never have existed |
 | `dep` · `link` | Blocking dependencies, and associations that don't block |
 | `next` | The one task that can be started right now |
+| `log` | What has happened — to one task, to an epic and its children, or across the store |
+| `note add` · `note list` | Typed prose on a task: `general`, `handoff`, `decision`, `acceptance` |
 
-Every read takes `--json`. Every refusal names what would unblock it — an ambiguous id lists the candidates, a rejected dependency prints the cycle path, and `next` with nothing ready tells you which tasks are blocked and by what.
+Every read takes `--json`. Every refusal names what would unblock it — an ambiguous id lists the candidates, a rejected dependency prints the cycle path, and `next` with nothing ready tells you whether the work is blocked, untriaged, or simply finished.
+
+### History that outlives the task
+
+Every write records an event in the same transaction as the change itself, so history can never describe something that did not happen. Events are **never deleted**: `katra delete` appends a final `deleted` event carrying the task's title, and `katra log <id>` still answers for a task that no longer exists. Notes are the opposite case and are removed with their task — history survives, content does not ([ADR-008](docs/decisions/ADR-008-events-outlive-their-entities.md)).
+
+Each event and note records who wrote it as `<branch> @ <worktree path>`, so two agents in two worktrees are always distinguishable in the record ([ADR-007](docs/decisions/ADR-007-actor-is-branch-and-worktree.md)).
 
 ## Still to come
 
-`brief` (the context-pack), `board` and the session digest, typed notes, FTS5 search, claims and presence for cross-worktree coordination, external refs with pluggable providers, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
+`brief` (the context-pack), `board` and the session digest, FTS5 search, claims and presence for cross-worktree coordination, external refs with pluggable providers, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
+
+Until `snapshot` lands, the store lives only in your `.git` directory: it is not shareable, not reviewable in a pull request, and does not survive a fresh clone.
 
 ## Install
 
@@ -80,7 +125,7 @@ pnpm test       # vitest
 pnpm check      # lint + typecheck + test — what CI runs
 ```
 
-The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. [`docs/f1-traceability.md`](docs/f1-traceability.md) maps every acceptance criterion to the test that covers it.
+The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. The traceability docs map every acceptance criterion to the test that covers it, and record where coverage is genuinely limited rather than claiming a tick: [`f1`](docs/f1-traceability.md), [`f2`](docs/f2-traceability.md).
 
 ## Migrating from beads
 

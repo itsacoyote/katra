@@ -31,21 +31,28 @@ export type {
   Blocker,
   DeleteResult,
   DependencyResult,
+  EventLog,
   HelpDocument,
   InitResult,
   JsonDocument,
   LifecycleResult,
   LinkResult,
   NextResult,
+  NoteList,
   StoreWarning,
   TaskList,
+  UpdateResult,
   VersionDocument,
 } from "./core/contract.js";
 // The fixed value sets and their derived types.
 export {
+  EVENT_TYPES,
+  type EventType,
+  isEventType,
   isKind,
   isLane,
   isLevel,
+  isNoteKind,
   isPriority,
   isTerminal,
   KINDS,
@@ -54,6 +61,9 @@ export {
   type Lane,
   LEVELS,
   type Level,
+  NOTE_KIND_DEFAULT,
+  NOTE_KINDS,
+  type NoteKind,
   PRIORITIES,
   PRIORITY_DEFAULT,
   PRIORITY_MAX,
@@ -70,6 +80,9 @@ export {
   type KatraErrorDetail,
   KatraException,
 } from "./core/errors.js";
+// The event stream's shapes. `events/types.ts` imports only from `enums.ts`,
+// so it joins the published graph without dragging the storage engine in.
+export type { LoggedEvent, NewEvent, StoredEvent } from "./core/events/types.js";
 // Identity. `resolveId` and `requireId` are not re-exported: they take an
 // `OpenStore`, so publishing them would put the storage handle into the public
 // API through a parameter. `generateId` needs no store and is genuinely usable.
@@ -78,7 +91,12 @@ export {
   ID_PREFIX,
   ID_SUFFIX_LENGTH,
   MIN_PREFIX_LENGTH,
-} from "./core/tasks/id-format.js";
-// The task model: what `add` and `show` print.
-export type { Task, TaskDetail, TaskSummary } from "./core/tasks/types.js";
+  NOTE_ID_PREFIX,
+} from "./core/id-format.js";
+// The note model: what `note add` and `note list` print.
+export type { NewNote, Note, NoteFilters } from "./core/notes/types.js";
+// The task model. `add` prints a Task, `update` a TaskDetail, and `show` a
+// TaskView — the detail plus the notes and activity F2 added. Publishing only
+// the first two left `show --json` with no correct type to read it as.
+export type { Task, TaskDetail, TaskSummary, TaskView } from "./core/tasks/types.js";
 export { VERSION } from "./version.js";

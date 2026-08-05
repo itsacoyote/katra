@@ -54,6 +54,46 @@ export type Lane = (typeof LANES)[number];
 export const TERMINAL_LANES = ["Done", "Cancelled"] as const satisfies readonly Lane[];
 export type TerminalLane = (typeof TERMINAL_LANES)[number];
 
+/**
+ * What an event records.
+ *
+ * Seven, where `docs/katra-spec.md` §5 lists nine. `claimed` and `released`
+ * belong to F4's claims, `ref-linked` and `ref-status-changed` to F5's external
+ * refs — declaring them now would put values into a `CHECK` constraint that
+ * nothing can write, under forward-only migrations that make the mistake
+ * expensive to take back. `deleted` is the one addition the spec's list does
+ * not have, from ADR-008: `delete` appends its own last event.
+ *
+ * The order is the rough order a task's life produces them, not alphabetical —
+ * it is what a reader of the CHECK constraint sees.
+ */
+export const EVENT_TYPES = [
+  "created",
+  "status-changed",
+  "note-added",
+  "closed",
+  "cancelled",
+  "reopened",
+  "deleted",
+] as const;
+export type EventType = (typeof EVENT_TYPES)[number];
+
+/**
+ * What a note is for.
+ *
+ * Distinct from {@link KINDS}, which is a *task's* kind. The two share a word
+ * and nothing else: no value appears in both sets, and their narrowers are
+ * separate on purpose — see `test/core/enums.test.ts`, which pins that.
+ *
+ * `handoff` is the one F3's `brief` reads back to the next agent, which is why
+ * the set is closed rather than free text.
+ */
+export const NOTE_KINDS = ["general", "handoff", "decision", "acceptance"] as const;
+export type NoteKind = (typeof NOTE_KINDS)[number];
+
+/** What a note is when the caller does not say. */
+export const NOTE_KIND_DEFAULT = "general" satisfies NoteKind;
+
 /** Priority, 0 highest. Declared as a set so the type derives like the others. */
 export const PRIORITIES = [0, 1, 2, 3, 4] as const;
 export type Priority = (typeof PRIORITIES)[number];
@@ -80,6 +120,16 @@ export function isLane(value: unknown): value is Lane {
 /** True when `value` is a lane that no longer blocks its dependents. */
 export function isTerminal(value: unknown): value is TerminalLane {
   return typeof value === "string" && (TERMINAL_LANES as readonly string[]).includes(value);
+}
+
+/** True when `value` is one of `EVENT_TYPES`. */
+export function isEventType(value: unknown): value is EventType {
+  return typeof value === "string" && (EVENT_TYPES as readonly string[]).includes(value);
+}
+
+/** True when `value` is one of `NOTE_KINDS`. Not {@link isKind} — see there. */
+export function isNoteKind(value: unknown): value is NoteKind {
+  return typeof value === "string" && (NOTE_KINDS as readonly string[]).includes(value);
 }
 
 /** True when `value` is one of `PRIORITIES`. */

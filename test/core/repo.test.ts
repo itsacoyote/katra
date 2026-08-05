@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isKatraException } from "../../src/core/errors.js";
+import { addDependency } from "../../src/core/graph/deps.js";
+import { closeTask } from "../../src/core/tasks/lifecycle.js";
+import { nextTask } from "../../src/core/tasks/next.js";
 import { createTask, getTask, showTask } from "../../src/core/tasks/repo.js";
 import { seedEpic, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
@@ -199,6 +202,81 @@ describe("showTask", () => {
   it("reports no parent for a top-level task", () => {
     const task = createTask(fixture.store, { title: "orphan" });
     expect(showTask(fixture.store, task.id).parent).toBeNull();
+  });
+
+  it("lists the unfinished dependencies standing in the task's way", () => {
+    // Found by dogfooding: `show` was the only view that never mentioned
+    // dependencies, so a blocked task rendered identically to a startable one
+    // — in the command an agent uses to decide whether to start it.
+    const blocker = createTask(fixture.store, { title: "must land first" });
+    const task = createTask(fixture.store, { title: "waits" });
+    addDependency(fixture.store, task.id, blocker.id);
+
+    expect(showTask(fixture.store, task.id).blockers).toEqual([
+      { id: blocker.id, title: "must land first", lane: "Defined" },
+    ]);
+  });
+
+  it("reports no blockers for a task nothing is holding up", () => {
+    const task = createTask(fixture.store, { title: "free" });
+
+    expect(showTask(fixture.store, task.id).blockers).toEqual([]);
+  });
+
+  it("drops a dependency from blockers once it reaches a terminal lane", () => {
+    // The same set `next` reports. An agent asking `show` whether it can start
+    // something and one asking `next` for something to start must not get
+    // different answers.
+    const blocker = createTask(fixture.store, { title: "must land first" });
+    const task = createTask(fixture.store, { title: "waits" });
+    addDependency(fixture.store, task.id, blocker.id);
+
+    closeTask(fixture.store, blocker.id);
+
+    expect(showTask(fixture.store, task.id).blockers).toEqual([]);
+    // Still a dependency, just no longer in the way — the edge itself survives.
+    expect(showTask(fixture.store, blocker.id).blocking.map((t) => t.id)).toEqual([task.id]);
+  });
+
+  it("agrees with next about what is blocking a task", () => {
+    // The consequence a divergence would actually have: two commands giving
+    // an agent different answers about the same task.
+    const blocker = createTask(fixture.store, { title: "blocker", lane: "Planned" });
+    const task = createTask(fixture.store, { title: "waits", lane: "Planned" });
+    addDependency(fixture.store, task.id, blocker.id);
+
+    const result = nextTask(fixture.store);
+    if (result.status !== "found") throw new Error("unreachable");
+    // `next` hands back the blocker itself; asking `show` about the blocked
+    // task must name that same task as what stands in the way.
+    expect(showTask(fixture.store, task.id).blockers.map((b) => b.id)).toEqual([result.task.id]);
+  });
+
+  it("lists the tasks that finishing this one would release", () => {
+    const blocker = createTask(fixture.store, { title: "the blocker" });
+    const one = createTask(fixture.store, { title: "waits a", priority: 0 });
+    const two = createTask(fixture.store, { title: "waits b", priority: 1 });
+    addDependency(fixture.store, one.id, blocker.id);
+    addDependency(fixture.store, two.id, blocker.id);
+
+    expect(showTask(fixture.store, blocker.id).blocking.map((t) => t.id)).toEqual([one.id, two.id]);
+    expect(showTask(fixture.store, blocker.id).blockers).toEqual([]);
+  });
+
+  it("keeps blockers and blocking distinct rather than reporting the edge twice", () => {
+    // Symmetry would make every dependency look mutual, which is the one thing
+    // a dependency is not.
+    const blocker = createTask(fixture.store, { title: "first" });
+    const task = createTask(fixture.store, { title: "second" });
+    addDependency(fixture.store, task.id, blocker.id);
+
+    const blocked = showTask(fixture.store, task.id);
+    const upstream = showTask(fixture.store, blocker.id);
+
+    expect(blocked.blockers.map((t) => t.id)).toEqual([blocker.id]);
+    expect(blocked.blocking).toEqual([]);
+    expect(upstream.blockers).toEqual([]);
+    expect(upstream.blocking.map((t) => t.id)).toEqual([task.id]);
   });
 
   it("throws not_found for an id that matches nothing", () => {

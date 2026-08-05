@@ -8,7 +8,13 @@
 
 import type { Migration } from "../migrate.js";
 import { migration0001 } from "./0001-init.js";
+import { migration0002 } from "./0002-events-and-notes.js";
 
-export const MIGRATIONS: readonly Migration[] = [migration0001];
+export const MIGRATIONS: readonly Migration[] = [migration0001, migration0002];
 
 export { buildInitDdl, DEFAULT_SCHEMA_SETS, type SchemaSets } from "./0001-init.js";
+export {
+  buildEventsDdl,
+  DEFAULT_EVENT_SETS,
+  type EventSets,
+} from "./0002-events-and-notes.js";

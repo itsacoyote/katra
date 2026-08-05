@@ -143,6 +143,115 @@ describe("writeTx", () => {
     expect(writeTx(db, () => 42)).toBe(42);
   });
 
+  it("takes its timestamp after acquiring the write lock, not before", {
+    timeout: 60_000,
+  }, async () => {
+    // Two processes, one lock. Process 0 grabs it and sits on it; process 1
+    // starts late enough to be certain of queueing behind, and reports both
+    // the instant it *called* writeTx and the timestamp it was handed.
+    //
+    // Passing `nowIso()` as an argument to `.immediate()` evaluates it before
+    // BEGIN IMMEDIATE runs, so the waiter's timestamp would predate its own
+    // wait — the gap collapses to roughly zero and this fails.
+    const path = tempDbPath();
+    const setup = openDatabase(path);
+    setup.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL)");
+    setup.close();
+
+    const holdMs = 600;
+    const startDelayMs = 150;
+
+    const outcomes = await runConcurrent<{ index: number; now: string; calledAt: number }>({
+      count: 2,
+      source: `
+        const { openDatabase, writeTx } = await import(${JSON.stringify(
+          new URL("../../src/core/db/connection.ts", import.meta.url).href,
+        )});
+        barrier();
+        const db = openDatabase(${JSON.stringify(path)});
+        const insert = db.prepare("INSERT INTO t (created_at) VALUES (?)");
+        const spin = (ms) => { const until = Date.now() + ms; while (Date.now() < until) {} };
+
+        if (INDEX === 1) spin(${startDelayMs});
+        const calledAt = Date.now();
+        const now = writeTx(db, (stamp) => {
+          insert.run(stamp);
+          if (INDEX === 0) spin(${holdMs});
+          return stamp;
+        });
+        db.close();
+        report({ index: INDEX, now, calledAt });
+      `,
+    });
+
+    expect(outcomes.map((o) => o.stderr).join("")).toBe("");
+    const results = outcomes.map((o) => o.value).filter((v) => v !== undefined);
+    expect(results).toHaveLength(2);
+
+    const waiter = results.find((r) => r.index === 1);
+    if (waiter === undefined) throw new Error("unreachable");
+
+    // It waited out most of the holder's 600ms; its timestamp must reflect
+    // when it got the lock, not when it asked for it. Half the hold is a
+    // generous floor — the real gap is ~450ms.
+    expect(Date.parse(waiter.now) - waiter.calledAt).toBeGreaterThan(holdMs / 2);
+  });
+
+  it("orders timestamps the same way it orders commits under contention", {
+    timeout: 60_000,
+  }, async () => {
+    // Requirement 7 leans on the event id being a total order. A reader
+    // comparing ids against timestamps must not see inversions, so rowid order
+    // — which is lock-acquisition order, hence commit order — has to yield
+    // non-decreasing created_at.
+    //
+    // Each transaction holds the lock for a few milliseconds so a queued
+    // writer's wait exceeds timestamp resolution. Without that, every write
+    // lands inside one millisecond and an inversion cannot be observed.
+    const path = tempDbPath();
+    const setup = openDatabase(path);
+    setup.exec("CREATE TABLE t (id INTEGER PRIMARY KEY, created_at TEXT NOT NULL)");
+    setup.close();
+
+    const outcomes = await runConcurrent<{ ok: number }>({
+      count: 6,
+      source: `
+        const { openDatabase, writeTx } = await import(${JSON.stringify(
+          new URL("../../src/core/db/connection.ts", import.meta.url).href,
+        )});
+        barrier();
+        const db = openDatabase(${JSON.stringify(path)});
+        const insert = db.prepare("INSERT INTO t (created_at) VALUES (?)");
+        let ok = 0;
+        for (let i = 0; i < 25; i++) {
+          writeTx(db, (stamp) => {
+            insert.run(stamp);
+            const until = Date.now() + 3;
+            while (Date.now() < until) {}
+          });
+          ok++;
+        }
+        db.close();
+        report({ ok });
+      `,
+    });
+
+    expect(outcomes.every((o) => o.ok)).toBe(true);
+    expect(outcomes.map((o) => o.value?.ok)).toEqual([25, 25, 25, 25, 25, 25]);
+
+    const verify = openDatabase(path);
+    const stamps = verify.prepare("SELECT created_at FROM t ORDER BY id").all() as Array<{
+      created_at: string;
+    }>;
+    verify.close();
+
+    expect(stamps).toHaveLength(150);
+    const inversions = stamps.filter(
+      (row, index) => index > 0 && row.created_at < (stamps[index - 1]?.created_at ?? ""),
+    );
+    expect(inversions).toEqual([]);
+  });
+
   it("completes all writes from six concurrent processes with no SQLITE_BUSY", {
     timeout: 60_000,
   }, async () => {

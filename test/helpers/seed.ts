@@ -12,7 +12,7 @@
  * that violates the model fails as loudly as production code would.
  */
 
-import type { Kind, Lane, Level, Priority } from "../../src/core/enums.js";
+import type { EventType, Kind, Lane, Level, NoteKind, Priority } from "../../src/core/enums.js";
 import { isTerminal } from "../../src/core/enums.js";
 import type { OpenStore } from "../../src/core/store.js";
 
@@ -132,4 +132,76 @@ export function seedMany(store: OpenStore, count: number, input: SeedTaskInput =
   });
   insert.immediate();
   return ids;
+}
+
+export interface SeedEventInput {
+  readonly type?: EventType;
+  readonly entityId?: string;
+  readonly epicId?: string | null;
+  readonly actor?: string;
+  readonly fromLane?: Lane | null;
+  readonly toLane?: Lane | null;
+  readonly ref?: string | null;
+  readonly reason?: string | null;
+  readonly title?: string | null;
+  readonly createdAt?: string;
+}
+
+/** A stable actor for seeded rows, shaped like a real one (ADR-007). */
+export const SEED_ACTOR = "main @ /repo/seed";
+
+/** Appends one event and returns its integer id. */
+export function seedEvent(store: OpenStore, input: SeedEventInput = {}): number {
+  const info = store.db
+    .prepare(
+      `INSERT INTO events
+         (type, entity_id, epic_id, actor, from_lane, to_lane, ref, reason, title, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+    )
+    .run(
+      input.type ?? "created",
+      input.entityId ?? seedId(),
+      input.epicId ?? null,
+      input.actor ?? SEED_ACTOR,
+      input.fromLane ?? null,
+      input.toLane ?? null,
+      input.ref ?? null,
+      input.reason ?? null,
+      input.title ?? null,
+      input.createdAt ?? seedTime(),
+    );
+  return Number(info.lastInsertRowid);
+}
+
+export interface SeedNoteInput {
+  readonly id?: string;
+  readonly taskId: string;
+  readonly kind?: NoteKind;
+  readonly body?: string;
+  readonly actor?: string;
+  readonly createdAt?: string;
+}
+
+let noteCounter = 0;
+
+/** Sequential, collision-free note ids for seeded rows. */
+export function seedNoteId(): string {
+  noteCounter += 1;
+  return `nt-s${String(noteCounter).padStart(5, "0")}`;
+}
+
+/** Inserts one note and returns its id. */
+export function seedNote(store: OpenStore, input: SeedNoteInput): string {
+  const id = input.id ?? seedNoteId();
+  store.db
+    .prepare("INSERT INTO notes (id, task_id, kind, body, actor, created_at) VALUES (?,?,?,?,?,?)")
+    .run(
+      id,
+      input.taskId,
+      input.kind ?? "general",
+      input.body ?? "a seeded note",
+      input.actor ?? SEED_ACTOR,
+      input.createdAt ?? seedTime(),
+    );
+  return id;
 }

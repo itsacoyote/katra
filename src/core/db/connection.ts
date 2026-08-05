@@ -113,10 +113,17 @@ export function openDatabase(dbPath: string): DatabaseHandle {
  *
  * The callback receives the transaction's timestamp so every row written
  * together shares one value rather than drifting by a millisecond mid-write.
+ *
+ * That timestamp is taken **inside** the callback, where the write lock is
+ * already held. Passing `nowIso()` as an argument to `.immediate()` reads the
+ * clock before `BEGIN IMMEDIATE` has even attempted the lock, so a writer that
+ * then queues behind another commits later while carrying an earlier stamp —
+ * `created_at` order stops agreeing with commit order. Nothing in F1 depended
+ * on the two agreeing; the event stream does.
  */
 export function writeTx<T>(db: DatabaseHandle, fn: (now: string) => T): T {
-  const runner = db.transaction((now: string) => fn(now));
-  return runner.immediate(nowIso());
+  const runner = db.transaction(() => fn(nowIso()));
+  return runner.immediate();
 }
 
 export type { DatabaseHandle };

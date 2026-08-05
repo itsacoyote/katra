@@ -19,7 +19,13 @@ export interface StoreOutcome<T> {
 
 /** Runs `fn` against the repository's store. */
 export function withStore<T>(context: CliContext, fn: (store: OpenStore) => T): StoreOutcome<T> {
-  const { store, warnings } = openStore(context.cwd, { env: context.env });
+  // The context's resolver, not a fresh one: it is memoised per invocation, so
+  // a command that opens the store and writes several events resolves the
+  // actor exactly once.
+  const { store, warnings } = openStore(context.cwd, {
+    env: context.env,
+    actor: context.actor,
+  });
   try {
     return { result: fn(store), warnings };
   } finally {

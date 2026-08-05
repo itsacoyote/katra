@@ -7,6 +7,7 @@
  */
 
 import { Command, CommanderError, type Option } from "commander";
+import { createActorResolver } from "../core/actor.js";
 import type { HelpDocument, VersionDocument } from "../core/contract.js";
 import { KatraException } from "../core/errors.js";
 import { VERSION } from "../version.js";
@@ -18,7 +19,9 @@ import { registerInit } from "./commands/init.js";
 import { registerLifecycle } from "./commands/lifecycle.js";
 import { registerLink } from "./commands/link.js";
 import { registerList } from "./commands/list.js";
+import { registerLog } from "./commands/log.js";
 import { registerNext } from "./commands/next.js";
+import { registerNote } from "./commands/note.js";
 import { registerShow } from "./commands/show.js";
 import { registerUpdate } from "./commands/update.js";
 import type { OutputStreams } from "./output.js";
@@ -34,6 +37,15 @@ export interface CliContext {
    * stdin, which would block rather than fail.
    */
   readonly readStdin: () => string | undefined;
+  /**
+   * Who is writing: `<branch> @ <worktree path>`, per ADR-007.
+   *
+   * A function, not a value, because resolving it costs two subprocess spawns
+   * and only write commands need it — `list` and `show` must not pay for an
+   * actor they never stamp. Memoised per context, so a command writing several
+   * events resolves once.
+   */
+  readonly actor: () => string;
   /**
    * Requests a non-zero exit without raising an error.
    *
@@ -90,11 +102,27 @@ function valueTakingFlags(argv: readonly string[], program: Command): ReadonlySe
 
   collect(program.options);
 
-  // The first bare token is the subcommand: katra's only program-level options
-  // are `-v`/`--version` and `--help`, neither of which takes a value.
-  const name = argv.find((token) => !token.startsWith("-"));
-  const command = program.commands.find((candidate) => candidate.name() === name);
-  if (command !== undefined) collect(command.options);
+  // Walked down the tree, not looked up once. With `note add`, `--kind` and
+  // `--body-file` are declared on the *child*, so reading only `note`'s
+  // options would report them as not-value-taking — and `wantsJson` would
+  // misparse `note add --kind --json` exactly the way a flat set misparsed
+  // `update --tag --json`.
+  //
+  // A superset of the single lookup it replaces: with no subcommands the loop
+  // stops at the same place, after the first level.
+  let current = program;
+  for (const token of argv) {
+    // The first bare token names a command; katra's only program-level options
+    // are `-v`/`--version` and `--help`, neither of which takes a value.
+    if (token.startsWith("-")) continue;
+    const child = current.commands.find((candidate) => candidate.name() === token);
+    // Not a subcommand, so it is this command's argument — and so is
+    // everything after it. Stopping here is what keeps `log kt-abc` from
+    // hunting for a subcommand called `kt-abc`.
+    if (child === undefined) break;
+    collect(child.options);
+    current = child;
+  }
 
   return flags;
 }
@@ -127,11 +155,18 @@ export function wantsJson(argv: readonly string[], program: Command): boolean {
 
 /** Builds the program. Registering a command is a one-line call per module. */
 export function createProgram(options: CreateProgramOptions = {}): Command {
+  const cwd = options.cwd ?? process.cwd();
+  const env = options.env ?? process.env;
+
   const context: CliContext = {
-    cwd: options.cwd ?? process.cwd(),
+    cwd,
     streams: options.streams ?? processStreams,
-    env: options.env ?? process.env,
+    env,
     readStdin: options.readStdin ?? readPipedStdin,
+    // Built here rather than at module scope: this function runs once per
+    // invocation, and once per test inside a single worker process. A shared
+    // cache would leak one test's branch into the next one's assertions.
+    actor: createActorResolver({ cwd, env }),
     setExitCode: options.onExitCode ?? (() => undefined),
   };
 
@@ -173,6 +208,8 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerLifecycle(program, context);
   registerLink(program, context);
   registerDelete(program, context);
+  registerLog(program, context);
+  registerNote(program, context);
   registerNext(program, context);
 
   return program;

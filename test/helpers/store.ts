@@ -18,10 +18,25 @@ export interface StoreFixture {
   cleanup(): void;
 }
 
+export interface StoreFixtureOptions {
+  /**
+   * A fixed actor, for tests that assert on who wrote something.
+   *
+   * Without it the real resolver runs against the temp repository and produces
+   * `main @ /tmp/katra-repo-xxxxx` — correct, but not something an assertion
+   * can name.
+   */
+  readonly actor?: string;
+}
+
 /** Creates a repository with an initialised, migrated katra store. */
-export function createStoreFixture(): StoreFixture {
+export function createStoreFixture(options: StoreFixtureOptions = {}): StoreFixture {
   const repo = createGitRepo();
-  const { store } = openStore(repo.dir, { createIfMissing: true });
+  const { actor } = options;
+  const { store } = openStore(repo.dir, {
+    createIfMissing: true,
+    ...(actor === undefined ? {} : { actor: () => actor }),
+  });
 
   return {
     store,

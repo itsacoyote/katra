@@ -11,9 +11,10 @@
 import type { TaskList } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import type { Kind, Lane, Level, Priority } from "../enums.js";
-import { isTerminal, PRIORITY_DEFAULT } from "../enums.js";
+import { isTerminal, PRIORITY_DEFAULT, sqlEnum, TERMINAL_LANES } from "../enums.js";
 import { KatraException } from "../errors.js";
-import { READINESS_VIEW } from "../graph/deps.js";
+import { appendEvent, epicIdFor } from "../events/repo.js";
+import { listBlockers, listDependents, READINESS_VIEW } from "../graph/deps.js";
 import { listLinks } from "../graph/links.js";
 import {
   narrowKind,
@@ -160,6 +161,14 @@ export function createTask(store: OpenStore, input: NewTask): Task {
     });
   }
 
+  // Resolved *before* the transaction opens. The resolver is lazy, so the
+  // first call in a process is where two git subprocesses actually spawn —
+  // and inside `writeTx` that happens with the exclusive write lock held,
+  // widening the lock window by a PATH walk plus two process spawns on every
+  // write command. See `actor.ts`, which states this rule and was not being
+  // honoured by any of the five write paths.
+  const actor = store.actor();
+
   const id = writeTx(store.db, (now) => {
     // Resolved inside the transaction, so a partial parent id is accepted and
     // a bad one is refused by name rather than by the trigger backing the same
@@ -172,7 +181,7 @@ export function createTask(store: OpenStore, input: NewTask): Task {
         ? null
         : requireEpicId(store, input.parentId);
 
-    return insertWithRetry((candidate) => {
+    const created = insertWithRetry((candidate) => {
       store.db
         .prepare(
           `INSERT INTO tasks
@@ -200,6 +209,27 @@ export function createTask(store: OpenStore, input: NewTask): Task {
         if (trimmed !== "") addTag.run(candidate, trimmed);
       }
     });
+
+    // After `insertWithRetry`, not inside its callback: the callback is retried
+    // on a primary-key collision, and an append that ever raised one would make
+    // the retry re-run the task insert too.
+    //
+    // The title is stamped onto the event because a `created` event outlives
+    // its task (ADR-008) — once the row is deleted, no join can recover what it
+    // was called.
+    appendEvent(
+      store,
+      {
+        type: "created",
+        entityId: created,
+        epicId: epicIdFor({ id: created, level, parentId }),
+        actor,
+        title,
+      },
+      now,
+    );
+
+    return created;
   });
 
   const created = getTask(store, id);
@@ -241,6 +271,11 @@ export function showTaskWithin(store: OpenStore, id: string): TaskDetail {
     task,
     parent: task.parentId === null ? null : summariseById(store, task.parentId),
     links: listLinks(store, id),
+    // `show` is where an agent decides whether to start something, and it was
+    // the only view that never mentioned dependencies — a blocked task
+    // rendered identically to a startable one.
+    blockers: listBlockers(store, id),
+    blocking: listDependents(store, id),
   };
 }
 
@@ -256,6 +291,17 @@ export interface TaskFilters {
   readonly priority?: Priority;
   /** true keeps only ready tasks, false only blocked ones. */
   readonly ready?: boolean;
+  /**
+   * Return at most this many, keeping the highest-ranked.
+   *
+   * Optional and **unbounded by default**, unlike the event reads. The two
+   * tables grow differently: events are append-only and never pruned, so an
+   * unbounded read there grows for the life of the repository, while tasks are
+   * bounded by how much work exists and `list` is usually filtered. A default
+   * cap here would also have to report that it truncated, and a caller who
+   * asked for a limit already knows.
+   */
+  readonly limit?: number;
 }
 
 export type { TaskList };
@@ -290,7 +336,29 @@ export function listTasks(store: OpenStore, filters: TaskFilters = {}): TaskList
   if (filters.epic !== undefined) eq("t.parent_id", filters.epic);
   if (filters.assignee !== undefined) eq("t.assignee", filters.assignee);
   if (filters.priority !== undefined) eq("t.priority", filters.priority);
-  if (filters.ready !== undefined) eq("r.is_ready", filters.ready ? 1 : 0);
+  if (filters.ready !== undefined) {
+    eq("r.is_ready", filters.ready ? 1 : 0);
+    // `--ready` and `--blocked` ask about *startable work*, and an epic is a
+    // container rather than something anyone picks up. An epic has no
+    // dependencies of its own, so it satisfies readiness trivially and sorts
+    // to the top by priority — which is how the F2 epic came back as the first
+    // answer to "what can I start?".
+    //
+    // An explicit `--level` wins, so `--ready --level epic` still asks the
+    // literal question. Excluding epics outright would make that combination
+    // return nothing, always, with no way to tell an empty answer from a
+    // suppressed one.
+    if (filters.level === undefined) eq("t.level", "task");
+
+    // Finished and abandoned work is excluded for the same reason, and it is
+    // the larger half of the problem: a `Done` task has no unfinished
+    // dependencies either, so a mature backlog answers "what can I start?"
+    // with everything it has ever completed. An explicit `--lane` wins here
+    // too, so `--ready --lane Done` still asks the literal question.
+    if (filters.lane === undefined) {
+      conditions.push(`t.lane NOT IN (${sqlEnum(TERMINAL_LANES)})`);
+    }
+  }
   if (filters.tag !== undefined) {
     conditions.push("EXISTS (SELECT 1 FROM tags g WHERE g.task_id = t.id AND g.tag = ?)");
     params.push(filters.tag);
@@ -300,12 +368,26 @@ export function listTasks(store: OpenStore, filters: TaskFilters = {}): TaskList
 
   // rowid breaks the remaining tie: two rows written in the same millisecond
   // are routine, and without it their order would be arbitrary.
+  // A limit of 0 is a real answer — "show me none" — so it must reach the
+  // query rather than being folded into the unbounded case by a falsy check.
+  const bounded = filters.limit !== undefined;
+  if (bounded && (!Number.isInteger(filters.limit) || (filters.limit ?? 0) < 0)) {
+    throw new KatraException({
+      code: "validation",
+      message: `--limit must be a whole number of tasks, not ${JSON.stringify(filters.limit)}`,
+      field: "limit",
+      value: filters.limit,
+    });
+  }
+  if (bounded) params.push(filters.limit);
+
   const rows = store.db
     .prepare(
       `SELECT t.* FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
        ${where}
-       ORDER BY t.priority, t.created_at, t.rowid`,
+       ORDER BY t.priority, t.created_at, t.rowid
+       ${bounded ? "LIMIT ?" : ""}`,
     )
     .all(...params) as TaskRow[];
 

@@ -8,9 +8,9 @@ Instructions for AI coding agents working **on the katra repository**. This is t
 
 A local, git-native, agent-first project manager and coordination layer for AI coding sessions across git worktrees. Read [`docs/katra-spec.md`](docs/katra-spec.md) before doing anything substantial — it is the settled design, including rationale.
 
-**Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, and twelve commands over them (`init add show list update close cancel reopen delete dep link next`). Everything else in the spec is not: `brief`, `board`, typed notes, FTS5 search, claims and presence, external refs, snapshots, and the beads converter. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
+**Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, an append-only event stream, typed notes, and fourteen commands over them (`init add show list update close cancel reopen delete dep link next log note`). Everything else in the spec is not: `brief`, `board`, FTS5 search, claims and presence, external refs, snapshots, and the beads converter. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
 
-Six decisions in the spec were superseded during implementation; the ADRs in `docs/decisions/` win where they disagree.
+Eight decisions in the spec were superseded or refined during implementation; the ADRs in `docs/decisions/` win where they disagree.
 
 ## Project layout
 
@@ -42,9 +42,17 @@ test/fixtures/          golden files (the committed schema snapshot)
 docs/                   spec, ADRs, design notes
 ```
 
-**Nesting rule:** `core/db/*` is storage mechanics · `core/tasks/*` and the
-task-relationship modules are domain logic · `core/{enums,errors,clock,store}.ts`
+**Nesting rule:** `core/db/*` is storage mechanics · `core/tasks/*`,
+`core/events/*`, `core/notes/*` and the task-relationship modules are domain
+logic, one directory per entity · `core/{enums,errors,clock,store,actor,git,id-format}.ts`
 are shared roots. Tests live under `test/` mirroring `src/`, not colocated.
+
+An entity directory holds `types.ts` (the shapes, importing nothing that
+touches the database) and `repo.ts` (the reads and writes). Anything composing
+*several* entities goes one level up rather than into either — `tasks/view.ts`
+assembles a task with its notes and events for exactly that reason, since
+`notes/repo.ts` already imports from `tasks/repo.ts` and reaching back would
+make the two mutually dependent.
 
 ## Commands
 
@@ -76,8 +84,13 @@ These come from the spec and are not open for re-litigation in a PR:
 - **Library core, thin CLI wrapper.** Logic in the core; `cli.ts` only parses args, calls the core, and formats output.
 - **`--json` on every read command.** Agents are the primary reader; parsing formatted text is where silent misreads happen.
 - **Exit codes distinguish a refusal from a fault.** 0 ok · 1 refused · 2 malformed invocation · 3 state conflict · 4 katra broke ([ADR-005](docs/decisions/ADR-005-internal-fault-exit-code.md)). An agent branches on these, so 1 must never mean "retry later" — which is why `next` exits 0 even when nothing is ready ([ADR-006](docs/decisions/ADR-006-next-exits-zero.md)) and puts the answer in the payload.
-- **Nothing published from `src/index.ts` may reach the storage engine.** Declarations are emitted per file, so a type re-exported there drags its whole import graph into the shipped `.d.ts` — and `@types/better-sqlite3` is a devDependency. `core/contract.ts` and `core/tasks/id-format.ts` exist to hold the store-free half; `test/index.test.ts` walks the graph and fails on a regression.
+- **Nothing published from `src/index.ts` may reach the storage engine.** Declarations are emitted per file, so a type re-exported there drags its whole import graph into the shipped `.d.ts` — and `@types/better-sqlite3` is a devDependency. `core/contract.ts` and `core/id-format.ts` exist to hold the store-free half, and `core/{enums,errors}.ts`, `core/{tasks,events,notes}/types.ts` are store-free for the same reason; `test/index.test.ts` walks the graph and fails on a regression.
 - **Bodies via `--body-file`**, never inline args; `--body-file -` reads stdin. Bare stdin is *not* consulted — consuming whatever sits on fd 0 made every shell redirect a silent overwrite.
+- **`src/core/git.ts` is the only module that spawns a process.** `findGit` resolves the binary to an *absolute* path and skips relative `PATH` entries: on Windows libuv resolves a bare program name from the current directory before `PATH`, so a repository shipping `git.exe` would otherwise be executed by every command. `test/core/git.test.ts` fails if a second spawn site appears anywhere under `src/`.
+- **Resolve the actor *before* opening a write transaction.** It costs two subprocess spawns, and doing that under `BEGIN IMMEDIATE` holds the exclusive write lock across both. The resolver is lazy, so the first write in a process is where it fires; every write path forces it first and a test asserts `db.inTransaction` is false when it runs.
+- **`appendEvent` runs inside the caller's transaction and opens none of its own** — it throws if there is no transaction. An entity change and the event recording it commit together or not at all. Note that wrapping it in its own transaction does *not* break that: better-sqlite3 turns a nested transaction into a savepoint, so the obvious mutation proves nothing.
+- **Every stored string rendered to a terminal goes through a sanitizer.** `oneLine` for single-line fields, `sanitizeBody` for multi-line ones (it keeps newlines and tabs). Both strip C0/C1 controls and bidirectional overrides — notes and descriptions are where fetched content and model output land, and `--json` is the verbatim path because its consumer is not a terminal.
+- **A bounded read reports that it truncated.** `log` and `show` cap their output and carry a flag saying so; `list` is unbounded precisely because a default cap would owe that report. A bound that cannot report itself is indistinguishable from the end of the data.
 - **Rich blocked feedback.** A refused claim says *why* and *what unblocks it* — never a silent refusal.
 - **TypeScript strictness stays on** (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`). Prefer `unknown` over `any`, `satisfies` over `as`, derived types over duplicated ones, discriminated unions with `never` exhaustiveness checks.
 - **Formatting is Biome's job.** Run `pnpm lint:fix`; don't hand-format.
@@ -93,8 +106,8 @@ Don't invent values for these — they're fixed sets, deliberately:
 - **Every write transaction uses `BEGIN IMMEDIATE`** (`db.transaction(fn).immediate()`). Measured: the deferred default loses ~33% of writes to `SQLITE_BUSY` under six concurrent processes, and `busy_timeout` does not save it. This also closes the cycle-detection TOCTOU race.
 - **Level:** `epic | task`
 - **Kind** (mirrors Conventional Commits): `feat | fix | refactor | perf | docs | test | chore`
-- **Note kinds:** `general | decision | handoff | acceptance`
-- **Event types:** `created`, `claimed`, `released`, `status-changed`, `note-added`, `ref-linked`, `ref-status-changed`, `closed`, `reopened`
+- **Note kinds:** `general | handoff | decision | acceptance`
+- **Event types, as implemented:** `created`, `status-changed`, `note-added`, `closed`, `cancelled`, `reopened`, `deleted`. Seven, not the spec's nine: `claimed`/`released` arrive with F4's claims and `ref-linked`/`ref-status-changed` with F5's external refs. Declaring a value the code cannot write would put it in a `CHECK` constraint under forward-only migrations, which is expensive to take back. `deleted` is the addition the spec's list does not have, from ADR-008 — `delete` appends its own last event.
 
 ## Commits
 
