@@ -45,7 +45,45 @@ export interface TaskPatch {
  * commit message stays valid.
  */
 export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch): TaskDetail {
-  const id = requireId(store, idInput);
+  const [only] = updateTasks(store, [idInput], patch);
+  if (only === undefined) {
+    throw new KatraException({
+      code: "internal",
+      message: `updating ${idInput} returned no task`,
+    });
+  }
+  return only;
+}
+
+/**
+ * Applies one patch to several tasks, in a single transaction.
+ *
+ * **All or nothing.** If any id is unresolvable, already terminal, or refused
+ * for any other reason, none of the batch is written. A partially-applied bulk
+ * edit is the worst outcome: the caller is told it failed while some of the
+ * change survives, and there is no way to tell which half.
+ *
+ * Ids are resolved *before* the transaction opens, matching the single-task
+ * path and keeping the write-lock window to the writes themselves. A task
+ * deleted between resolution and the transaction is caught inside it, where
+ * the whole batch rolls back.
+ *
+ * Duplicates collapse: naming the same task twice is a request to patch it, not
+ * to patch it twice.
+ */
+export function updateTasks(
+  store: OpenStore,
+  idInputs: readonly string[],
+  patch: TaskPatch,
+): TaskDetail[] {
+  if (idInputs.length === 0) {
+    throw new KatraException({
+      code: "validation",
+      message: "update needs at least one task id",
+      field: "id",
+      value: idInputs,
+    });
+  }
 
   if (patch.lane !== undefined && isTerminal(patch.lane)) {
     throw new KatraException({
@@ -58,7 +96,31 @@ export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch):
     });
   }
 
-  return writeTx(store.db, (now) => {
+  // Resolved before the transaction, and deduped: naming one task twice is a
+  // request to patch it, not to patch it twice.
+  const resolved = new Map<string, string>();
+  for (const input of idInputs) resolved.set(requireId(store, input), input);
+
+  return writeTx(store.db, (now) =>
+    [...resolved].map(([id, idInput]) => applyPatch(store, id, idInput, patch, now)),
+  );
+}
+
+/**
+ * The write itself, for one task, inside an already-open transaction.
+ *
+ * Split from {@link updateTasks} so a batch shares one transaction rather than
+ * opening one per task — which would let a later failure leave earlier tasks
+ * already committed.
+ */
+function applyPatch(
+  store: OpenStore,
+  id: string,
+  idInput: string,
+  patch: TaskPatch,
+  now: string,
+): TaskDetail {
+  {
     // Loaded and guarded inside the transaction. Outside it, another worktree
     // could close the task between this check and the UPDATE below, and the
     // write — which never touches closed_at — would leave an active lane
@@ -179,5 +241,5 @@ export function updateTask(store: OpenStore, idInput: string, patch: TaskPatch):
     // a window where the printed answer was a concurrent writer's state rather
     // than the result of this update.
     return showTaskWithin(store, id);
-  });
+  }
 }

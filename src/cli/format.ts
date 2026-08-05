@@ -94,3 +94,20 @@ export function formatTaskList(tasks: readonly Task[]): string {
     )
     .join("\n");
 }
+
+/**
+ * A bulk update's result: one line per task, no repeated field block.
+ *
+ * The single-task case still prints the full detail — one task is worth seeing
+ * in full. Ten are not: triaging seven tasks used to emit seventy-seven lines
+ * of field blocks whose content the caller had just supplied.
+ */
+export function formatUpdatedTasks(tasks: readonly TaskDetail[]): string {
+  if (tasks.length === 0) return "no tasks updated";
+
+  const width = tasks.reduce((widest, { task }) => Math.max(widest, task.lane.length), 0);
+  return [
+    `updated ${tasks.length} tasks`,
+    ...tasks.map(({ task }) => `  ${task.id}  ${task.lane.padEnd(width)}  ${task.title}`),
+  ].join("\n");
+}

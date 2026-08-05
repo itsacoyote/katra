@@ -283,6 +283,17 @@ export interface TaskFilters {
   readonly priority?: Priority;
   /** true keeps only ready tasks, false only blocked ones. */
   readonly ready?: boolean;
+  /**
+   * Return at most this many, keeping the highest-ranked.
+   *
+   * Optional and **unbounded by default**, unlike the event reads. The two
+   * tables grow differently: events are append-only and never pruned, so an
+   * unbounded read there grows for the life of the repository, while tasks are
+   * bounded by how much work exists and `list` is usually filtered. A default
+   * cap here would also have to report that it truncated, and a caller who
+   * asked for a limit already knows.
+   */
+  readonly limit?: number;
 }
 
 export type { TaskList };
@@ -327,12 +338,26 @@ export function listTasks(store: OpenStore, filters: TaskFilters = {}): TaskList
 
   // rowid breaks the remaining tie: two rows written in the same millisecond
   // are routine, and without it their order would be arbitrary.
+  // A limit of 0 is a real answer — "show me none" — so it must reach the
+  // query rather than being folded into the unbounded case by a falsy check.
+  const bounded = filters.limit !== undefined;
+  if (bounded && (!Number.isInteger(filters.limit) || (filters.limit ?? 0) < 0)) {
+    throw new KatraException({
+      code: "validation",
+      message: `--limit must be a whole number of tasks, not ${JSON.stringify(filters.limit)}`,
+      field: "limit",
+      value: filters.limit,
+    });
+  }
+  if (bounded) params.push(filters.limit);
+
   const rows = store.db
     .prepare(
       `SELECT t.* FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
        ${where}
-       ORDER BY t.priority, t.created_at, t.rowid`,
+       ORDER BY t.priority, t.created_at, t.rowid
+       ${bounded ? "LIMIT ?" : ""}`,
     )
     .all(...params) as TaskRow[];
 

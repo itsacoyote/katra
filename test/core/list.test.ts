@@ -198,3 +198,55 @@ describe("listTasks", () => {
     expect(listTasks(fixture.store).tasks[0]?.tags).toEqual(["a", "b"]);
   });
 });
+
+describe("listTasks --limit", () => {
+  it("returns at most the requested number, keeping the highest-ranked", () => {
+    seedTask(fixture.store, { title: "first", priority: 0 });
+    seedTask(fixture.store, { title: "second", priority: 1 });
+    seedTask(fixture.store, { title: "third", priority: 2 });
+
+    expect(titles(listTasks(fixture.store, { limit: 2 }))).toEqual(["first", "second"]);
+  });
+
+  it("bounds the result after filtering, not before", () => {
+    // A limit applied first would return two rows and then filter them down to
+    // one, so `--lane Planned --limit 2` could hand back a single task while
+    // more matched.
+    seedTask(fixture.store, { title: "wrong lane", lane: "Defined", priority: 0 });
+    seedTask(fixture.store, { title: "a", lane: "Planned", priority: 1 });
+    seedTask(fixture.store, { title: "b", lane: "Planned", priority: 2 });
+
+    expect(titles(listTasks(fixture.store, { lane: "Planned", limit: 2 }))).toEqual(["a", "b"]);
+  });
+
+  it("returns everything when no limit is given", () => {
+    // Unbounded by default, unlike the event reads: tasks are bounded by how
+    // much work exists, and a default cap would have to report truncation.
+    for (let i = 0; i < 30; i++) seedTask(fixture.store, { title: `t${i}` });
+
+    expect(listTasks(fixture.store).tasks).toHaveLength(30);
+  });
+
+  it("treats a limit of zero as a real answer rather than as unbounded", () => {
+    // The falsy-check bug this exists to prevent: `if (limit)` folds 0 into
+    // the no-limit branch and returns the entire backlog for a request that
+    // asked for none of it.
+    seedTask(fixture.store, { title: "one" });
+
+    expect(listTasks(fixture.store, { limit: 0 }).tasks).toEqual([]);
+  });
+
+  it("refuses a limit that is not a whole count", () => {
+    expect(() => listTasks(fixture.store, { limit: -1 })).toThrowError(/whole number/);
+    expect(() => listTasks(fixture.store, { limit: 2.5 })).toThrowError(/whole number/);
+  });
+
+  it("does not bound the ready and blocked halves differently", () => {
+    const blocker = seedTask(fixture.store, { title: "blocker", priority: 0 });
+    const blocked = seedTask(fixture.store, { title: "blocked", priority: 1 });
+    seedDep(fixture.store, blocked, blocker);
+
+    expect(titles(listTasks(fixture.store, { ready: true, limit: 1 }))).toEqual(["blocker"]);
+    expect(titles(listTasks(fixture.store, { ready: false, limit: 1 }))).toEqual(["blocked"]);
+  });
+});

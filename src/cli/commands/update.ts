@@ -5,9 +5,9 @@
 import type { Command } from "commander";
 import { narrowKind, narrowLane, narrowPriority } from "../../core/narrow.js";
 import type { TaskPatch } from "../../core/tasks/update.js";
-import { updateTask } from "../../core/tasks/update.js";
+import { updateTasks } from "../../core/tasks/update.js";
 import { readBody } from "../body.js";
-import { formatTaskDetail } from "../format.js";
+import { formatTaskDetail, formatUpdatedTasks } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
@@ -32,7 +32,7 @@ const collect = (value: string, previous: string[] = []): string[] => [...previo
 export function registerUpdate(program: Command, context: CliContext): void {
   program
     .command("update")
-    .argument("<id>", "full or partial task id")
+    .argument("<ids...>", "one or more full or partial task ids")
     .description("change a task's fields")
     .option("--title <title>", "new title")
     .option("--lane <lane>", "move to a lane; use close or cancel to finish or abandon")
@@ -46,7 +46,7 @@ export function registerUpdate(program: Command, context: CliContext): void {
     .option("--add-tag <tag>", "add a tag; repeatable", collect)
     .option("--remove-tag <tag>", "remove a tag; repeatable", collect)
     .option("--json", "emit structured output")
-    .action((id: string, options: UpdateOptions) => {
+    .action((ids: string[], options: UpdateOptions) => {
       const description = readBody({
         bodyFile: options.bodyFile,
         cwd: context.cwd,
@@ -73,15 +73,23 @@ export function registerUpdate(program: Command, context: CliContext): void {
         ...(options.removeTag === undefined ? {} : { removeTags: options.removeTag }),
       };
 
-      // updateTask returns the same detail `show` prints, read inside its own
+      // updateTasks returns the same details `show` prints, read inside one
       // transaction — so the output is this update's result, not whatever a
-      // concurrent writer left behind a moment later.
-      const { result, warnings } = withStore(context, (store) => updateTask(store, id, patch));
+      // concurrent writer left behind a moment later. Several ids share that
+      // transaction, so a bulk edit is all-or-nothing.
+      const { result, warnings } = withStore(context, (store) => updateTasks(store, ids, patch));
 
+      // The JSON shape does not depend on how many ids were given: a script
+      // passing a variable-length list must not get a different document back
+      // depending on how many matched. Human output does adapt — one task is
+      // worth seeing in full, ten are worth seeing as a list.
       emit(
-        result,
+        { tasks: result },
         { json: options.json === true, warnings, streams: context.streams },
-        formatTaskDetail,
+        (document) =>
+          document.tasks.length === 1 && document.tasks[0] !== undefined
+            ? formatTaskDetail(document.tasks[0])
+            : formatUpdatedTasks(document.tasks),
       );
     });
 }

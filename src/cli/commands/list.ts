@@ -3,7 +3,13 @@
  */
 
 import type { Command } from "commander";
-import { narrowKind, narrowLane, narrowLevel, narrowPriority } from "../../core/narrow.js";
+import {
+  narrowCount,
+  narrowKind,
+  narrowLane,
+  narrowLevel,
+  narrowPriority,
+} from "../../core/narrow.js";
 import {
   listTasks,
   requireEpicId,
@@ -25,6 +31,7 @@ interface ListOptions {
   readonly priority?: string;
   readonly ready?: boolean;
   readonly blocked?: boolean;
+  readonly limit?: string;
   readonly json?: boolean;
 }
 
@@ -41,6 +48,7 @@ export function registerList(program: Command, context: CliContext): void {
     .option("--priority <n>", "only tasks at this priority")
     .option("--ready", "only tasks with no unfinished dependencies")
     .option("--blocked", "only tasks waiting on something")
+    .option("--limit <n>", "return at most this many, highest-ranked first")
     .option("--json", "emit structured output")
     .action((options: ListOptions) => {
       // Narrowed at the boundary, so a bad --lane names the lanes rather than
@@ -51,6 +59,7 @@ export function registerList(program: Command, context: CliContext): void {
         ...(options.level === undefined ? {} : { level: narrowLevel(options.level) }),
         ...(options.assignee === undefined ? {} : { assignee: options.assignee }),
         ...(options.priority === undefined ? {} : { priority: narrowPriority(options.priority) }),
+        ...(options.limit === undefined ? {} : { limit: narrowCount(options.limit, "limit") }),
         ...(options.tag === undefined ? {} : { tag: options.tag }),
         // --ready and --blocked are the two halves of one filter; passing both
         // asks for everything, which is the same as passing neither.

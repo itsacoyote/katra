@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
+import type { TaskList, UpdateResult } from "../../src/core/contract.js";
 import type { TaskDetail } from "../../src/core/tasks/types.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
@@ -119,7 +120,97 @@ describe("katra update", () => {
 
     const result = await runCli(["update", id, "--priority", "0", "--json"], { cwd: repo.dir });
 
-    expect((result.json() as TaskDetail).task.priority).toBe(0);
+    const document = result.json() as UpdateResult;
+    expect(document.tasks).toHaveLength(1);
+    expect(document.tasks[0]?.task.priority).toBe(0);
+  });
+
+  it("emits the same JSON shape whatever the number of ids", async () => {
+    // The point of the envelope. A script passing a variable-length list must
+    // not get a different document depending on how many ids it happened to
+    // have — which is exactly what returning a bare TaskDetail for one and an
+    // array for many would do.
+    const one = await add(["one"]);
+    const two = await add(["two"]);
+
+    const single = await runCli(["update", one, "--priority", "0", "--json"], { cwd: repo.dir });
+    const many = await runCli(["update", one, two, "--priority", "1", "--json"], {
+      cwd: repo.dir,
+    });
+
+    expect(Object.keys(single.json() as object)).toEqual(Object.keys(many.json() as object));
+    expect((many.json() as UpdateResult).tasks).toHaveLength(2);
+  });
+
+  it("updates several tasks in one invocation", async () => {
+    const one = await add(["one"]);
+    const two = await add(["two"]);
+    const three = await add(["three"]);
+
+    const result = await runCli(["update", one, two, three, "--lane", "Planned"], {
+      cwd: repo.dir,
+    });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    // A compact line each, not three field blocks.
+    expect(result.stdout).toMatch(/updated 3 tasks/);
+    expect(result.stdout.trim().split("\n")).toHaveLength(4);
+
+    const listed = (
+      await runCli(["list", "--lane", "Planned", "--json"], { cwd: repo.dir })
+    ).json() as TaskList;
+    expect(listed.tasks).toHaveLength(3);
+  });
+
+  it("still prints the full detail for a single task", async () => {
+    const id = await add(["alone"]);
+
+    const result = await runCli(["update", id, "--priority", "0"], { cwd: repo.dir });
+
+    expect(result.stdout).toMatch(/priority\s+P0/);
+    expect(result.stdout).not.toMatch(/updated 1 task/);
+  });
+
+  it("writes none of a batch when one id in it is refused", async () => {
+    // All-or-nothing. A partially applied bulk edit is the worst outcome: the
+    // caller is told it failed while half the change survives, with no way to
+    // tell which half.
+    const one = await add(["one"]);
+    const two = await add(["two"]);
+    await runCli(["close", two], { cwd: repo.dir });
+
+    const result = await runCli(["update", one, two, "--lane", "Planned"], { cwd: repo.dir });
+
+    // A closed task refusing a lane change is a conflict, not a usage error.
+    expect(result.exitCode).toBe(EXIT.conflict);
+    const listed = (
+      await runCli(["list", "--lane", "Planned", "--json"], { cwd: repo.dir })
+    ).json() as TaskList;
+    expect(listed.tasks).toEqual([]);
+  });
+
+  it("writes none of a batch when one id matches nothing", async () => {
+    const one = await add(["one"]);
+
+    const result = await runCli(["update", one, "kt-zzzzzz", "--priority", "0"], {
+      cwd: repo.dir,
+    });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    const listed = (
+      await runCli(["list", "--priority", "0", "--json"], { cwd: repo.dir })
+    ).json() as TaskList;
+    expect(listed.tasks).toEqual([]);
+  });
+
+  it("patches a task named twice only once", async () => {
+    const id = await add(["repeated"]);
+
+    const result = await runCli(["update", id, id, "--lane", "Planned", "--json"], {
+      cwd: repo.dir,
+    });
+
+    expect((result.json() as UpdateResult).tasks).toHaveLength(1);
   });
 
   it("is registered on the program", () => {

@@ -67,6 +67,27 @@ export function narrowPriority(value: unknown): Priority {
 }
 
 /**
+ * Narrows a command-line count — a `--limit`, and whatever follows it.
+ *
+ * Command-line values arrive as strings, and `Number("")`, `Number(" ")` and
+ * `Number("[]")` are all `0` rather than `NaN` — so a blank or nonsense value
+ * would silently mean "return nothing" instead of being refused. Zero itself
+ * is a legitimate answer, which is why it cannot double as the rejection.
+ */
+export function narrowCount(value: unknown, field: string): number {
+  const candidate = typeof value === "string" && value.trim() !== "" ? Number(value) : value;
+  if (typeof candidate === "number" && Number.isInteger(candidate) && candidate >= 0) {
+    return candidate;
+  }
+  throw new KatraException({
+    code: "validation",
+    message: `${field} must be a whole number of items, 0 or more — got ${JSON.stringify(value)}`,
+    field,
+    value,
+  });
+}
+
+/**
  * Narrows a column that must hold text.
  *
  * The four enum columns above are checked because their *values* are

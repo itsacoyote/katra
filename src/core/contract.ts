@@ -20,7 +20,7 @@
  * neither touches the database.
  */
 
-import type { Blocker, Task, TaskSummary } from "./tasks/types.js";
+import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
 
 /**
  * Something worth telling the user that is not fatal.
@@ -43,6 +43,19 @@ export interface StoreWarning {
  * needs it, and this module already imports that one.
  */
 export type { Blocker };
+
+/**
+ * What `update` prints.
+ *
+ * An envelope rather than a bare {@link TaskDetail}, and deliberately the same
+ * shape for one id as for ten: `update` takes a variable number of ids, and a
+ * script passing a list it did not count must not get a different document
+ * back depending on how many it happened to contain. Human output still adapts
+ * — one task is worth printing in full, ten are worth printing as a list.
+ */
+export interface UpdateResult {
+  readonly tasks: readonly TaskDetail[];
+}
 
 /** What `list` prints. */
 export interface TaskList {

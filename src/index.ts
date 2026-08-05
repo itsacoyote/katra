@@ -39,6 +39,7 @@ export type {
   NextResult,
   StoreWarning,
   TaskList,
+  UpdateResult,
   VersionDocument,
 } from "./core/contract.js";
 // The fixed value sets and their derived types.
