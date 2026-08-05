@@ -19,6 +19,7 @@ import { registerInit } from "./commands/init.js";
 import { registerLifecycle } from "./commands/lifecycle.js";
 import { registerLink } from "./commands/link.js";
 import { registerList } from "./commands/list.js";
+import { registerLog } from "./commands/log.js";
 import { registerNext } from "./commands/next.js";
 import { registerShow } from "./commands/show.js";
 import { registerUpdate } from "./commands/update.js";
@@ -190,6 +191,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerLifecycle(program, context);
   registerLink(program, context);
   registerDelete(program, context);
+  registerLog(program, context);
   registerNext(program, context);
 
   return program;

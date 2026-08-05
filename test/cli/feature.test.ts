@@ -36,6 +36,7 @@ const EXPECTED_COMMANDS = [
   "dep",
   "link",
   "next",
+  "log",
 ] as const;
 
 let repo: GitFixture;
@@ -50,7 +51,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all twelve commands on the program", () => {
+  it("registers all thirteen commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -59,7 +60,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(12);
+    expect(registered).toHaveLength(13);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -94,6 +95,9 @@ describe("--json across every command", () => {
       ["cancel", blocker, "--reason", "dropped"],
       ["delete", doomed, "--force"],
       ["next"],
+      // Deliberately after `delete`: the history of the task just removed is
+      // the read only the event stream can answer.
+      ["log", doomed],
     ];
 
     const seen = new Set<string>();

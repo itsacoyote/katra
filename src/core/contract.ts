@@ -20,6 +20,7 @@
  * neither touches the database.
  */
 
+import type { StoredEvent } from "./events/types.js";
 import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
 
 /**
@@ -55,6 +56,16 @@ export type { Blocker };
  */
 export interface UpdateResult {
   readonly tasks: readonly TaskDetail[];
+}
+
+/**
+ * What `log` prints.
+ *
+ * An envelope for the same reason `update`'s is one: the count varies, and a
+ * document whose shape depends on how much happened is not a contract.
+ */
+export interface EventLog {
+  readonly events: readonly StoredEvent[];
 }
 
 /** What `list` prints. */

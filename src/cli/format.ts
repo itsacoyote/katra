@@ -6,6 +6,7 @@
  * drift. Every function here is pure: value in, string out.
  */
 
+import type { StoredEvent } from "../core/events/types.js";
 import type { Task, TaskDetail } from "../core/tasks/types.js";
 
 function field(label: string, value: string): string {
@@ -110,4 +111,72 @@ export function formatUpdatedTasks(tasks: readonly TaskDetail[]): string {
     `updated ${tasks.length} tasks`,
     ...tasks.map(({ task }) => `  ${task.id}  ${task.lane.padEnd(width)}  ${task.title}`),
   ].join("\n");
+}
+
+/**
+ * Collapses anything that would break a one-line-per-event rendering.
+ *
+ * `--reason` is a plain command-line argument, never routed through
+ * `readBody`, so it can contain newlines — and one embedded newline shifts
+ * every following row out of its column. Control characters matter for a
+ * second reason: reasons and titles are where fetched content and model output
+ * get pasted, and a raw ANSI escape executes on whatever renders it.
+ *
+ * Note *bodies* are the deliberately-multiline case and are not rendered here.
+ */
+function oneLine(text: string): string {
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: collapsing them is the point
+  return text.replaceAll(/[\u0000-\u001F\u007F]+/g, " ").trim();
+}
+
+/** What an event says happened, beyond its type. */
+function describeEvent(event: StoredEvent): string {
+  const parts: string[] = [];
+  if (event.fromLane !== null && event.toLane !== null) {
+    parts.push(`${event.fromLane} -> ${event.toLane}`);
+  }
+  // The title is the only surviving record of what a deleted task was called,
+  // so it is shown wherever it was stamped rather than only on `created`.
+  if (event.title !== null) parts.push(oneLine(event.title));
+  if (event.reason !== null) parts.push(oneLine(event.reason));
+  if (event.ref !== null) parts.push(event.ref);
+  return parts.join("  ");
+}
+
+/**
+ * The event stream, newest first, one physical line per event.
+ *
+ * The actor column appears only when the log holds more than one — in a
+ * single-agent repository it is the same string on every row, which is pure
+ * noise; across worktrees it is the whole reason ADR-007 records it.
+ */
+export function formatEventLog(events: readonly StoredEvent[]): string {
+  if (events.length === 0) return "nothing has happened yet";
+
+  // Reduced rather than `Math.max(...events.map(…))`: spreading the result set
+  // as arguments blows the stack somewhere past a hundred thousand rows, and
+  // nothing prunes this table (ADR-008), so its size is unbounded by design.
+  const width = (pick: (event: StoredEvent) => string): number =>
+    events.reduce((widest, event) => Math.max(widest, pick(event).length), 0);
+
+  const showActor = new Set(events.map((event) => event.actor)).size > 1;
+
+  const typeWidth = width((event) => event.type);
+  const idWidth = width((event) => event.entityId);
+  const actorWidth = showActor ? width((event) => oneLine(event.actor)) : 0;
+
+  return events
+    .map((event) => {
+      const columns = [
+        // Minutes, not seconds: a log spanning weeks needs the date, and the
+        // second an event landed has never answered anyone's question.
+        event.createdAt.slice(0, 16).replace("T", " "),
+        event.type.padEnd(typeWidth),
+        event.entityId.padEnd(idWidth),
+        ...(showActor ? [oneLine(event.actor).padEnd(actorWidth)] : []),
+        describeEvent(event),
+      ];
+      return columns.join("  ").trimEnd();
+    })
+    .join("\n");
 }

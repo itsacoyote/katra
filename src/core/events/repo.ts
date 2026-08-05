@@ -16,6 +16,7 @@ import type { Lane } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { narrowEventType, narrowLane, narrowNullableText, narrowText } from "../narrow.js";
 import type { OpenStore } from "../store.js";
+import { requireResolved, resolveIdAmong } from "../tasks/ids.js";
 import type { Task } from "../tasks/types.js";
 import type { NewEvent, StoredEvent } from "./types.js";
 
@@ -71,6 +72,42 @@ export function rowToEvent(row: EventRow): StoredEvent {
 
 /** How many events a read returns when the caller does not say. */
 export const DEFAULT_EVENT_LIMIT = 50;
+
+/**
+ * Resolves a partial id against everything history knows about, or throws.
+ *
+ * **Not `requireId`.** That one searches `tasks`, so it cannot resolve the id
+ * of a task that has been deleted — and reading a deleted task's history is
+ * precisely what this feature promises (ADR-008). `katra log <deletedId>`
+ * would have refused its own headline case.
+ *
+ * The union covers both directions: `events` alone would miss tasks created
+ * before migration 0002, which have rows but no history yet, and `tasks` alone
+ * misses everything deleted.
+ */
+export function requireEntityId(store: OpenStore, input: string): string {
+  return requireResolved(
+    resolveIdAmong(
+      // Anonymous placeholders, with the bounds bound twice: better-sqlite3
+      // rejects the `?1`-style numbered form this would otherwise be written
+      // with ("Too many parameter values were provided").
+      (lower, upper, limit) =>
+        store.db
+          .prepare(
+            `SELECT id FROM (
+               SELECT id FROM tasks WHERE id >= ? AND id < ?
+               UNION
+               SELECT entity_id AS id FROM events WHERE entity_id >= ? AND entity_id < ?
+             ) ORDER BY id LIMIT ?`,
+          )
+          .all(lower, upper, lower, upper, limit) as Array<{ id: string }>,
+      input,
+      "a task or its history",
+    ),
+    "task or recorded history",
+    "tasks",
+  );
+}
 
 export interface EventQuery {
   /**
