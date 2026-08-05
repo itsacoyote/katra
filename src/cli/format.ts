@@ -6,7 +6,7 @@
  * drift. Every function here is pure: value in, string out.
  */
 
-import type { StoredEvent } from "../core/events/types.js";
+import type { LoggedEvent } from "../core/events/types.js";
 import type { Task, TaskDetail } from "../core/tasks/types.js";
 
 function field(label: string, value: string): string {
@@ -129,18 +129,28 @@ function oneLine(text: string): string {
   return text.replaceAll(/[\u0000-\u001F\u007F]+/g, " ").trim();
 }
 
-/** What an event says happened, beyond its type. */
-function describeEvent(event: StoredEvent): string {
+/** What an event says happened, beyond its type and what it is about. */
+function describeEvent(event: LoggedEvent): string {
   const parts: string[] = [];
   if (event.fromLane !== null && event.toLane !== null) {
     parts.push(`${event.fromLane} -> ${event.toLane}`);
   }
-  // The title is the only surviving record of what a deleted task was called,
-  // so it is shown wherever it was stamped rather than only on `created`.
-  if (event.title !== null) parts.push(oneLine(event.title));
   if (event.reason !== null) parts.push(oneLine(event.reason));
   if (event.ref !== null) parts.push(event.ref);
   return parts.join("  ");
+}
+
+/**
+ * How much room a title gets before it is cut.
+ *
+ * Titles are prose and the rest of a row is structured, so an uncapped column
+ * pushes the lanes and reasons of every other row off to the right. `--json`
+ * carries the whole thing for anything that needs it.
+ */
+const TITLE_WIDTH = 44;
+
+function clamp(text: string, width: number): string {
+  return text.length <= width ? text : `${text.slice(0, width - 1)}…`;
 }
 
 /**
@@ -150,20 +160,34 @@ function describeEvent(event: StoredEvent): string {
  * single-agent repository it is the same string on every row, which is pure
  * noise; across worktrees it is the whole reason ADR-007 records it.
  */
-export function formatEventLog(events: readonly StoredEvent[]): string {
+export function formatEventLog(events: readonly LoggedEvent[]): string {
   if (events.length === 0) return "nothing has happened yet";
 
   // Reduced rather than `Math.max(...events.map(…))`: spreading the result set
   // as arguments blows the stack somewhere past a hundred thousand rows, and
   // nothing prunes this table (ADR-008), so its size is unbounded by design.
-  const width = (pick: (event: StoredEvent) => string): number =>
+  const width = (pick: (event: LoggedEvent) => string): number =>
     events.reduce((widest, event) => Math.max(widest, pick(event).length), 0);
 
+  const title = (event: LoggedEvent): string =>
+    event.entityTitle === null ? "" : clamp(oneLine(event.entityTitle), TITLE_WIDTH);
+
+  // The actor is elided when every row shares one: in a single-agent
+  // repository it is the same string repeated down the page, and it is always
+  // recoverable from `--json`.
+  //
+  // The title is **not** elided the same way, though a scoped log repeats it
+  // just as much. The asymmetry is deliberate: for a task that still exists
+  // the title is recoverable with `show`, but for a deleted one this log is
+  // the only place it survives (ADR-008) — so the case where eliding looks
+  // most justified is exactly the case where it destroys the answer.
   const showActor = new Set(events.map((event) => event.actor)).size > 1;
+  const showTitle = events.some((event) => event.entityTitle !== null);
 
   const typeWidth = width((event) => event.type);
   const idWidth = width((event) => event.entityId);
   const actorWidth = showActor ? width((event) => oneLine(event.actor)) : 0;
+  const titleWidth = showTitle ? width(title) : 0;
 
   return events
     .map((event) => {
@@ -174,6 +198,7 @@ export function formatEventLog(events: readonly StoredEvent[]): string {
         event.type.padEnd(typeWidth),
         event.entityId.padEnd(idWidth),
         ...(showActor ? [oneLine(event.actor).padEnd(actorWidth)] : []),
+        ...(showTitle ? [title(event).padEnd(titleWidth)] : []),
         describeEvent(event),
       ];
       return columns.join("  ").trimEnd();

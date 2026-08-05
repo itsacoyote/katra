@@ -39,6 +39,23 @@ export interface StoredEvent {
 }
 
 /**
+ * A stored event plus the title of whatever it is about.
+ *
+ * `entityTitle` is **resolved, not stored**: the entity's title now, falling
+ * back to the one stamped on the event, and null when neither exists. That
+ * ordering answers the question a reader of a log actually has — *which task
+ * is this row about* — while {@link StoredEvent.title} keeps the historical
+ * answer for anyone who wants what it was called at the time.
+ *
+ * Resolution is a **LEFT** join. An inner one would drop every event whose
+ * task has been deleted, which is the bug ADR-008 predicts by name and the
+ * exact history the event stream exists to preserve.
+ */
+export interface LoggedEvent extends StoredEvent {
+  readonly entityTitle: string | null;
+}
+
+/**
  * What {@link appendEvent} accepts.
  *
  * `epicId` is a parameter rather than something the append looks up, and that

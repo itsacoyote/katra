@@ -3,7 +3,7 @@ import { formatEventLog } from "../../src/cli/format.js";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
 import type { EventLog } from "../../src/core/contract.js";
-import type { StoredEvent } from "../../src/core/events/types.js";
+import type { LoggedEvent } from "../../src/core/events/types.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
 import { createGitRepo } from "../helpers/fixture.js";
@@ -19,7 +19,7 @@ async function add(args: readonly string[]): Promise<string> {
   return (await runCli(["add", ...args], { cwd: repo.dir })).stdout.trim();
 }
 
-const events = async (args: readonly string[] = []): Promise<readonly StoredEvent[]> =>
+const events = async (args: readonly string[] = []): Promise<readonly LoggedEvent[]> =>
   ((await runCli(["log", ...args, "--json"], { cwd: repo.dir })).json() as EventLog).events;
 
 describe("katra log", () => {
@@ -139,7 +139,7 @@ describe("katra log", () => {
 });
 
 describe("formatEventLog", () => {
-  const event = (overrides: Partial<StoredEvent> = {}): StoredEvent => ({
+  const event = (overrides: Partial<LoggedEvent> = {}): LoggedEvent => ({
     id: 1,
     type: "created",
     entityId: "kt-aaaaaa",
@@ -151,6 +151,7 @@ describe("formatEventLog", () => {
     reason: null,
     title: null,
     createdAt: "2026-08-05T16:41:09.123Z",
+    entityTitle: null,
     ...overrides,
   });
 
@@ -170,11 +171,14 @@ describe("formatEventLog", () => {
   it("strips control characters that would execute on a terminal", () => {
     // Reasons and titles are where fetched content and model output get
     // pasted. A raw escape sequence runs on whatever renders it.
-    const rendered = formatEventLog([event({ title: "\u001B[31mred\u0007" })]);
+    const rendered = formatEventLog([
+      event({ type: "cancelled", reason: "\u001B[31mred\u0007", entityTitle: "\u001B[1mbold" }),
+    ]);
 
     expect(rendered).not.toContain("\u001B");
     expect(rendered).not.toContain("\u0007");
     expect(rendered).toContain("[31mred");
+    expect(rendered).toContain("[1mbold");
   });
 
   it("does not overflow the stack on a very large history", () => {
@@ -219,5 +223,79 @@ describe("formatEventLog", () => {
 
   it("says nothing has happened for an empty log", () => {
     expect(formatEventLog([])).toBe("nothing has happened yet");
+  });
+});
+
+describe("entity titles in the log", () => {
+  it("names the task a lifecycle event is about", async () => {
+    // Without this, whole-store history is a column of ids: `status-changed
+    // kt-0zhobj Defined -> Planned` says nothing about which task moved.
+    const id = await add(["wire the events"]);
+    await runCli(["update", id, "--lane", "Planned"], { cwd: repo.dir });
+
+    const all = await events();
+    const moved = all.find((e) => e.type === "status-changed");
+
+    expect(moved?.entityTitle).toBe("wire the events");
+    // The stored column stays null: only created and deleted stamp a title.
+    expect(moved?.title).toBeNull();
+  });
+
+  it("prefers the task's current title over the one stamped at creation", async () => {
+    // A log's job is to say *which* task a row is about, and the live title
+    // answers that after a rename. What it was called at the time is still on
+    // the event for anyone who wants that instead.
+    const id = await add(["the old name"]);
+    await runCli(["update", id, "--title", "the new name"], { cwd: repo.dir });
+
+    const created = (await events([id])).find((e) => e.type === "created");
+
+    expect(created?.entityTitle).toBe("the new name");
+    expect(created?.title).toBe("the old name");
+  });
+
+  it("keeps rendering events whose task has been deleted", async () => {
+    // The LEFT join, asserted through the command. An inner join drops every
+    // one of these rows — the bug ADR-008 predicts by name.
+    const id = await add(["a typo"]);
+    await runCli(["delete", id, "--force"], { cwd: repo.dir });
+
+    const history = await events([id]);
+
+    expect(history.map((e) => e.type)).toEqual(["deleted", "created"]);
+    // No live row to join to, so the stamped title is what survives.
+    expect(history.every((e) => e.entityTitle === "a typo")).toBe(true);
+  });
+
+  it("does not lose unrelated events from the whole-store read when one task is deleted", async () => {
+    const kept = await add(["still here"]);
+    const gone = await add(["removed"]);
+    await runCli(["delete", gone, "--force"], { cwd: repo.dir });
+
+    const all = await events();
+
+    expect(all.some((e) => e.entityId === kept)).toBe(true);
+    expect(all.some((e) => e.entityId === gone)).toBe(true);
+  });
+
+  it("names every task the log spans", async () => {
+    const one = await add(["first task"]);
+    await add(["second task"]);
+    await runCli(["update", one, "--lane", "Planned"], { cwd: repo.dir });
+
+    const whole = await runCli(["log"], { cwd: repo.dir });
+    const scoped = await runCli(["log", one], { cwd: repo.dir });
+
+    // Several tasks: the title is the only thing telling the rows apart.
+    expect(whole.stdout).toContain("first task");
+    expect(whole.stdout).toContain("second task");
+    // One task, named by the caller: repeating its title down the page is the
+    // same noise the actor column is elided to avoid.
+    // Scoped, the title repeats — deliberately. For a task that still exists
+    // `show` could tell you, but for a deleted one this log is the only place
+    // the name survives, so eliding it would destroy the answer exactly when
+    // it matters most.
+    expect(scoped.stdout).toContain("first task");
+    expect(scoped.stdout).toContain(one);
   });
 });

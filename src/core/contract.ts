@@ -20,7 +20,7 @@
  * neither touches the database.
  */
 
-import type { StoredEvent } from "./events/types.js";
+import type { LoggedEvent } from "./events/types.js";
 import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
 
 /**
@@ -65,7 +65,7 @@ export interface UpdateResult {
  * document whose shape depends on how much happened is not a contract.
  */
 export interface EventLog {
-  readonly events: readonly StoredEvent[];
+  readonly events: readonly LoggedEvent[];
 }
 
 /** What `list` prints. */

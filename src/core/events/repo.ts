@@ -18,7 +18,7 @@ import { narrowEventType, narrowLane, narrowNullableText, narrowText } from "../
 import type { OpenStore } from "../store.js";
 import { requireResolved, resolveIdAmong } from "../tasks/ids.js";
 import type { Task } from "../tasks/types.js";
-import type { NewEvent, StoredEvent } from "./types.js";
+import type { LoggedEvent, NewEvent, StoredEvent } from "./types.js";
 
 /** The raw shape SQLite hands back for an event row. */
 interface EventRow {
@@ -134,29 +134,43 @@ export interface EventQuery {
  * elsewhere. The column is stamped at write time precisely so this read needs
  * no join.
  *
- * There is no join to `tasks` here at all, for the same reason ADR-008
- * predicts: an event outlives its entity, so any inner join would silently
- * drop exactly the history a deleted task most needs.
+ * There **is** a join to `tasks`, but only to resolve a display title, and it
+ * is a LEFT join. An event outlives its entity, so an inner join would
+ * silently drop exactly the history a deleted task most needs — the bug
+ * ADR-008 predicts by name. Scoping never touches the joined row: it reads the
+ * stamped `epic_id`, so a deleted or reparented child keeps its place.
  *
  * Ordered by `id`, not `created_at`: the id is assigned inside the write
  * transaction, so it is a total order even when several events share a
  * millisecond. Ordering by the timestamp alone would leave same-millisecond
  * events in whatever order the query plan happened to produce.
  */
-export function listEvents(store: OpenStore, query: EventQuery = {}): StoredEvent[] {
+export function listEvents(store: OpenStore, query: EventQuery = {}): LoggedEvent[] {
   const limit = query.limit ?? DEFAULT_EVENT_LIMIT;
   const scoped = query.entityId !== undefined;
 
   const rows = store.db
     .prepare(
-      `SELECT * FROM events
-        ${scoped ? "WHERE entity_id = ? OR epic_id = ?" : ""}
-        ORDER BY id DESC
+      // LEFT, and it has to stay LEFT. An inner join here drops every event
+      // whose task has been deleted — the bug ADR-008 predicts by name, and
+      // precisely the history this table exists to keep. Scoping still reads
+      // the stamped epic_id and never the joined row's parent_id, for the same
+      // reason.
+      `SELECT e.*, COALESCE(t.title, e.title) AS entity_title
+         FROM events e
+         LEFT JOIN tasks t ON t.id = e.entity_id
+        ${scoped ? "WHERE e.entity_id = ? OR e.epic_id = ?" : ""}
+        ORDER BY e.id DESC
         LIMIT ?`,
     )
-    .all(...(scoped ? [query.entityId, query.entityId, limit] : [limit])) as EventRow[];
+    .all(...(scoped ? [query.entityId, query.entityId, limit] : [limit])) as Array<
+    EventRow & { entity_title: unknown }
+  >;
 
-  return rows.map(rowToEvent);
+  return rows.map((row) => ({
+    ...rowToEvent(row),
+    entityTitle: narrowNullableText(row.entity_title, "entity_title"),
+  }));
 }
 
 /**

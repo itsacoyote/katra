@@ -81,7 +81,7 @@ export {
 } from "./core/errors.js";
 // The event stream's shapes. `events/types.ts` imports only from `enums.ts`,
 // so it joins the published graph without dragging the storage engine in.
-export type { NewEvent, StoredEvent } from "./core/events/types.js";
+export type { LoggedEvent, NewEvent, StoredEvent } from "./core/events/types.js";
 // Identity. `resolveId` and `requireId` are not re-exported: they take an
 // `OpenStore`, so publishing them would put the storage handle into the public
 // API through a parameter. `generateId` needs no store and is genuinely usable.
