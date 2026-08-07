@@ -2,7 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { isKatraException } from "../../src/core/errors.js";
 import { addDependency } from "../../src/core/graph/deps.js";
 import { createNote } from "../../src/core/notes/repo.js";
-import { BRIEF_HANDOFF_CHARS, briefEntity } from "../../src/core/tasks/brief.js";
+import {
+  BRIEF_CHILDREN_PER_LANE,
+  BRIEF_HANDOFF_CHARS,
+  briefEntity,
+} from "../../src/core/tasks/brief.js";
 import { seedEpic, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
@@ -232,5 +236,36 @@ describe("briefEntity on an epic", () => {
     if (brief.level !== "epic") throw new Error("unreachable");
     expect(brief.children[0]?.truncated).toBe(false);
     expect(brief.children[0]?.tasks).toHaveLength(40);
+  });
+});
+
+describe("the two shapes are different, not nested", () => {
+  it("omits the children field for a task, and the blockers field for an epic", () => {
+    // The discriminated union, from the inside. One shape with optional fields
+    // would leave a --json consumer unable to tell "does not apply" from
+    // "nothing filled it in".
+    const epic = seedEpic(fixture.store);
+    const task = seedTask(fixture.store, { parentId: epic });
+
+    const taskBrief = briefEntity(fixture.store, task) as Record<string, unknown>;
+    const epicBrief = briefEntity(fixture.store, epic) as Record<string, unknown>;
+
+    expect(Object.hasOwn(taskBrief, "blockers")).toBe(true);
+    expect(Object.hasOwn(taskBrief, "children")).toBe(false);
+    expect(Object.hasOwn(epicBrief, "children")).toBe(true);
+    expect(Object.hasOwn(epicBrief, "blockers")).toBe(false);
+  });
+
+  it("truncates an over-cap children list and reports it", () => {
+    const epic = seedEpic(fixture.store);
+    for (let i = 0; i < BRIEF_CHILDREN_PER_LANE + 3; i++) {
+      seedTask(fixture.store, { parentId: epic, lane: "Planned", title: `child ${i}` });
+    }
+
+    const brief = briefEntity(fixture.store, epic);
+
+    if (brief.level !== "epic") throw new Error("unreachable");
+    expect(brief.children[0]?.tasks).toHaveLength(BRIEF_CHILDREN_PER_LANE);
+    expect(brief.children[0]?.truncated).toBe(true);
   });
 });
