@@ -16,12 +16,29 @@ import { KatraException } from "../errors.js";
 import { listBlockers, READINESS_VIEW } from "../graph/deps.js";
 import type { OpenStore } from "../store.js";
 import { getTask } from "./repo.js";
+import type { ReadyCandidate } from "./types.js";
 import { summarise } from "./types.js";
 
-export type { BlockedTask, NextResult };
+export type { BlockedTask, NextResult, ReadyCandidate };
 
 /** The lane `next` draws from: work that has been planned but not started. */
 export const NEXT_LANE = "Planned";
+
+/**
+ * How katra ranks tasks against each other, everywhere.
+ *
+ * Priority, then oldest first, then `rowid` — the last because two tasks
+ * written in the same millisecond are routine and would otherwise come back in
+ * an arbitrary order between runs.
+ *
+ * Exported because `board` ranks three sections by it and this fragment is
+ * already hand-written at seven call sites. An eighth and ninth typed by hand
+ * is how two commands quietly start disagreeing about what comes first — and
+ * `board`'s contract is that its top ready row *is* what `next` returns.
+ *
+ * The `t.` prefix is part of it: every consumer aliases `tasks` to `t`.
+ */
+export const TASK_RANKING = "ORDER BY t.priority, t.created_at, t.rowid";
 
 export interface NextFilters {
   readonly kind?: Kind;
@@ -68,15 +85,73 @@ function filtersOnly(filters: NextFilters): Conditions {
  * Built on {@link filtersOnly} rather than repeating it: a fourth filter added
  * to one and not the other would make `next` and its untriaged count disagree
  * about which tasks they are talking about, silently.
+ *
+ * **Epics are excluded here, so both branches inherit it.** `next` used to
+ * exclude them from its untriaged count and nowhere else, which meant a
+ * `Planned` epic at a low priority number was returned as the task to work on,
+ * and a blocked one was listed as work waiting to start. An epic is a
+ * container; nobody picks one up. An explicit `--level` still wins, so
+ * `next --level epic` asks the literal question.
+ *
+ * Fixing only the candidate query would have been worse than fixing neither:
+ * `next` would refuse to *offer* an epic while still advertising one as blocked
+ * work.
  */
 function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
   const narrowing = filtersOnly(filters);
-  const parts = ["t.lane = ?", "r.is_ready = ?", ...(narrowing.sql === "" ? [] : [narrowing.sql])];
+  const parts = [
+    "t.lane = ?",
+    "r.is_ready = ?",
+    ...(filters.level === undefined ? ["t.level = 'task'"] : []),
+    ...(narrowing.sql === "" ? [] : [narrowing.sql]),
+  ];
 
   return {
     sql: parts.join(" AND "),
     params: [NEXT_LANE, ready ? 1 : 0, ...narrowing.params],
   };
+}
+
+/**
+ * Every startable task, ranked, up to `limit`.
+ *
+ * `nextTask` is this with `limit: 1` and a fuller read of the winner; `board`'s
+ * ready section is this with a section cap. One query, so the two cannot
+ * disagree about what to do next — which is a promise `board` makes explicitly
+ * and could not keep by filtering `listTasks` instead. `list --ready` asks a
+ * broader question (unblocked in *any* non-terminal lane, including work
+ * already in progress), and answering "what should I start" with it would put
+ * a task somebody is mid-way through at the top of the board.
+ */
+export function readyCandidates(
+  store: OpenStore,
+  filters: NextFilters = {},
+  limit = 1,
+): ReadyCandidate[] {
+  const ready = conditionsFor(filters, true);
+  return store.db
+    .prepare(
+      `SELECT t.id AS id, t.title AS title, t.lane AS lane, t.priority AS priority
+         FROM tasks t
+         JOIN ${READINESS_VIEW} r ON r.id = t.id
+        WHERE ${ready.sql}
+        ${TASK_RANKING}
+        LIMIT ?`,
+    )
+    .all(...ready.params, limit) as ReadyCandidate[];
+}
+
+/**
+ * The predicate behind {@link readyCandidates}, without the ranking or the
+ * limit.
+ *
+ * `board` needs the *count* of startable work, and a count is uncapped — so it
+ * cannot come from `readyCandidates`, which always takes a limit. Sharing the
+ * predicate is what stops board hand-writing a fourth copy of
+ * "planned and unblocked and not an epic" that drifts from this one.
+ */
+export function readyPredicate(filters: NextFilters = {}): Conditions {
+  return conditionsFor(filters, true);
 }
 
 /**
@@ -90,16 +165,7 @@ function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
  * Filters narrow the candidate pool; they never turn one result into several.
  */
 export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResult {
-  const ready = conditionsFor(filters, true);
-  const candidate = store.db
-    .prepare(
-      `SELECT t.id AS id FROM tasks t
-         JOIN ${READINESS_VIEW} r ON r.id = t.id
-        WHERE ${ready.sql}
-        ORDER BY t.priority, t.created_at, t.rowid
-        LIMIT 1`,
-    )
-    .get(...ready.params) as { id: string } | undefined;
+  const candidate = readyCandidates(store, filters, 1)[0];
 
   if (candidate !== undefined) {
     const task = getTask(store, candidate.id);
@@ -130,7 +196,7 @@ export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResul
       `SELECT t.id AS id, t.title AS title FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
         WHERE ${stuck.sql}
-        ORDER BY t.priority, t.created_at, t.rowid`,
+        ${TASK_RANKING}`,
     )
     .all(...stuck.params) as Array<{ id: string; title: string }>;
 

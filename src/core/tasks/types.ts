@@ -32,6 +32,26 @@ export interface Task {
   readonly tags: readonly string[];
 }
 
+/**
+ * A startable task, as `next` ranks them.
+ *
+ * Declared here rather than beside `readyCandidates` in `next.ts` because
+ * `board`'s published document names it, and `next.ts` reaches `store.ts` →
+ * `db/connection.ts` → `better-sqlite3`. A published type that referenced it
+ * from there would drag the storage engine into `dist/index.d.ts` — the failure
+ * `contract.ts`'s module note describes, and the one `test/index.test.ts`'s
+ * import walk pins an exact file list to catch.
+ *
+ * Not {@link TaskSummary}: that carries no priority, and the whole point of a
+ * ranked list is showing what it was ranked by.
+ */
+export interface ReadyCandidate {
+  readonly id: string;
+  readonly title: string;
+  readonly lane: Lane;
+  readonly priority: Priority;
+}
+
 /** Just enough of a task to name it in another task's output. */
 export interface TaskSummary {
   readonly id: string;

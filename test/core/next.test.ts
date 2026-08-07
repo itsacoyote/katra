@@ -212,3 +212,50 @@ describe("nextTask", () => {
     expect(result.task.title).toBe("waiting");
   });
 });
+
+describe("epics are not work", () => {
+  it("returns the planned task, not a higher-priority planned epic", () => {
+    // The invariant `board`'s ready section depends on: its first row must be
+    // what `next` returns, and its own filter excludes epics. Before this,
+    // `next`'s candidate select had no level guard at all — only
+    // `countUntriaged` did — so a Planned epic outranked every task behind it
+    // and `next` answered with a container nobody can pick up.
+    seedEpic(fixture.store, { title: "the epic", lane: "Planned", priority: 0 });
+    planned("real work", { priority: 1 });
+
+    const result = nextTask(fixture.store);
+
+    if (result.status !== "found") throw new Error("unreachable");
+    expect(result.task.title).toBe("real work");
+  });
+
+  it("still returns an epic when --level epic is explicit", () => {
+    // The same escape hatch `countUntriaged` and `list --ready` already honour:
+    // an explicit `--level` means the caller is asking about epics on purpose.
+    const epic = seedEpic(fixture.store, { title: "the epic", lane: "Planned" });
+
+    const result = nextTask(fixture.store, { level: "epic" });
+
+    if (result.status !== "found") throw new Error("unreachable");
+    expect(result.task.id).toBe(epic);
+  });
+
+  it("omits a blocked planned epic from the blocked list", () => {
+    // The second query, which the first draft of this change left alone.
+    // Listing an epic as blocked work advertises something `next` will never
+    // hand out, so the two branches have to agree about what counts as work.
+    const epic = seedEpic(fixture.store, { title: "blocked epic", lane: "Planned" });
+    const blocker = planned("the blocker");
+    addDependency(fixture.store, epic, blocker);
+    const task = planned("blocked task");
+    addDependency(fixture.store, task, blocker);
+    // Leave nothing startable, so `next` has to fall through to the blocked
+    // branch rather than answering with `the blocker` itself.
+    fixture.store.db.prepare("UPDATE tasks SET lane = 'Defined' WHERE id = ?").run(blocker);
+
+    const result = nextTask(fixture.store);
+
+    if (result.status !== "none") throw new Error("unreachable");
+    expect(result.blocked.map((b) => b.title)).toEqual(["blocked task"]);
+  });
+});
