@@ -6,6 +6,7 @@
  * drift. Every function here is pure: value in, string out.
  */
 
+import type { BriefResult } from "../core/contract.js";
 import type { LoggedEvent } from "../core/events/types.js";
 import type { Note } from "../core/notes/types.js";
 import type { Task, TaskDetail, TaskView } from "../core/tasks/types.js";
@@ -418,6 +419,115 @@ export function formatTaskView(view: TaskView): string {
         `  ${when}  ${event.type.padEnd(14)}${subject}  ${describeEvent(event)}`.trimEnd(),
       );
     }
+  }
+
+  return lines.join("\n");
+}
+
+/**
+ * The `brief` block: what a session needs to pick this up again.
+ *
+ * Deliberately not `formatTaskView` with more rows. `show` prints note
+ * *previews* and never a body; this leads with a handoff in full, because that
+ * is the one thing a resuming session cannot reconstruct from the code. If a
+ * change ever makes these two renderings converge, `brief` has stopped earning
+ * its place.
+ *
+ * Every stored string goes through `text` or `sanitizeBody` — titles, kinds,
+ * blocker titles, event fields, and above all the handoff body, which is the
+ * largest untrusted-text surface katra has. `--json` stays verbatim; these are
+ * two renderings of one value, not one string built once and printed twice.
+ */
+export function formatBrief(brief: BriefResult): string {
+  const lines = [
+    `${brief.task.id}  ${text(brief.task.title)}`,
+    field("level", brief.task.level),
+    field("lane", brief.task.lane),
+    field("priority", `P${brief.task.priority}`),
+  ];
+  if (brief.epic !== null) {
+    lines.push(field("epic", `${brief.epic.id}  ${text(brief.epic.title)}`));
+  }
+
+  if (brief.level === "task") {
+    // Blockers first and stated even when empty: "can I start this?" is the
+    // question a resuming session asks before any other, and a missing line
+    // reads as "this view does not know".
+    if (brief.blockers.length === 0) {
+      lines.push(field("blockers", "none"));
+    } else {
+      for (const [index, blocker] of brief.blockers.entries()) {
+        lines.push(
+          field(
+            index === 0 ? "blockers" : "",
+            `${blocker.id}  ${blocker.lane}  ${text(blocker.title)}`,
+          ),
+        );
+      }
+    }
+    for (const [index, dependent] of brief.blocking.entries()) {
+      lines.push(
+        field(
+          index === 0 ? "blocking" : "",
+          `${dependent.id}  ${dependent.lane}  ${text(dependent.title)}`,
+        ),
+      );
+    }
+  } else {
+    for (const group of brief.children) {
+      const more = group.truncated ? `, more not shown` : "";
+      lines.push("", `${group.lane} (${group.tasks.length}${more})`);
+      for (const child of group.tasks) {
+        lines.push(`  ${child.id}  ${text(child.title)}`);
+      }
+    }
+  }
+
+  if (brief.task.description !== null && brief.task.description.trim() !== "") {
+    lines.push("", sanitizeBody(brief.task.description).trimEnd());
+  }
+
+  if (brief.handoff !== null) {
+    const { note, truncated } = brief.handoff;
+    const when = note.createdAt.slice(0, 16).replace("T", " ");
+    // "last touch", never "owner" or "assignee". katra has no concept of
+    // ownership until claims land, and a heading that implied one would have a
+    // reader believe somebody currently holds this.
+    lines.push("", `handoff — last touch ${text(note.actor)}, ${when}`);
+    lines.push(indent(sanitizeBody(note.body).trimEnd()));
+    if (truncated) {
+      // Names the command, with the resolved id: a reader who needs the rest
+      // should not have to work out how to ask for it.
+      lines.push(`  … truncated — \`katra note list ${brief.task.id}\` for the whole note`);
+    }
+  }
+
+  const others = Object.entries(brief.noteCounts)
+    .filter(([kind]) => !(kind === "handoff" && brief.handoff !== null))
+    .map(([kind, count]) => `${count} ${kind}`);
+  // The handoff shown above is discounted from its own kind's tally, so a lone
+  // handoff produces no line at all rather than "1 handoff" beside the thing
+  // itself.
+  const shownHandoff = brief.handoff === null ? 0 : 1;
+  const remaining = (brief.noteCounts.handoff ?? 0) - shownHandoff;
+  if (remaining > 0) others.push(`${remaining} more handoff`);
+  if (others.length > 0) {
+    lines.push("", `notes: ${others.join(", ")} — \`katra note list ${brief.task.id}\``);
+  }
+
+  if (brief.activity.length > 0) {
+    lines.push("", "activity (newest first — `katra log` for the rest)");
+    for (const event of brief.activity) {
+      const when = event.createdAt.slice(0, 16).replace("T", " ");
+      const subject =
+        event.entityId === brief.task.id
+          ? ""
+          : `  ${event.entityId}  ${previewBody(event.entityTitle ?? "", TITLE_WIDTH)}`;
+      lines.push(
+        `  ${when}  ${padTo(event.type, 14)}${subject}  ${describeEvent(event)}`.trimEnd(),
+      );
+    }
+    if (brief.activityTruncated) lines.push("  … more; `katra log` for the rest");
   }
 
   return lines.join("\n");

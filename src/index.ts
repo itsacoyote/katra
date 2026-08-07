@@ -29,6 +29,9 @@
 export type {
   BlockedTask,
   Blocker,
+  BriefLane,
+  BriefNote,
+  BriefResult,
   DeleteResult,
   DependencyResult,
   EventLog,

@@ -23,7 +23,7 @@ function storeDbPath(dir: string): string {
   return join(dir, ".git", STORE_DIR_NAME, DB_FILE_NAME);
 }
 
-/** Every command katra ships in F1. */
+/** Every command katra ships. */
 const EXPECTED_COMMANDS = [
   "init",
   "add",
@@ -39,6 +39,7 @@ const EXPECTED_COMMANDS = [
   "next",
   "log",
   "note",
+  "brief",
 ] as const;
 
 let repo: GitFixture;
@@ -53,7 +54,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all fourteen commands on the program", () => {
+  it("registers all fifteen commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -62,7 +63,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(14);
+    expect(registered).toHaveLength(15);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -111,6 +112,7 @@ describe("--json across every command", () => {
       // the read only the event stream can answer.
       ["log", doomed],
       ["note", "list"],
+      ["brief", epic],
     ];
 
     const seen = new Set<string>();
