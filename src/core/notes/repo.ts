@@ -18,11 +18,11 @@
  */
 
 import { writeTx } from "../db/connection.js";
-import type { NoteKind } from "../enums.js";
+import type { Lane, NoteKind } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
 import { NOTE_ID_PREFIX } from "../id-format.js";
-import { narrowNoteKind, narrowText } from "../narrow.js";
+import { narrowLane, narrowNoteKind, narrowText } from "../narrow.js";
 import type { OpenStore } from "../store.js";
 import { insertWithRetry, requireResolved, resolveId } from "../tasks/ids.js";
 import { getTask } from "../tasks/repo.js";
@@ -329,4 +329,57 @@ export function countNotesByKind(
     counts[narrowNoteKind(row.kind)] = Number(row.count);
   }
   return counts;
+}
+
+/**
+ * The newest `handoff` in the whole store, with the task it belongs to.
+ *
+ * What `board --digest` leads with. Separate from {@link latestNoteInScope}
+ * because it needs three columns from `tasks` that a scoped note read has no
+ * business carrying — above all the **lane**.
+ *
+ * The lane is load-bearing. This is deliberately *not* filtered to unfinished
+ * work: "I finished X, next is Y" is the commonest real handoff and it lives on
+ * a `Done` task, so filtering would hide the best ones. Showing the lane beside
+ * it is what stops a finished task's handoff reading as live context.
+ *
+ * The join is INNER, unlike every read against `events`. `notes.task_id`
+ * cascades and `foreign_keys` is ON for every connection, so a note cannot
+ * outlive its task — ADR-008's dangling-reference case does not arise for
+ * content, only for history.
+ */
+export interface StoreHandoff {
+  readonly note: Note;
+  readonly taskId: string;
+  readonly taskTitle: string;
+  readonly taskLane: Lane;
+}
+
+export function latestHandoff(store: OpenStore): StoreHandoff | undefined {
+  const row = store.db
+    .prepare(
+      // `created_at DESC, rowid DESC`, and the tie-break is not optional just
+      // because there is no scope this time: with no `task_id` filter, `rowid`
+      // is the table's global insertion order, which is exactly the right
+      // answer when two handoffs share a millisecond.
+      `SELECT n.*, t.title AS task_title, t.lane AS task_lane
+         FROM notes n
+         JOIN tasks t ON t.id = n.task_id
+        WHERE n.kind = 'handoff'
+        ORDER BY n.created_at DESC, n.rowid DESC
+        LIMIT 1`,
+    )
+    .get() as (NoteRow & { task_title: unknown; task_lane: unknown }) | undefined;
+
+  if (row === undefined) return undefined;
+
+  // Through `rowToNote`, so the BLOB-in-a-TEXT-column refusal is inherited
+  // rather than re-implemented — and the two task columns narrowed the same way.
+  const note = rowToNote(row);
+  return {
+    note,
+    taskId: note.taskId,
+    taskTitle: narrowText(row.task_title, "task_title"),
+    taskLane: narrowLane(row.task_lane),
+  };
 }

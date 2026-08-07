@@ -4,6 +4,7 @@ import {
   countNotesByKind,
   createNote,
   getNote,
+  latestHandoff,
   latestNoteInScope,
   listNotes,
 } from "../../src/core/notes/repo.js";
@@ -370,5 +371,81 @@ describe("countNotesByKind", () => {
 
   it("returns an empty object for a scope with no notes", () => {
     expect(countNotesByKind(fixture.store, { taskId: seedTask(fixture.store) })).toEqual({});
+  });
+});
+
+describe("latestHandoff", () => {
+  it("returns the newest handoff across every task", () => {
+    const one = seedTask(fixture.store);
+    const two = seedTask(fixture.store);
+    createNote(fixture.store, { taskId: one, body: "older", kind: "handoff" });
+    const newest = createNote(fixture.store, { taskId: two, body: "newest", kind: "handoff" });
+
+    expect(latestHandoff(fixture.store)?.note.id).toBe(newest.id);
+  });
+
+  it("ignores notes of other kinds", () => {
+    const task = seedTask(fixture.store);
+    createNote(fixture.store, { taskId: task, body: "h", kind: "handoff" });
+    createNote(fixture.store, { taskId: task, body: "d", kind: "decision" });
+
+    expect(latestHandoff(fixture.store)?.note.body).toBe("h");
+  });
+
+  it("carries the lane of the task the handoff belongs to", () => {
+    const task = seedTask(fixture.store, { title: "the task", lane: "In Review" });
+    createNote(fixture.store, { taskId: task, body: "h", kind: "handoff" });
+
+    expect(latestHandoff(fixture.store)).toMatchObject({
+      taskId: task,
+      taskTitle: "the task",
+      taskLane: "In Review",
+    });
+  });
+
+  it("returns a handoff on a Done task rather than skipping it", () => {
+    // Deliberately unfiltered: "I finished X, next is Y" is the commonest real
+    // handoff and it lives on finished work. The lane above is what keeps it
+    // from reading as live context.
+    const task = seedTask(fixture.store, { lane: "Done" });
+    createNote(fixture.store, { taskId: task, body: "finished it", kind: "handoff" });
+
+    expect(latestHandoff(fixture.store)).toMatchObject({
+      taskLane: "Done",
+      note: { body: "finished it" },
+    });
+  });
+
+  it("prefers the newer of two handoffs sharing a millisecond", () => {
+    // No scope this time, so `rowid` is the table's global insertion order —
+    // still the right tie-break, and dropping it would order by random ids.
+    const task = seedTask(fixture.store);
+    const stamp = "2026-01-01T00:00:00.000Z";
+    const insert = fixture.store.db.prepare(
+      "INSERT INTO notes (id,task_id,kind,body,actor,created_at) VALUES (?,?,'handoff',?,?,?)",
+    );
+    for (const id of ["nt-zzzzzz", "nt-aaaaaa"]) {
+      insert.run(id, task, `body ${id}`, ACTOR, stamp);
+    }
+
+    expect(latestHandoff(fixture.store)?.note.id).toBe("nt-aaaaaa");
+  });
+
+  it("returns nothing on a store with no handoff notes", () => {
+    const task = seedTask(fixture.store);
+    createNote(fixture.store, { taskId: task, body: "general", kind: "general" });
+
+    expect(latestHandoff(fixture.store)).toBeUndefined();
+  });
+
+  it("refuses a handoff row whose body column holds a BLOB", () => {
+    const task = seedTask(fixture.store);
+    fixture.store.db
+      .prepare(
+        "INSERT INTO notes (id,task_id,kind,body,actor,created_at) VALUES (?,?,'handoff',CAST(? AS BLOB),?,?)",
+      )
+      .run("nt-blob03", task, Buffer.from("bytes"), ACTOR, "2026-01-01T00:00:00.000Z");
+
+    expect(() => latestHandoff(fixture.store)).toThrowError(/body must be text/);
   });
 });
