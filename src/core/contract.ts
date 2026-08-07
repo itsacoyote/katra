@@ -20,7 +20,7 @@
  * neither touches the database.
  */
 
-import type { Lane, NoteKind } from "./enums.js";
+import type { Lane, NoteKind, Priority } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
 import type { Note } from "./notes/types.js";
 import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
@@ -253,6 +253,117 @@ export type BriefResult =
       /** Children grouped by lane, in lane order, so the shape of the work reads. */
       readonly children: readonly BriefLane[];
     });
+
+/** A task on the board, with just enough to decide what to do about it. */
+export interface BoardTask {
+  readonly id: string;
+  readonly title: string;
+  readonly lane: Lane;
+  readonly priority: Priority;
+  /**
+   * True when this in-flight task has an unfinished dependency.
+   *
+   * Carried on the row rather than expressed by putting the task in `blocked`
+   * too: the sections are disjoint so the counts reconcile, and a task somebody
+   * is part-way through is in flight whatever is standing in its way. Always
+   * false outside the in-flight section, where the section itself says it.
+   */
+  readonly blocked: boolean;
+  /** What stands in its way. Populated for the blocked section. */
+  readonly blockers: readonly Blocker[];
+}
+
+/** One bounded section of the board. */
+export interface BoardSection {
+  readonly tasks: readonly BoardTask[];
+  /** True when the cap cut the section short. The counts above still say how many. */
+  readonly truncated: boolean;
+}
+
+/**
+ * The board's counts, which partition `open`.
+ *
+ * `open = inFlight + ready + blocked + untriaged`, exactly. The fifth number is
+ * why: `in flight` takes two lanes, `ready` takes startable `Planned` work,
+ * `blocked` takes what cannot start — and startable `Defined`/`Researching`
+ * tasks fall through all three. `add` writes into `Defined`, so on a young
+ * store that residue is the largest group, and a board without it renders
+ * `12 open · 0 · 0 · 0` above four empty sections.
+ *
+ * **Uncapped totals.** The sections below are bounded by `--limit`; these are
+ * not. A header that shrank to match the cap would state a backlog size that is
+ * not true, which is the one thing an orientation view must never do.
+ */
+export interface BoardCounts {
+  /** Non-terminal tasks: `level = 'task' AND lane NOT IN ('Done','Cancelled')`. */
+  readonly open: number;
+  readonly inFlight: number;
+  readonly ready: number;
+  readonly blocked: number;
+  /**
+   * Startable work nobody has planned yet.
+   *
+   * **Not** `next`'s `untriaged`, despite the name: that one counts everything
+   * outside `Planned` regardless of readiness, including work in progress. The
+   * two documents will legitimately disagree about this number for one store.
+   */
+  readonly untriaged: number;
+}
+
+/** The newest handoff in the store, with the task it belongs to. */
+export interface BoardDigest {
+  readonly note: Note;
+  readonly truncated: boolean;
+  readonly taskId: string;
+  readonly taskTitle: string;
+  /**
+   * The lane of the task the handoff is attached to.
+   *
+   * The digest is deliberately not filtered to unfinished work — "I finished X,
+   * next is Y" is the commonest real handoff and lives on a `Done` task, so
+   * filtering would hide the best ones. The lane is what stops a finished
+   * task's handoff from reading as live context.
+   */
+  readonly taskLane: Lane;
+}
+
+/**
+ * What `board` prints.
+ *
+ * A **fixed shape**, deliberately the opposite of {@link BriefResult}'s union:
+ * every key is always present and a section with nothing in it is empty rather
+ * than absent (ADR-009). `brief` describes one thing that is one of two kinds;
+ * `board` describes one store, which is always the same store.
+ *
+ * Epics appear in no section and in no count. Nothing forbids an epic sitting
+ * in `In Progress`, and an epic with a dependency is unready — so excluding
+ * them from `ready` alone would produce a board that refuses to offer an epic
+ * as work while showing it as work in progress.
+ */
+export interface BoardResult {
+  readonly counts: BoardCounts;
+  readonly inFlight: BoardSection;
+  readonly ready: BoardSection;
+  readonly blocked: BoardSection;
+  readonly recent: readonly LoggedEvent[];
+  readonly recentTruncated: boolean;
+  /**
+   * Where the work is when nothing is startable and nothing is under way.
+   *
+   * Null unless the in-flight, ready and blocked **counts** are all zero while
+   * `untriaged` is not. Triggered on the counts, never on the rendered
+   * sections: sections are capped, and `--limit 0` empties all three while the
+   * backlog is untouched.
+   *
+   * Without it a store holding twelve `Defined` tasks renders as four empty
+   * sections and says nothing about where the twelve are — the dead end
+   * `next`'s untriaged count exists to prevent, reintroduced in the command
+   * meant to be run at every checkpoint.
+   */
+  readonly pointer: string | null;
+  /** The newest handoff, when `--digest` asked for it. */
+  readonly digest: BoardDigest | null;
+}
 
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {
