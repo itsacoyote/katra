@@ -272,5 +272,20 @@ describe("the two shapes are different, not nested", () => {
     if (brief.level !== "epic") throw new Error("unreachable");
     expect(brief.children[0]?.tasks).toHaveLength(BRIEF_CHILDREN_PER_LANE);
     expect(brief.children[0]?.truncated).toBe(true);
+    // The *true* count, not the shown one. `total: tasks.slice(0, cap).length`
+    // would render "showing 8 of 8" and pass every other assertion here.
+    expect(brief.children[0]?.total).toBe(BRIEF_CHILDREN_PER_LANE + 3);
+  });
+
+  it("reports a lane's true total even when it is not truncated", () => {
+    const epic = seedEpic(fixture.store);
+    seedTask(fixture.store, { parentId: epic, lane: "Planned" });
+    seedTask(fixture.store, { parentId: epic, lane: "Planned" });
+
+    const brief = briefEntity(fixture.store, epic);
+
+    if (brief.level !== "epic") throw new Error("unreachable");
+    expect(brief.children[0]?.total).toBe(2);
+    expect(brief.children[0]?.truncated).toBe(false);
   });
 });

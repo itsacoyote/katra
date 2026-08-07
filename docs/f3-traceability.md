@@ -72,6 +72,13 @@ for.
   epic costs 501 queries even though the per-lane cap keeps the rendering
   short. Left unoptimised deliberately: epics with hundreds of children are not
   the shape katra is built for, and criterion 6h profiles `board`, not this.
+- **`brief` is not snapshotted; `board` is.** `briefEntity` runs five separate
+  auto-commit reads, so its note counts can be one note ahead of the handoff
+  printed above them. That is a deliberate trade against the entry below: the
+  child walk is 501 statements on a 500-child epic, and holding a WAL snapshot
+  across it stops checkpointing for the whole store. Board's sections sit under
+  counts that describe them, where skew would contradict the header; a brief has
+  no such claim to break.
 - **Board's read snapshot is consistent, not current.** The deferred
   transaction guarantees the five sections agree with each other, not that they
   reflect a commit that landed a millisecond ago.

@@ -16,10 +16,9 @@ import { KatraException } from "../errors.js";
 import { listBlockers, READINESS_VIEW } from "../graph/deps.js";
 import type { OpenStore } from "../store.js";
 import { getTask } from "./repo.js";
-import type { ReadyCandidate } from "./types.js";
 import { summarise } from "./types.js";
 
-export type { BlockedTask, NextResult, ReadyCandidate };
+export type { BlockedTask, NextResult };
 
 /** The lane `next` draws from: work that has been planned but not started. */
 export const NEXT_LANE = "Planned";
@@ -113,42 +112,19 @@ function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
 }
 
 /**
- * Every startable task, ranked, up to `limit`.
+ * What "startable" means, as a SQL fragment and its parameters.
  *
- * `nextTask` is this with `limit: 1` and a fuller read of the winner; `board`'s
- * ready section is this with a section cap. One query, so the two cannot
- * disagree about what to do next — which is a promise `board` makes explicitly
- * and could not keep by filtering `listTasks` instead. `list --ready` asks a
- * broader question (unblocked in *any* non-terminal lane, including work
- * already in progress), and answering "what should I start" with it would put
- * a task somebody is mid-way through at the top of the board.
- */
-export function readyCandidates(
-  store: OpenStore,
-  filters: NextFilters = {},
-  limit = 1,
-): ReadyCandidate[] {
-  const ready = conditionsFor(filters, true);
-  return store.db
-    .prepare(
-      `SELECT t.id AS id, t.title AS title, t.lane AS lane, t.priority AS priority
-         FROM tasks t
-         JOIN ${READINESS_VIEW} r ON r.id = t.id
-        WHERE ${ready.sql}
-        ${TASK_RANKING}
-        LIMIT ?`,
-    )
-    .all(...ready.params, limit) as ReadyCandidate[];
-}
-
-/**
- * The predicate behind {@link readyCandidates}, without the ranking or the
- * limit.
+ * The real shared surface between `next` and `board`, together with
+ * {@link TASK_RANKING}. Board issues its own `SELECT` — it needs `is_ready` per
+ * row for the in-flight blocked marker, which this query does not carry — so
+ * the two are not one query. They share the *predicate*, which is the thing
+ * that would otherwise drift: without it board hand-writes a fourth copy of
+ * "planned and unblocked and not an epic" and the first ready row stops
+ * agreeing with what `next` returns.
  *
- * `board` needs the *count* of startable work, and a count is uncapped — so it
- * cannot come from `readyCandidates`, which always takes a limit. Sharing the
- * predicate is what stops board hand-writing a fourth copy of
- * "planned and unblocked and not an epic" that drifts from this one.
+ * The fragment assumes the aliases `t` and `r`, and is parenthesis-free: both
+ * consumers concatenate it with `AND`, so a top-level `OR` added here would
+ * silently change what every caller means.
  */
 export function readyPredicate(filters: NextFilters = {}): Conditions {
   return conditionsFor(filters, true);
@@ -165,7 +141,16 @@ export function readyPredicate(filters: NextFilters = {}): Conditions {
  * Filters narrow the candidate pool; they never turn one result into several.
  */
 export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResult {
-  const candidate = readyCandidates(store, filters, 1)[0];
+  const ready = readyPredicate(filters);
+  const candidate = store.db
+    .prepare(
+      `SELECT t.id AS id FROM tasks t
+         JOIN ${READINESS_VIEW} r ON r.id = t.id
+        WHERE ${ready.sql}
+        ${TASK_RANKING}
+        LIMIT 1`,
+    )
+    .get(...ready.params) as { id: string } | undefined;
 
   if (candidate !== undefined) {
     const task = getTask(store, candidate.id);

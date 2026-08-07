@@ -153,8 +153,28 @@ function childrenByLane(store: OpenStore, epicId: string, caps: Caps): BriefLane
  * not a thing, and accepting one here would resolve an id whose task then reads
  * back as `undefined` — a second not-found branch that should not exist.
  *
- * Opens no transaction and resolves no actor: `brief` writes nothing, and the
- * actor costs two subprocess spawns.
+ * Resolves no actor: nothing here writes, and the actor costs two subprocess
+ * spawns.
+ *
+ * **Deliberately not wrapped in `readTx`, unlike `board`.** The rule this
+ * branch added to `AGENTS.md` — multi-statement reads that must agree with each
+ * other go inside one snapshot — is a real cost/benefit call, and it lands the
+ * other way here:
+ *
+ * - What could disagree is small. `noteCounts` could be a note ahead of the
+ *   `handoff` above it, or an epic's children a task ahead of its activity.
+ *   Board's five *counts* sit above the rows they describe and are read as one
+ *   statement about the store; a brief is a description of one entity where a
+ *   millisecond of skew changes a tally by one.
+ * - What it would cost is not. `childrenByLane` runs `listTasks({epic})`, and
+ *   `rowToTask` issues a tag query per row — 501 statements on a 500-child
+ *   epic. `readTx`'s own docstring says keep the callback short, because a
+ *   lingering read snapshot stops WAL checkpointing for the *whole store*, not
+ *   just this handle.
+ *
+ * Recorded in `docs/f3-traceability.md`'s known limits rather than left as an
+ * absence, because "brief does not do what board does" reads as an oversight
+ * unless the reason is written down.
  */
 export function briefEntity(
   store: OpenStore,

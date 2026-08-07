@@ -58,8 +58,6 @@ export interface BoardOptions {
    * work — came from a different snapshot than the sections it sat above.
    */
   readonly digest?: boolean;
-  /** How much of the handoff body to keep. Ignored unless `digest` is set. */
-  readonly digestChars?: number;
 }
 
 /**
@@ -200,7 +198,7 @@ export function readBoard(store: OpenStore, options: BoardOptions = {}): BoardRe
       recent: recent.events,
       recentTruncated: recent.truncated,
       pointer: pointerFor(counts),
-      digest: options.digest === true ? digestFor(store, options.digestChars) : null,
+      digest: options.digest === true ? digestFor(store) : null,
     };
   });
 }
@@ -212,11 +210,11 @@ export function readBoard(store: OpenStore, options: BoardOptions = {}): BoardRe
  * real handoff and lives on a `Done` task. The lane travels with it so a
  * finished task's handoff cannot be mistaken for live context.
  */
-function digestFor(store: OpenStore, chars: number | undefined): BoardResult["digest"] {
+function digestFor(store: OpenStore): BoardResult["digest"] {
   const handoff = latestHandoff(store);
   if (handoff === undefined) return null;
 
-  const capped = capText(handoff.note.body, chars ?? BOARD_DIGEST_CHARS);
+  const capped = capText(handoff.note.body, BOARD_DIGEST_CHARS);
   return {
     note: { ...handoff.note, body: capped.text },
     truncated: capped.truncated,

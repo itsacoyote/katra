@@ -65,6 +65,18 @@ export interface CappedText {
  * another session, that is not a trade worth making.
  */
 export function capText(text: string, max: number): CappedText {
+  // A width that is negative or NaN would otherwise never satisfy the
+  // `kept.length === max` test below, so the string would come back whole and
+  // `clamp` would append an ellipsis to it — returning something *wider* than
+  // the width it was given, from the helper whose job is bounding text.
+  if (!(max >= 0)) return { text: "", truncated: text !== "" };
+
+  // Code units are never fewer than code points, so a string that fits by this
+  // measure fits by the real one. It is what keeps `--full` — where `max` is
+  // Infinity — from building a throwaway array of every character in a 200 KB
+  // paste just to discard it and return the input.
+  if (text.length <= max) return { text, truncated: false };
+
   const kept: string[] = [];
   for (const char of text) {
     if (kept.length === max) return { text: kept.join(""), truncated: true };

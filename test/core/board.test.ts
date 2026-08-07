@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BOARD_SECTION_LIMIT, readBoard } from "../../src/core/board.js";
 import { addDependency } from "../../src/core/graph/deps.js";
 import { createNote } from "../../src/core/notes/repo.js";
+import { BRIEF_HANDOFF_CHARS } from "../../src/core/tasks/brief.js";
 import { nextTask } from "../../src/core/tasks/next.js";
 import { seedDep, seedEpic, seedEvent, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
@@ -293,13 +294,19 @@ describe("the digest reads inside the same snapshot", () => {
     expect(readBoard(fixture.store).digest).toBeNull();
   });
 
-  it("caps the digest body and reports it", () => {
+  it("caps the digest body at the same bound brief uses, and reports it", () => {
+    // The real cap, not an injected one: an option nothing ships would only be
+    // exercised here, which is the shape of a bound nobody actually gets.
     const task = seedTask(fixture.store);
-    createNote(fixture.store, { taskId: task, body: "x".repeat(50), kind: "handoff" });
+    createNote(fixture.store, {
+      taskId: task,
+      body: "x".repeat(BRIEF_HANDOFF_CHARS + 50),
+      kind: "handoff",
+    });
 
-    const board = readBoard(fixture.store, { digest: true, digestChars: 10 });
+    const board = readBoard(fixture.store, { digest: true });
 
     expect(board.digest?.truncated).toBe(true);
-    expect(board.digest?.note.body).toHaveLength(10);
+    expect(board.digest?.note.body).toHaveLength(BRIEF_HANDOFF_CHARS);
   });
 });

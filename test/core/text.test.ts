@@ -109,3 +109,22 @@ describe("clamp's boundary, through the log renderer", () => {
     expect(formatEventLog([row(over)], false)).toContain("…");
   });
 });
+
+describe("capText at degenerate widths", () => {
+  it("keeps nothing at a negative or NaN width, rather than everything", () => {
+    // Both would otherwise never satisfy `kept.length === max`, so the string
+    // came back whole with `truncated: false` — and `clamp` then appended an
+    // ellipsis, returning something wider than the width it was given.
+    expect(capText("ab", -1)).toEqual({ text: "", truncated: true });
+    expect(capText("ab", Number.NaN)).toEqual({ text: "", truncated: true });
+    expect(capText("", -1)).toEqual({ text: "", truncated: false });
+  });
+
+  it("returns a long body unchanged at an infinite cap without copying it", () => {
+    // What `--full` passes. The fast path matters here: iterating would build a
+    // throwaway array of every character in a 200 KB paste to return the input.
+    const body = "x".repeat(200_000);
+
+    expect(capText(body, Number.POSITIVE_INFINITY)).toEqual({ text: body, truncated: false });
+  });
+});

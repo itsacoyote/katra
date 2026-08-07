@@ -233,3 +233,44 @@ describe("board and untrusted text", () => {
     expect(document.digest?.note.body).toBe(body);
   });
 });
+
+describe("--limit 0 does not lie about the store", () => {
+  it("does not claim the backlog is empty when everything is closed", async () => {
+    // The regression a naive `recent.length === 0` sentinel produces once
+    // `--limit` bounds recent: on a store whose work is all finished, the text
+    // output claimed an empty backlog while --json carried the full history.
+    const task = await add(["shipped work"]);
+    await runCli(["close", task], { cwd: repo.dir });
+
+    const out = await board(["--limit", "0"]);
+
+    expect(out).not.toContain("the backlog is empty");
+    expect(out).toContain("0 open");
+  });
+
+  it("still reports that activity was truncated under --limit 0", async () => {
+    // The task sections can be recovered from the counts header; this one
+    // cannot, so silence here is the only unrecoverable truncation on the board.
+    await add(["a task"]);
+
+    const out = await board(["--limit", "0"]);
+
+    expect(out).toContain("recent");
+    expect(out).toContain("`katra log` for the rest");
+  });
+
+  it("still leads with the digest under --limit 0", async () => {
+    const task = await add(["a task"]);
+    await note(task, "the handoff must survive a zero limit");
+
+    const out = await board(["--digest", "--limit", "0"]);
+
+    expect(out).toContain("the handoff must survive a zero limit");
+  });
+
+  it("still says the backlog is empty on a genuinely empty store", async () => {
+    const result = await runCli(["board", "--limit", "0"], { cwd: repo.dir });
+
+    expect(result.stdout).toContain("empty");
+  });
+});

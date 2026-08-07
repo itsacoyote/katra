@@ -611,7 +611,11 @@ export function formatBoard(board: BoardResult): string {
 
   if (board.pointer !== null) lines.push("", board.pointer);
 
-  if (board.recent.length > 0) {
+  // `|| recentTruncated`, so `--limit 0` still reports that activity exists.
+  // The task sections can be recovered from the counts header; this one cannot,
+  // so an empty-and-silent activity section is the only place on the board where
+  // truncation is unrecoverable. `formatEventLog` handles the identical case.
+  if (board.recent.length > 0 || board.recentTruncated) {
     lines.push("", "recent (newest first — `katra log` for the rest)");
     for (const event of board.recent) {
       const when = event.createdAt.slice(0, 16).replace("T", " ");
@@ -629,7 +633,14 @@ export function formatBoard(board: BoardResult): string {
   // An empty store still says something. A blank response is indistinguishable
   // from a command that failed silently, and this is the read a session opens
   // with.
-  if (counts.open === 0 && board.recent.length === 0) {
+  //
+  // `recentTruncated` is part of the test because `recent.length` became a
+  // function of `--limit`. Without it, `board --limit 0` on a store whose work
+  // is all closed printed "the backlog is empty" — a false statement, and one
+  // that discarded a digest the command had correctly assembled. Key it off
+  // what the store holds, never off what the cap rendered, exactly as
+  // `pointerFor` does.
+  if (counts.open === 0 && board.recent.length === 0 && !board.recentTruncated) {
     return 'the backlog is empty — `katra add "a title"` to start';
   }
 
