@@ -247,8 +247,8 @@ describe("the two shapes are different, not nested", () => {
     const epic = seedEpic(fixture.store);
     const task = seedTask(fixture.store, { parentId: epic });
 
-    const taskBrief = briefEntity(fixture.store, task) as Record<string, unknown>;
-    const epicBrief = briefEntity(fixture.store, epic) as Record<string, unknown>;
+    const taskBrief = briefEntity(fixture.store, task) as unknown as Record<string, unknown>;
+    const epicBrief = briefEntity(fixture.store, epic) as unknown as Record<string, unknown>;
 
     expect(Object.hasOwn(taskBrief, "blockers")).toBe(true);
     expect(Object.hasOwn(taskBrief, "children")).toBe(false);
