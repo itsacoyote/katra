@@ -40,6 +40,7 @@ const EXPECTED_COMMANDS = [
   "log",
   "note",
   "brief",
+  "board",
 ] as const;
 
 let repo: GitFixture;
@@ -54,7 +55,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all fifteen commands on the program", () => {
+  it("registers all sixteen commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -63,7 +64,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(15);
+    expect(registered).toHaveLength(16);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -113,6 +114,7 @@ describe("--json across every command", () => {
       ["log", doomed],
       ["note", "list"],
       ["brief", epic],
+      ["board", "--digest"],
     ];
 
     const seen = new Set<string>();

@@ -6,7 +6,7 @@
  * drift. Every function here is pure: value in, string out.
  */
 
-import type { BriefResult } from "../core/contract.js";
+import type { BoardResult, BriefResult } from "../core/contract.js";
 import type { LoggedEvent } from "../core/events/types.js";
 import type { Note } from "../core/notes/types.js";
 import type { Task, TaskDetail, TaskView } from "../core/tasks/types.js";
@@ -531,4 +531,94 @@ export function formatBrief(brief: BriefResult): string {
   }
 
   return lines.join("\n");
+}
+
+/**
+ * The board: where the repository stands, in five parts.
+ *
+ * Actionable first, activity last. An agent that reads only the header and the
+ * first two sections has still been oriented and knows what to pick up.
+ *
+ * The counts are totals and the sections are capped, so a section saying
+ * `showing 2 of 14` is the normal case rather than an error — a header that
+ * shrank to match the cap would state a backlog size that is not true.
+ */
+export function formatBoard(board: BoardResult): string {
+  const { counts } = board;
+  const lines: string[] = [];
+
+  if (board.digest !== null) {
+    const { note, taskId, taskTitle, taskLane, truncated } = board.digest;
+    const when = note.createdAt.slice(0, 16).replace("T", " ");
+    // The lane is in the heading, not buried below: a handoff on a `Done` task
+    // is legitimately the newest one, and a session must not read it as live
+    // work. "last touch" for the same reason it appears in `brief` — katra has
+    // no notion of ownership until claims land.
+    lines.push(
+      `handoff  ${taskId}  ${taskLane}  ${text(taskTitle)}`,
+      `  last touch ${text(note.actor)}, ${when}`,
+      "",
+      indent(sanitizeBody(note.body).trimEnd()),
+    );
+    if (truncated) {
+      lines.push(`  … truncated — \`katra note list ${taskId}\` for the whole note`);
+    }
+    lines.push("");
+  }
+
+  lines.push(
+    `${counts.open} open · ${counts.inFlight} in flight · ${counts.ready} ready · ` +
+      `${counts.blocked} blocked · ${counts.untriaged} untriaged`,
+  );
+
+  const rows = (section: BoardResult["inFlight"], showBlockers: boolean): string[] => {
+    const idWidth = columnWidth(section.tasks, (task) => task.id);
+    const laneWidth = columnWidth(section.tasks, (task) => task.lane);
+    return section.tasks.map((task) => {
+      const marker = task.blocked && !showBlockers ? "  (blocked)" : "";
+      const blockers = showBlockers
+        ? `  blocked by ${task.blockers.map((blocker) => blocker.id).join(", ")}`
+        : "";
+      return `  ${padTo(task.id, idWidth)}  P${task.priority}  ${padTo(task.lane, laneWidth)}  ${text(task.title)}${marker}${blockers}`;
+    });
+  };
+
+  const push = (
+    title: string,
+    section: BoardResult["inFlight"],
+    total: number,
+    showBlockers = false,
+  ): void => {
+    if (section.tasks.length === 0) return;
+    // Names the true total whenever the cap bit, so a capped section can never
+    // be mistaken for the whole answer.
+    const shown = section.truncated ? ` (showing ${section.tasks.length} of ${total})` : "";
+    lines.push("", `${title}${shown}`, ...rows(section, showBlockers));
+  };
+
+  push("in flight", board.inFlight, counts.inFlight);
+  push("ready", board.ready, counts.ready);
+  push("blocked", board.blocked, counts.blocked, true);
+
+  if (board.pointer !== null) lines.push("", board.pointer);
+
+  if (board.recent.length > 0) {
+    lines.push("", "recent (newest first — `katra log` for the rest)");
+    for (const event of board.recent) {
+      const when = event.createdAt.slice(0, 16).replace("T", " ");
+      const title = event.entityTitle === null ? "" : previewBody(event.entityTitle, TITLE_WIDTH);
+      lines.push(
+        `  ${when}  ${padTo(event.type, 14)}  ${event.entityId}  ${title}  ${describeEvent(event)}`.trimEnd(),
+      );
+    }
+  }
+
+  // An empty store still says something. A blank response is indistinguishable
+  // from a command that failed silently, and this is the read a session opens
+  // with.
+  if (counts.open === 0 && board.recent.length === 0) {
+    return 'the backlog is empty — `katra add "a title"` to start';
+  }
+
+  return lines.join("\n").trimStart();
 }

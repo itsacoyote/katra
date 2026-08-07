@@ -13,6 +13,7 @@ import { KatraException } from "../core/errors.js";
 import { VERSION } from "../version.js";
 import { readPipedStdin } from "./body.js";
 import { registerAdd } from "./commands/add.js";
+import { registerBoard } from "./commands/board.js";
 import { registerBrief } from "./commands/brief.js";
 import { registerDelete } from "./commands/delete.js";
 import { registerDep } from "./commands/dep.js";
@@ -213,6 +214,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerNote(program, context);
   registerNext(program, context);
   registerBrief(program, context);
+  registerBoard(program, context);
 
   return program;
 }

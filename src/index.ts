@@ -29,6 +29,11 @@
 export type {
   BlockedTask,
   Blocker,
+  BoardCounts,
+  BoardDigest,
+  BoardResult,
+  BoardSection,
+  BoardTask,
   BriefLane,
   BriefNote,
   BriefResult,
