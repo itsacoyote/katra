@@ -65,6 +65,8 @@ describe("the public barrel", () => {
       katra.EventLog,
       katra.NoteList,
       katra.NextResult,
+      katra.BriefResult,
+      katra.BoardResult,
       katra.DeleteResult,
       katra.LifecycleResult,
       katra.DependencyResult,
@@ -78,8 +80,8 @@ describe("the public barrel", () => {
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
     // noUnusedLocals, and exporting it trips the no-exports-in-test rule.
-    const count: PublishedDocuments["length"] = 15;
-    expect(count).toBe(15);
+    const count: PublishedDocuments["length"] = 17;
+    expect(count).toBe(17);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {
