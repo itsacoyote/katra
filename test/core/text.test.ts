@@ -1,0 +1,79 @@
+import { describe, expect, it } from "vitest";
+import { capText, textWidth } from "../../src/core/text.js";
+
+/** A non-BMP character: two UTF-16 code units, one code point. */
+const EMOJI = "🜃";
+
+describe("capText", () => {
+  it("leaves a string shorter than the cap exactly as it was", () => {
+    expect(capText("short", 20)).toEqual({ text: "short", truncated: false });
+  });
+
+  it("leaves a string exactly at the cap alone", () => {
+    // Off-by-one here would report truncation on a body that lost nothing, and
+    // `brief` prints that report as prose telling the reader to go look for the
+    // rest of a note that is already whole.
+    expect(capText("12345", 5)).toEqual({ text: "12345", truncated: false });
+  });
+
+  it("reports truncation only when it actually cut", () => {
+    expect(capText("123456", 5).truncated).toBe(true);
+    expect(capText("12345", 5).truncated).toBe(false);
+    expect(capText("", 5).truncated).toBe(false);
+  });
+
+  it("caps on a code-point boundary rather than mid-surrogate", () => {
+    // The failure a raw `.slice()` produces: an emoji is two UTF-16 code units,
+    // so cutting between them emits a lone surrogate. `brief`'s handoff cap
+    // runs over pasted transcripts thousands of characters long, where a
+    // non-BMP character sitting on the boundary is likely rather than exotic.
+    const body = `${EMOJI.repeat(10)}tail`;
+
+    const capped = capText(body, 5).text;
+
+    expect(capped).toBe(EMOJI.repeat(5));
+    // No lone surrogate survived: every code unit pairs up.
+    expect(capped).toBe(capped.replaceAll(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/gu, "?"));
+    expect(capped).toBe(capped.replaceAll(/(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/gu, "?"));
+  });
+
+  it("counts a non-BMP character as one, not two", () => {
+    // The unit the whole task turns on. Ten emoji are twenty code units; a
+    // cap of ten must keep all ten characters.
+    expect(capText(EMOJI.repeat(10), 10)).toEqual({
+      text: EMOJI.repeat(10),
+      truncated: false,
+    });
+  });
+
+  it("round-trips a capped body through JSON and back", () => {
+    // `--json` is the agent-facing contract, and a lone surrogate is not valid
+    // Unicode however tolerant JS strings are about holding one.
+    const capped = capText(`${EMOJI.repeat(10)}tail`, 7).text;
+
+    expect(JSON.parse(JSON.stringify({ body: capped })).body).toBe(capped);
+    expect(capped).not.toMatch(/�/u);
+  });
+
+  it("treats a cap of zero as keeping nothing", () => {
+    expect(capText("anything", 0)).toEqual({ text: "", truncated: true });
+  });
+});
+
+describe("textWidth", () => {
+  it("measures in the same unit capText cuts in", () => {
+    // The trap that makes this function exist. Column widths were computed with
+    // `.length` — UTF-16 code units — while the cap counts code points. A title
+    // of 44 emoji then measures 88 and pads every ASCII row in the log to 88
+    // characters, so fixing the cap alone would break alignment everywhere.
+    const title = EMOJI.repeat(44);
+
+    expect(textWidth(title)).toBe(44);
+    expect(title.length).toBe(88);
+    expect(textWidth(capText(title, 44).text)).toBe(44);
+  });
+
+  it("agrees with length for ASCII", () => {
+    expect(textWidth("plain ascii")).toBe("plain ascii".length);
+  });
+});

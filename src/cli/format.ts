@@ -9,6 +9,7 @@
 import type { LoggedEvent } from "../core/events/types.js";
 import type { Note } from "../core/notes/types.js";
 import type { Task, TaskDetail, TaskView } from "../core/tasks/types.js";
+import { capText, textWidth } from "../core/text.js";
 
 function field(label: string, value: string): string {
   return `  ${label.padEnd(12)}${value}`;
@@ -94,11 +95,7 @@ export function formatTaskDetail(detail: TaskDetail): string {
 export function formatTaskList(tasks: readonly Task[]): string {
   if (tasks.length === 0) return "no tasks match";
 
-  // Reduced rather than `Math.max(...tasks.map(…))`: spreading the result set
-  // as arguments blows the stack somewhere past a hundred thousand rows, and
-  // `list` has no limit.
-  const width = (pick: (task: Task) => string): number =>
-    tasks.reduce((widest, task) => Math.max(widest, pick(task).length), 0);
+  const width = (pick: (task: Task) => string): number => columnWidth(tasks, pick);
   const laneWidth = width((task) => task.lane);
   const kindWidth = width((task) => (task.level === "epic" ? "epic" : task.kind));
 
@@ -107,8 +104,8 @@ export function formatTaskList(tasks: readonly Task[]): string {
       [
         task.id,
         `P${task.priority}`,
-        task.lane.padEnd(laneWidth),
-        (task.level === "epic" ? "epic" : task.kind).padEnd(kindWidth),
+        padTo(task.lane, laneWidth),
+        padTo(task.level === "epic" ? "epic" : task.kind, kindWidth),
         text(task.title),
       ].join("  "),
     )
@@ -128,7 +125,7 @@ export function formatUpdatedTasks(tasks: readonly TaskDetail[]): string {
   const width = tasks.reduce((widest, { task }) => Math.max(widest, task.lane.length), 0);
   return [
     `updated ${tasks.length} tasks`,
-    ...tasks.map(({ task }) => `  ${task.id}  ${task.lane.padEnd(width)}  ${text(task.title)}`),
+    ...tasks.map(({ task }) => `  ${task.id}  ${padTo(task.lane, width)}  ${text(task.title)}`),
   ].join("\n");
 }
 
@@ -191,8 +188,55 @@ function describeEvent(event: LoggedEvent): string {
  */
 const TITLE_WIDTH = 44;
 
+/**
+ * Cuts a title to `width`, marking the cut with an ellipsis.
+ *
+ * Measured in code points, via `capText`, not in UTF-16 code units. The
+ * previous `text.slice()` could split a surrogate pair and emit a lone
+ * surrogate — unlikely at 44 characters, but the same bug class `brief`'s
+ * handoff cap makes routine, and worth fixing in one place rather than two.
+ *
+ * The ellipsis costs one of the `width` characters, so a clamped string still
+ * occupies exactly `width` columns and {@link columnWidth} agrees with it.
+ */
 function clamp(text: string, width: number): string {
-  return text.length <= width ? text : `${text.slice(0, width - 1)}…`;
+  const capped = capText(text, width - 1);
+  return capped.truncated ? `${capped.text}…` : text;
+}
+
+/**
+ * The widest rendering of `pick` across `rows`, in the unit {@link clamp} cuts
+ * in.
+ *
+ * Extracted rather than written a fourth time — `formatTaskList` and
+ * `formatEventLog` each had their own copy of this closure with the same
+ * explanatory comment, and `board` adds two more tabular sections.
+ *
+ * Reduced rather than `Math.max(...rows.map(…))`: spreading the result set as
+ * arguments blows the stack somewhere past a hundred thousand rows, `list` has
+ * no limit, and nothing prunes the events table by design (ADR-008).
+ *
+ * `textWidth`, never `.length`. Code units would size a column of emoji at
+ * twice its visible width and pad every ASCII row beside it to match.
+ */
+export function columnWidth<T>(rows: readonly T[], pick: (row: T) => string): number {
+  return rows.reduce((widest, row) => Math.max(widest, textWidth(pick(row))), 0);
+}
+
+/**
+ * Pads `text` to `width` visible characters.
+ *
+ * `String.padEnd` is the third place this file measured in UTF-16 code units,
+ * and the one that survives fixing the other two: a title of four emoji is
+ * eight code units, so `padEnd(5)` decides it is already wide enough and adds
+ * nothing, while the ASCII row beside it pads to five. The columns after it
+ * then start one character apart.
+ *
+ * Any column sized by {@link columnWidth} must be padded by this, never by
+ * `padEnd` — the two have to count the same things.
+ */
+export function padTo(text: string, width: number): string {
+  return text + " ".repeat(Math.max(0, width - textWidth(text)));
 }
 
 /**
@@ -210,11 +254,7 @@ export function formatEventLog(events: readonly LoggedEvent[], truncated: boolea
     return truncated ? "  … more; raise --limit to see further back" : "nothing has happened yet";
   }
 
-  // Reduced rather than `Math.max(...events.map(…))`: spreading the result set
-  // as arguments blows the stack somewhere past a hundred thousand rows, and
-  // nothing prunes this table (ADR-008), so its size is unbounded by design.
-  const width = (pick: (event: LoggedEvent) => string): number =>
-    events.reduce((widest, event) => Math.max(widest, pick(event).length), 0);
+  const width = (pick: (event: LoggedEvent) => string): number => columnWidth(events, pick);
 
   const title = (event: LoggedEvent): string =>
     event.entityTitle === null ? "" : clamp(oneLine(event.entityTitle), TITLE_WIDTH);
@@ -242,10 +282,10 @@ export function formatEventLog(events: readonly LoggedEvent[], truncated: boolea
         // Minutes, not seconds: a log spanning weeks needs the date, and the
         // second an event landed has never answered anyone's question.
         event.createdAt.slice(0, 16).replace("T", " "),
-        event.type.padEnd(typeWidth),
-        event.entityId.padEnd(idWidth),
-        ...(showActor ? [oneLine(event.actor).padEnd(actorWidth)] : []),
-        ...(showTitle ? [title(event).padEnd(titleWidth)] : []),
+        padTo(event.type, typeWidth),
+        padTo(event.entityId, idWidth),
+        ...(showActor ? [padTo(oneLine(event.actor), actorWidth)] : []),
+        ...(showTitle ? [padTo(title(event), titleWidth)] : []),
         describeEvent(event),
       ];
       return columns.join("  ").trimEnd();
