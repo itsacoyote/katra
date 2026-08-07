@@ -20,6 +20,7 @@
  * neither touches the database.
  */
 
+import type { Lane, NoteKind } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
 import type { Note } from "./notes/types.js";
 import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
@@ -179,6 +180,79 @@ export type NextResult =
        */
       readonly untriaged: number;
     };
+
+/** A note shown in full, and what the cap did to it. */
+export interface BriefNote {
+  readonly note: Note;
+  /**
+   * True when the character cap cut the body.
+   *
+   * The rule every bound in katra follows, and it matters most here: a handoff
+   * that looks complete and is not is worse than an absent one, because a
+   * session acts on it. The human rendering names `note list` when this is set;
+   * `--json` has no prose, so it has this.
+   */
+  readonly truncated: boolean;
+}
+
+/** An epic's children, grouped under the lane they sit in. */
+export interface BriefLane {
+  readonly lane: Lane;
+  readonly tasks: readonly TaskSummary[];
+  /**
+   * True when this lane holds more children than were returned.
+   *
+   * Per lane rather than for the children as a whole, because the cap is per
+   * lane: a single global cap over a list ordered by priority can fill itself
+   * from forty `Done` children and show none of the three that are left to do.
+   */
+  readonly truncated: boolean;
+}
+
+/** What `brief` prints, common to both shapes. */
+interface BriefCommon {
+  readonly task: Task;
+  /** The epic this belongs to, resolved so output can name it. Null on an epic. */
+  readonly epic: TaskSummary | null;
+  /**
+   * The latest `handoff`, in full — the reason `brief` exists.
+   *
+   * `show` prints note *previews* and caps them at five, which is exactly the
+   * shape that makes a handoff useless: it is written to be read whole. Null
+   * when the scope holds none.
+   */
+  readonly handoff: BriefNote | null;
+  /** How many other notes are attached, by kind, so nothing is invisible. */
+  readonly noteCounts: Partial<Record<NoteKind, number>>;
+  readonly activity: readonly LoggedEvent[];
+  readonly activityTruncated: boolean;
+}
+
+/**
+ * What `brief` prints.
+ *
+ * A discriminated union on `level`, not one shape with optional fields, for the
+ * same reason {@link NextResult} is one: a consumer must never have to guess
+ * whether a field is absent because it does not apply or because nothing filled
+ * it in. An epic has children and no blockers; a task has blockers and no
+ * children. Those are different questions, and the type says so — which also
+ * lets the formatter be exhaustive against `never`.
+ *
+ * {@link BoardResult} is deliberately the opposite: fixed keys, always present,
+ * empty when they have nothing (ADR-009). `brief` describes one thing that is
+ * one of two kinds; `board` describes one thing that is always the same shape.
+ */
+export type BriefResult =
+  | (BriefCommon & {
+      readonly level: "task";
+      readonly blockers: readonly Blocker[];
+      readonly blocking: readonly Blocker[];
+    })
+  | (BriefCommon & {
+      readonly level: "epic";
+      /** Children grouped by lane, in lane order, so the shape of the work reads. */
+      readonly children: readonly BriefLane[];
+    });
 
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {
