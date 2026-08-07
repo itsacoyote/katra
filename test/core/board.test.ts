@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BOARD_SECTION_LIMIT, readBoard } from "../../src/core/board.js";
 import { addDependency } from "../../src/core/graph/deps.js";
+import { createNote } from "../../src/core/notes/repo.js";
 import { nextTask } from "../../src/core/tasks/next.js";
-import { seedDep, seedEpic, seedTask } from "../helpers/seed.js";
+import { seedDep, seedEpic, seedEvent, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -241,5 +242,64 @@ describe("board writes nothing", () => {
 
     expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM events").get()).toEqual(before);
     expect(fixture.store.db.inTransaction).toBe(false);
+  });
+});
+
+describe("recent is a section like any other", () => {
+  it("bounds recent with the same limit as the task sections", () => {
+    // It was hard-wired to its own constant, so `--limit 0` emptied the three
+    // task sections and still printed eight activity rows — a section both the
+    // spec and ADR-009 say `--limit` bounds.
+    for (let i = 0; i < 6; i++) seedTask(fixture.store, { lane: "Planned" });
+    const task = seedTask(fixture.store, { lane: "Planned" });
+    for (let i = 0; i < 6; i++) {
+      seedEvent(fixture.store, { type: "created", entityId: task });
+    }
+
+    const board = readBoard(fixture.store, { limit: 2 });
+
+    expect(board.recent).toHaveLength(2);
+    expect(board.recentTruncated).toBe(true);
+  });
+
+  it("returns no activity at all under --limit 0", () => {
+    const task = seedTask(fixture.store);
+    seedEvent(fixture.store, { type: "created", entityId: task });
+
+    expect(readBoard(fixture.store, { limit: 0 }).recent).toEqual([]);
+  });
+});
+
+describe("the digest reads inside the same snapshot", () => {
+  it("carries the handoff and its task's lane when asked", () => {
+    const task = seedTask(fixture.store, { title: "the task", lane: "In Review" });
+    createNote(fixture.store, { taskId: task, body: "a handoff", kind: "handoff" });
+
+    const board = readBoard(fixture.store, { digest: true });
+
+    expect(board.digest).toMatchObject({
+      taskId: task,
+      taskTitle: "the task",
+      taskLane: "In Review",
+      truncated: false,
+    });
+    expect(board.digest?.note.body).toBe("a handoff");
+  });
+
+  it("stays null when the flag is not passed", () => {
+    const task = seedTask(fixture.store);
+    createNote(fixture.store, { taskId: task, body: "a handoff", kind: "handoff" });
+
+    expect(readBoard(fixture.store).digest).toBeNull();
+  });
+
+  it("caps the digest body and reports it", () => {
+    const task = seedTask(fixture.store);
+    createNote(fixture.store, { taskId: task, body: "x".repeat(50), kind: "handoff" });
+
+    const board = readBoard(fixture.store, { digest: true, digestChars: 10 });
+
+    expect(board.digest?.truncated).toBe(true);
+    expect(board.digest?.note.body).toHaveLength(10);
   });
 });

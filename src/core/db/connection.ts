@@ -190,6 +190,22 @@ export function assertNotReadOnly(db: DatabaseHandle, what: string): void {
  * fixtures close handles to avoid.
  */
 export function readTx<T>(db: DatabaseHandle, fn: () => T): T {
+  // Inside a write transaction this would be a SAVEPOINT within an IMMEDIATE
+  // one, where writes are perfectly safe — but the depth counter would forbid
+  // them and a legal write would surface as `internal`/exit 4. Nothing calls it
+  // this way today, and the nesting has no meaning: the outer transaction
+  // already gives one consistent snapshot, which is the only thing this
+  // provides. Refuse it plainly rather than leave the trap set.
+  if (db.inTransaction && (readDepth.get(db) ?? 0) === 0) {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "readTx was called inside a write transaction. The write transaction " +
+        "already provides one consistent snapshot, and nesting a read inside " +
+        "it would forbid the writes it exists to make.",
+    });
+  }
+
   const runner = db.transaction(() => {
     readDepth.set(db, (readDepth.get(db) ?? 0) + 1);
     try {

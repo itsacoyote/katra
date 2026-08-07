@@ -79,12 +79,18 @@ interface Caps {
 }
 
 function capsFor(options: BriefOptions): Caps {
-  // `--full` scales rather than switching to unbounded. An unbounded branch is
-  // a second code path that only runs when someone asks for it, and the one
-  // input that reaches it is the pathological note the cap exists for.
-  const factor = options.full === true ? FULL_MULTIPLIER : 1;
+  const full = options.full === true;
+  const factor = full ? FULL_MULTIPLIER : 1;
   return {
-    handoffChars: BRIEF_HANDOFF_CHARS * factor,
+    // `--full` **lifts** this one rather than raising it, which is the verb the
+    // spec uses and the difference that matters: multiplying it by twenty still
+    // truncates the 200 KB paste the flag exists for, and sends the reader to
+    // `note list` anyway. `capText` handles Infinity on the same code path —
+    // its `kept.length === max` comparison simply never fires — so this is not
+    // an unbounded branch, just an unbounded bound.
+    handoffChars: full ? Number.POSITIVE_INFINITY : BRIEF_HANDOFF_CHARS,
+    // The row caps are *raised*, not lifted: an epic with ten thousand children
+    // is still not something to print.
     activity: BRIEF_ACTIVITY_LIMIT * factor,
     childrenPerLane: BRIEF_CHILDREN_PER_LANE * factor,
   };
@@ -128,6 +134,7 @@ function childrenByLane(store: OpenStore, epicId: string, caps: Caps): BriefLane
     lanes.push({
       lane,
       tasks: tasks.slice(0, caps.childrenPerLane),
+      total: tasks.length,
       truncated: tasks.length > caps.childrenPerLane,
     });
   }

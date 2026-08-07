@@ -10,9 +10,6 @@ import type { Command } from "commander";
 import { readBoard } from "../../core/board.js";
 import type { BoardResult } from "../../core/contract.js";
 import { narrowCount } from "../../core/narrow.js";
-import { latestHandoff } from "../../core/notes/repo.js";
-import { BRIEF_HANDOFF_CHARS } from "../../core/tasks/brief.js";
-import { capText } from "../../core/text.js";
 import { formatBoard } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
@@ -31,29 +28,16 @@ export function registerBoard(program: Command, context: CliContext): void {
       // `--limit 0` reaches the query as a real zero.
       const limit = options.limit === undefined ? undefined : narrowCount(options.limit, "limit");
 
-      const { result, warnings } = withStore(context, (store) => {
-        const board = readBoard(store, limit === undefined ? {} : { limit });
-        if (options.digest !== true) return board;
-
-        // Read outside `readBoard` rather than inside it: the digest is a flag
-        // on the command, and threading it through the core assembly would make
-        // every board read carry a query most of them do not want. The field is
-        // declared on the document either way, so the shape never varies.
-        const handoff = latestHandoff(store);
-        if (handoff === undefined) return board;
-
-        const capped = capText(handoff.note.body, BRIEF_HANDOFF_CHARS);
-        return {
-          ...board,
-          digest: {
-            note: { ...handoff.note, body: capped.text },
-            truncated: capped.truncated,
-            taskId: handoff.taskId,
-            taskTitle: handoff.taskTitle,
-            taskLane: handoff.taskLane,
-          },
-        };
-      });
+      // The digest is read inside `readBoard`'s snapshot, not spliced on after
+      // it. Its `taskLane` exists to stop a finished task's handoff reading as
+      // live work, and a lane from a different snapshot than the sections above
+      // it would be exactly the inconsistency `readTx` exists to prevent.
+      const { result, warnings } = withStore(context, (store) =>
+        readBoard(store, {
+          ...(limit === undefined ? {} : { limit }),
+          ...(options.digest === true ? { digest: true } : {}),
+        }),
+      );
 
       // Annotated, so the shape the CLI prints and the type the package
       // publishes cannot drift apart without a compile error.

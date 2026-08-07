@@ -201,8 +201,12 @@ const TITLE_WIDTH = 44;
  * occupies exactly `width` columns and {@link columnWidth} agrees with it.
  */
 function clamp(text: string, width: number): string {
-  const capped = capText(text, width - 1);
-  return capped.truncated ? `${capped.text}…` : text;
+  // Two calls, deliberately. Capping at `width - 1` and asking *that* whether
+  // it truncated ellipsizes a string of exactly `width`, which used to render
+  // whole — the boundary title silently loses its last character. Ask the full
+  // width whether a cut is needed, then cut one shorter to make room.
+  if (!capText(text, width).truncated) return text;
+  return `${capText(text, width - 1).text}…`;
 }
 
 /**
@@ -475,8 +479,13 @@ export function formatBrief(brief: BriefResult): string {
     }
   } else {
     for (const group of brief.children) {
-      const more = group.truncated ? `, more not shown` : "";
-      lines.push("", `${group.lane} (${group.tasks.length}${more})`);
+      // `showing 8 of 40`, the same wording board uses for a capped section.
+      // "more not shown" hides the backlog size, and two conventions inside one
+      // feature is one too many.
+      const heading = group.truncated
+        ? `showing ${group.tasks.length} of ${group.total}`
+        : String(group.tasks.length);
+      lines.push("", `${group.lane} (${heading})`);
       for (const child of group.tasks) {
         lines.push(`  ${child.id}  ${text(child.title)}`);
       }
@@ -611,6 +620,10 @@ export function formatBoard(board: BoardResult): string {
         `  ${when}  ${padTo(event.type, 14)}  ${event.entityId}  ${title}  ${describeEvent(event)}`.trimEnd(),
       );
     }
+    // The section owes the same report every other bound in katra owes. It was
+    // computed and published and never rendered, which is the one failure mode
+    // a truncation flag exists to prevent.
+    if (board.recentTruncated) lines.push("  … more; `katra log` for the rest");
   }
 
   // An empty store still says something. A blank response is indistinguishable

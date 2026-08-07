@@ -199,6 +199,8 @@ export interface BriefNote {
 export interface BriefLane {
   readonly lane: Lane;
   readonly tasks: readonly TaskSummary[];
+  /** How many children this lane holds in total, capped or not. */
+  readonly total: number;
   /**
    * True when this lane holds more children than were returned.
    *
@@ -265,8 +267,11 @@ export interface BoardTask {
    *
    * Carried on the row rather than expressed by putting the task in `blocked`
    * too: the sections are disjoint so the counts reconcile, and a task somebody
-   * is part-way through is in flight whatever is standing in its way. Always
-   * false outside the in-flight section, where the section itself says it.
+   * is part-way through is in flight whatever is standing in its way.
+   *
+   * Always false in `ready`, which selects `is_ready = 1`, and always true in
+   * `blocked`, which selects `is_ready = 0`. It earns its place in `inFlight`,
+   * where it is the only signal that a task under way has become stuck.
    */
   readonly blocked: boolean;
   /** What stands in its way. Populated for the blocked section. */

@@ -163,3 +163,24 @@ describe("writes are refused inside a read transaction", () => {
     ).toThrowError(/read transaction/);
   });
 });
+
+describe("readTx is not for nesting inside a write", () => {
+  it("refuses a read transaction opened inside a write transaction", () => {
+    // A SAVEPOINT inside an IMMEDIATE transaction is safe to write in, but the
+    // depth counter would forbid it and a legal write would surface as exit 4.
+    // The nesting has no meaning either — the write transaction already gives
+    // one consistent snapshot, which is all readTx provides.
+    const { a } = twoStores();
+
+    expect(() => writeTx(a.db, () => readTx(a.db, () => countTasks(a)))).toThrowError(
+      /inside a write transaction/,
+    );
+  });
+
+  it("still allows a read transaction after the write transaction closes", () => {
+    const { a } = twoStores();
+    writeTx(a.db, () => seedTask(a, {}));
+
+    expect(readTx(a.db, () => countTasks(a))).toBe(1);
+  });
+});

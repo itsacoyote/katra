@@ -132,10 +132,15 @@ describe("katra brief", () => {
     await runCli(["update", started, "--lane", "In Progress"], { cwd: repo.dir });
 
     const out = await brief([epic]);
+    // Sliced above the activity heading. Every one of these strings also
+    // appears in the activity rows — `created` and `status-changed` name the
+    // child and its lanes — so asserting on the whole output passes even with
+    // `childrenByLane` returning nothing at all.
+    const shape = out.slice(0, out.indexOf("activity ("));
 
-    expect(out).toContain("In Progress");
-    expect(out).toContain("started work");
-    expect(out).toContain("planned work");
+    expect(shape).toContain("In Progress");
+    expect(shape).toContain("started work");
+    expect(shape).toContain("planned work");
   });
 
   it("refuses an id nothing matches, with exit 1", async () => {

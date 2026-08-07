@@ -51,9 +51,14 @@ describe("briefEntity on a task", () => {
     expect([...(brief.handoff?.note.body ?? "")]).toHaveLength(BRIEF_HANDOFF_CHARS);
   });
 
-  it("does not truncate under --full", () => {
+  it("does not truncate under --full, however long the body is", () => {
+    // Sized past any multiple of the default cap on purpose. An earlier version
+    // multiplied the cap by twenty instead of removing it, and a body of
+    // `cap + 100` passed for every multiplier ≥ 2 — so the test could not tell
+    // a lifted bound from one that had merely moved. The spec's own edge case
+    // is a 200 KB paste, which a ×20 cap still cuts.
     const task = seedTask(fixture.store);
-    const body = "x".repeat(BRIEF_HANDOFF_CHARS + 100);
+    const body = "x".repeat(BRIEF_HANDOFF_CHARS * 50);
     createNote(fixture.store, { taskId: task, body, kind: "handoff" });
 
     const brief = briefEntity(fixture.store, task, { full: true });

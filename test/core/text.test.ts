@@ -77,3 +77,35 @@ describe("textWidth", () => {
     expect(textWidth("plain ascii")).toBe("plain ascii".length);
   });
 });
+
+describe("clamp's boundary, through the log renderer", () => {
+  it("keeps a title of exactly the column width whole", async () => {
+    // The regression a naive `capText(text, width - 1)` introduces: asking the
+    // shortened cap whether it truncated ellipsizes a string that fitted
+    // exactly, so a boundary-length title silently loses its last character.
+    const { formatEventLog } = await import("../../src/cli/format.js");
+    const TITLE_WIDTH = 44;
+    const stamp = "2026-01-01T00:00:00.000Z";
+    const row = (title: string) => ({
+      id: 1,
+      type: "created" as const,
+      entityId: "kt-aaaaaa",
+      epicId: null,
+      actor: "main @ /repo",
+      fromLane: null,
+      toLane: null,
+      ref: null,
+      reason: null,
+      title,
+      entityTitle: title,
+      createdAt: stamp,
+    });
+
+    const exact = "x".repeat(TITLE_WIDTH);
+    const over = "x".repeat(TITLE_WIDTH + 1);
+
+    expect(formatEventLog([row(exact)], false)).toContain(exact);
+    expect(formatEventLog([row(exact)], false)).not.toContain("…");
+    expect(formatEventLog([row(over)], false)).toContain("…");
+  });
+});

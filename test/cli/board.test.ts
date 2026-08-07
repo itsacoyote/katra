@@ -51,9 +51,10 @@ describe("katra board", () => {
     const out = await board();
 
     expect(out).toMatch(/\d+ open · \d+ in flight · \d+ ready · \d+ blocked · \d+ untriaged/);
-    expect(out).toContain("in flight");
+    // The section titles are not asserted: "in flight" and "ready" both appear
+    // in the header string above, so those assertions would hold with every
+    // section deleted. The task titles are what carry this test.
     expect(out).toContain("underway");
-    expect(out).toContain("ready");
     expect(out).toContain("ready to go");
   });
 
@@ -149,7 +150,10 @@ describe("katra board --digest", () => {
     const out = await board(["--digest"]);
 
     expect(out.indexOf("the newest handoff")).toBeLessThan(out.indexOf("open ·"));
-    expect(out).toContain("In Review");
+    // Against the digest heading, not the whole output: `update --lane` writes
+    // a `Defined -> In Review` row into recent activity, which satisfies a bare
+    // `toContain("In Review")` whether or not the heading carries the lane.
+    expect(out.split("\n")[0]).toMatch(new RegExp(`handoff\\s+${two}\\s+In Review`));
     expect(out).not.toContain("the older handoff");
   });
 
@@ -163,7 +167,10 @@ describe("katra board --digest", () => {
     const out = await board(["--digest"]);
 
     expect(out).toContain("done, next is the renderer");
-    expect(out).toContain("Done");
+    // `close` writes a `Defined -> Done` activity row, so asserting on the whole
+    // output would pass with the lane deleted from the heading entirely — which
+    // is the one thing this test exists to catch.
+    expect(out.split("\n")[0]).toMatch(new RegExp(`handoff\\s+${task}\\s+Done`));
   });
 
   it("labels attribution as last touch, not as an owner", async () => {

@@ -22,8 +22,19 @@ import { readTx } from "./db/connection.js";
 import { IN_FLIGHT_LANES, sqlEnum, TERMINAL_LANES, UNTRIAGED_LANES } from "./enums.js";
 import { listEvents } from "./events/repo.js";
 import { listBlockers, READINESS_VIEW } from "./graph/deps.js";
+import { latestHandoff } from "./notes/repo.js";
 import type { OpenStore } from "./store.js";
+import { BRIEF_HANDOFF_CHARS } from "./tasks/brief.js";
 import { readyPredicate, TASK_RANKING } from "./tasks/next.js";
+import { capText } from "./text.js";
+
+/**
+ * How much of the digest body the board keeps.
+ *
+ * The same bound `brief` applies to the same kind of note, so the two commands
+ * cut a handoff at the same place.
+ */
+const BOARD_DIGEST_CHARS = BRIEF_HANDOFF_CHARS;
 
 /**
  * How many rows each section shows when the caller does not say.
@@ -35,20 +46,20 @@ import { readyPredicate, TASK_RANKING } from "./tasks/next.js";
  */
 export const BOARD_SECTION_LIMIT = 8;
 
-/**
- * How many events the recent tail carries.
- *
- * Context, not substance: the board's answer is the three task sections, and an
- * agent that reads only those has still been oriented. `katra log` is the
- * unbounded read.
- */
-export const BOARD_RECENT_LIMIT = 8;
-
 export interface BoardOptions {
   /** Rows per section. The counts are unaffected. */
   readonly limit?: number;
-  /** Lead with the store's newest handoff. */
+  /**
+   * Lead with the store's newest handoff.
+   *
+   * Read **inside** the same snapshot as everything else. An earlier version
+   * left this to the command layer, which meant the digest's `taskLane` — the
+   * one field whose job is stopping a finished task's handoff reading as live
+   * work — came from a different snapshot than the sections it sat above.
+   */
   readonly digest?: boolean;
+  /** How much of the handoff body to keep. Ignored unless `digest` is set. */
+  readonly digestChars?: number;
 }
 
 /**
@@ -163,7 +174,10 @@ export function readBoard(store: OpenStore, options: BoardOptions = {}): BoardRe
     const inFlight = section(store, IN_FLIGHT, limit);
     const readyRows = section(store, ready.sql, limit, ready.params);
     const blockedRows = section(store, BLOCKED, limit);
-    const recent = listEvents(store, { limit: BOARD_RECENT_LIMIT });
+    // The same bound as every other section. A second constant here meant
+    // `--limit 0` emptied the task sections and still printed eight activity
+    // rows — a section the flag was documented to bound and did not.
+    const recent = listEvents(store, { limit });
 
     const toSection = (
       found: { rows: BoardRow[]; truncated: boolean },
@@ -186,11 +200,30 @@ export function readBoard(store: OpenStore, options: BoardOptions = {}): BoardRe
       recent: recent.events,
       recentTruncated: recent.truncated,
       pointer: pointerFor(counts),
-      // Populated by the command layer when `--digest` asked for it; declared
-      // here so the document has one shape whether or not it did.
-      digest: null,
+      digest: options.digest === true ? digestFor(store, options.digestChars) : null,
     };
   });
+}
+
+/**
+ * The newest handoff in the store, capped, or null when there is none.
+ *
+ * Unfiltered by lane on purpose: "I finished X, next is Y" is the commonest
+ * real handoff and lives on a `Done` task. The lane travels with it so a
+ * finished task's handoff cannot be mistaken for live context.
+ */
+function digestFor(store: OpenStore, chars: number | undefined): BoardResult["digest"] {
+  const handoff = latestHandoff(store);
+  if (handoff === undefined) return null;
+
+  const capped = capText(handoff.note.body, chars ?? BOARD_DIGEST_CHARS);
+  return {
+    note: { ...handoff.note, body: capped.text },
+    truncated: capped.truncated,
+    taskId: handoff.taskId,
+    taskTitle: handoff.taskTitle,
+    taskLane: handoff.taskLane,
+  };
 }
 
 /**
