@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, and fourteen commands over them. Coordination, search, and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, and sixteen commands over them, including `brief` and `board` for restoring context at the start of a session. Coordination, search, and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -76,6 +76,52 @@ activity (newest first — `katra log` for the rest)
   2026-08-05 17:31  created
 ```
 
+A session that comes back cold reads one command instead of three. `katra brief`
+carries the handoff **in full** — that is the difference from `show`, which
+prints previews:
+
+```console
+$ katra brief $b
+kt-s3l2m4  task CRUD
+  level       task
+  lane        In Progress
+  priority    P1
+  epic        kt-34vt8g  core tracker foundation
+  blockers    none
+
+handoff — last touch main @ /your/repo, 2026-08-05 17:31
+  Storage layer is done. CRUD is scaffolded but the update path
+  still needs the reparenting case.
+
+activity (newest first — `katra log` for the rest)
+  2026-08-05 17:31  note-added      nt-rxqzhj
+  2026-08-05 17:31  status-changed  Planned -> In Progress
+  2026-08-05 17:31  created
+```
+
+And `katra board` answers the other question — where does the whole repository
+stand? Actionable first, activity last, and the counts are totals even when a
+section is capped:
+
+```console
+$ katra board
+1 open · 1 in flight · 0 ready · 0 blocked · 0 untriaged
+
+in flight
+  kt-s3l2m4  P1  In Progress  task CRUD
+
+recent (newest first — `katra log` for the rest)
+  2026-08-05 17:31  note-added      kt-s3l2m4  task CRUD  nt-rxqzhj
+  2026-08-05 17:31  status-changed  kt-s3l2m4  task CRUD  Planned -> In Progress
+  2026-08-05 17:31  closed          kt-x93qjo  storage layer  Planned -> Done  shipped
+  2026-08-05 17:31  created         kt-s3l2m4  task CRUD
+  2026-08-05 17:31  created         kt-x93qjo  storage layer
+  2026-08-05 17:31  created         kt-34vt8g  core tracker foundation
+```
+
+`katra board --digest` puts the newest handoff in the store above all of that,
+which is what a session opening in a fresh worktree wants to read first.
+
 | Command | What it does |
 | --- | --- |
 | `init` | Create the store for this repository |
@@ -87,6 +133,8 @@ activity (newest first — `katra log` for the rest)
 | `next` | The one task that can be started right now |
 | `log` | What has happened — to one task, to an epic and its children, or across the store |
 | `note add` · `note list` | Typed prose on a task: `general`, `handoff`, `decision`, `acceptance` |
+| `brief` | Everything needed to resume one task or epic, in one call — handoff body included |
+| `board` | Where the repository stands: in flight, ready, blocked, and what just moved |
 
 Every read takes `--json`. Every refusal names what would unblock it — an ambiguous id lists the candidates, a rejected dependency prints the cycle path, and `next` with nothing ready tells you whether the work is blocked, untriaged, or simply finished.
 

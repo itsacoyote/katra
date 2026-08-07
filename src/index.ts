@@ -6,7 +6,7 @@
  * reaching into `src/core/`.
  *
  * **What this is useful for today: reading katra's `--json` output.** Every
- * type below describes a document one of the twelve commands prints, so a
+ * type below describes a document one of katra's commands prints, so a
  * consumer can `JSON.parse` a command's stdout and hold the result in a checked
  * shape. The functions are the ones that need no store to run — the value sets,
  * their predicates, and the error types.

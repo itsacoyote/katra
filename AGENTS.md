@@ -8,7 +8,7 @@ Instructions for AI coding agents working **on the katra repository**. This is t
 
 A local, git-native, agent-first project manager and coordination layer for AI coding sessions across git worktrees. Read [`docs/katra-spec.md`](docs/katra-spec.md) before doing anything substantial — it is the settled design, including rationale.
 
-**Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, an append-only event stream, typed notes, and fourteen commands over them (`init add show list update close cancel reopen delete dep link next log note`). Everything else in the spec is not: `brief`, `board`, FTS5 search, claims and presence, external refs, snapshots, and the beads converter. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
+**Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, an append-only event stream, typed notes, the two orientation reads, and sixteen commands over them (`init add show list update close cancel reopen delete dep link next log note brief board`). Everything else in the spec is not: FTS5 search, claims and presence, external refs, snapshots, and the beads converter. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
 
 Eight decisions in the spec were superseded or refined during implementation; the ADRs in `docs/decisions/` win where they disagree.
 
@@ -26,7 +26,7 @@ src/core/               all logic lives here; never references exit codes
   store.ts              openStore() — the single door to a database handle
   db/
     locate.ts           git-common-dir resolution + failure taxonomy
-    connection.ts       pragmas + writeTx (BEGIN IMMEDIATE)
+    connection.ts       pragmas + writeTx (BEGIN IMMEDIATE) + readTx (deferred)
     migrate.ts          user_version migration runner
     retry.ts            busy-retry for statements SQLite's handler misses
     migrations/         one numbered module per schema step
@@ -89,6 +89,10 @@ These come from the spec and are not open for re-litigation in a PR:
 - **`src/core/git.ts` is the only module that spawns a process.** `findGit` resolves the binary to an *absolute* path and skips relative `PATH` entries: on Windows libuv resolves a bare program name from the current directory before `PATH`, so a repository shipping `git.exe` would otherwise be executed by every command. `test/core/git.test.ts` fails if a second spawn site appears anywhere under `src/`.
 - **Resolve the actor *before* opening a write transaction.** It costs two subprocess spawns, and doing that under `BEGIN IMMEDIATE` holds the exclusive write lock across both. The resolver is lazy, so the first write in a process is where it fires; every write path forces it first and a test asserts `db.inTransaction` is false when it runs.
 - **`appendEvent` runs inside the caller's transaction and opens none of its own** — it throws if there is no transaction. An entity change and the event recording it commit together or not at all. Note that wrapping it in its own transaction does *not* break that: better-sqlite3 turns a nested transaction into a savepoint, so the obvious mutation proves nothing.
+- **`appendEvent`'s guard means "inside a *write* transaction", and `db.inTransaction` alone cannot say that.** A deferred read sets the same flag, so once `readTx` existed the check passed inside one and the insert went on to attempt a lock upgrade it cannot get. `assertNotReadOnly` is the second half; `writeTx` consults it too.
+- **Multi-statement reads that must agree with each other go inside `readTx`** (`db.transaction(fn).deferred()`). Under WAL the snapshot is pinned at the first read statement and held for the transaction. `board` needs it: five queries whose answers must describe one store, run constantly alongside other worktrees writing. Deferred, never `.immediate()` — a read that took the write lock would make the most-run command a source of contention. Nothing inside may write, and that is enforced rather than documented.
+- **Text is measured and cut in code points, not UTF-16 code units.** `capText` and `textWidth` in `core/text.ts`; `clamp`, `columnWidth` and `padTo` in `cli/format.ts` all defer to them. The three used `.length`/`padEnd` and only work as a set — an emoji is two code units, so a column sized one way and padded another misaligns every row beside it. The cap lives in **core**, not the formatter, because `brief` bounds a note body inside its assembly and that bound is part of the `--json` document.
+- **A task that introduces a published document declares it in full**, including fields a later task populates — `BoardResult` declares `digest` before `--digest` exists. A second task amending a shipped type is how a `--json` consumer ends up unable to tell "does not apply" from "nothing filled it in".
 - **Every stored string rendered to a terminal goes through a sanitizer.** `oneLine` for single-line fields, `sanitizeBody` for multi-line ones (it keeps newlines and tabs). Both strip C0/C1 controls and bidirectional overrides — notes and descriptions are where fetched content and model output land, and `--json` is the verbatim path because its consumer is not a terminal.
 - **A bounded read reports that it truncated.** `log` and `show` cap their output and carry a flag saying so; `list` is unbounded precisely because a default cap would owe that report. A bound that cannot report itself is indistinguishable from the end of the data.
 - **Rich blocked feedback.** A refused claim says *why* and *what unblocks it* — never a silent refusal.
