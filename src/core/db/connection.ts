@@ -122,8 +122,83 @@ export function openDatabase(dbPath: string): DatabaseHandle {
  * on the two agreeing; the event stream does.
  */
 export function writeTx<T>(db: DatabaseHandle, fn: (now: string) => T): T {
+  assertNotReadOnly(db, "writeTx");
   const runner = db.transaction(() => fn(nowIso()));
   return runner.immediate();
+}
+
+/**
+ * How many read transactions are currently open on a handle.
+ *
+ * A depth counter rather than a flag because a helper that wraps its own reads
+ * inside a caller that already wrapped them is a reasonable thing to write, and
+ * a flag would be cleared by the inner one on its way out — re-permitting
+ * writes for the rest of the outer transaction, which is the exact failure this
+ * exists to prevent.
+ *
+ * Keyed by handle in a `WeakMap` so a closed store is collectable and so the
+ * marker travels with the connection rather than with the `OpenStore` wrapper —
+ * `writeTx` only ever receives the handle.
+ */
+const readDepth = new WeakMap<DatabaseHandle, number>();
+
+/**
+ * Refuses a write inside a read transaction, naming the caller.
+ *
+ * **`db.inTransaction` cannot do this job.** It is true inside a deferred read
+ * as well as inside `writeTx`, which is why `appendEvent`'s existing guard —
+ * written to catch an append with *no* transaction at all — lets a write inside
+ * {@link readTx} straight through. Without this second check the insert then
+ * attempts to upgrade a deferred read to a write, and that is precisely the
+ * `SQLITE_BUSY` failure `writeTx` takes the lock up front to avoid.
+ */
+export function assertNotReadOnly(db: DatabaseHandle, what: string): void {
+  if ((readDepth.get(db) ?? 0) === 0) return;
+  throw new KatraException({
+    code: "internal",
+    message:
+      `${what} was called inside a read transaction. A deferred read holds a ` +
+      "snapshot it cannot upgrade to a write, so this would fail as a lock " +
+      "conflict far from the code that caused it. Do the write before or after " +
+      "the read, never inside it.",
+  });
+}
+
+/**
+ * Runs `fn` inside one **deferred** transaction, so every read sees one
+ * snapshot.
+ *
+ * The mirror of {@link writeTx}, and deliberately the opposite mode. Deferred
+ * takes no lock until its first access; under WAL, SQLite pins the read
+ * snapshot at that first read statement and holds it for the transaction. That
+ * is exactly what a multi-query read needs — `board` asks five questions whose
+ * answers must describe one store, and as separate auto-commit reads a commit
+ * landing between two of them yields a counts header that contradicts the rows
+ * beneath it.
+ *
+ * `IMMEDIATE` here would be actively wrong: it takes the write lock, so the one
+ * command katra tells agents to run constantly would serialise against every
+ * writer in every worktree. Readers must not block writers — that is what WAL
+ * is for.
+ *
+ * **Nothing inside may write.** Enforced, not merely documented — see
+ * {@link assertNotReadOnly} for why the existing `inTransaction` check does not
+ * catch it.
+ *
+ * Keep the callback short. A lingering read snapshot stops WAL checkpointing
+ * for the whole store, not just for this handle — the same hazard the test
+ * fixtures close handles to avoid.
+ */
+export function readTx<T>(db: DatabaseHandle, fn: () => T): T {
+  const runner = db.transaction(() => {
+    readDepth.set(db, (readDepth.get(db) ?? 0) + 1);
+    try {
+      return fn();
+    } finally {
+      readDepth.set(db, (readDepth.get(db) ?? 1) - 1);
+    }
+  });
+  return runner.deferred();
 }
 
 export type { DatabaseHandle };
