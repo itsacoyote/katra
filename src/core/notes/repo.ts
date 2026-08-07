@@ -18,6 +18,7 @@
  */
 
 import { writeTx } from "../db/connection.js";
+import type { NoteKind } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
 import { NOTE_ID_PREFIX } from "../id-format.js";
@@ -217,4 +218,115 @@ export function listNotes(store: OpenStore, filters: NoteFilters = {}): Note[] {
     .all(...params) as NoteRow[];
 
   return rows.map(rowToNote);
+}
+
+/**
+ * Which notes a scoped read is asking about.
+ *
+ * `taskId` is one task's own notes. `epicId` is an epic's **and its children's**
+ * — the shape `brief <epic>` needs, and the one `listNotes` cannot express.
+ * Neither means the whole store; that is `listNotes` with no filter.
+ */
+export interface NoteScope {
+  readonly taskId?: string;
+  readonly epicId?: string;
+  readonly kind?: NoteKind;
+}
+
+/**
+ * The `WHERE` clause and parameters for a scope, over `notes n JOIN tasks t`.
+ *
+ * The join is why this exists. `notes` has **no `epic_id` column** — that lives
+ * on `events`, stamped at write time so history needs no join at all. Notes have
+ * only `task_id`, so an epic's notes can only be found by asking `tasks` which
+ * rows sit under it, live.
+ *
+ * That difference is invisible from the outside and will bite eventually: an
+ * event's epic scoping is frozen at write time, this one is evaluated now. Move
+ * a task from epic A to epic B and its old notes follow it to B while its old
+ * events stay with A. Neither answer is wrong; they are answers to different
+ * questions, and nothing can make them agree.
+ *
+ * The join is INNER, unlike every read against `events`. `notes.task_id`
+ * cascades on delete and `foreign_keys` is ON for every connection, so a note
+ * cannot outlive its task — the dangling-reference case ADR-008 warns about for
+ * events simply does not arise here. History survives, content does not.
+ */
+function scopeConditions(scope: NoteScope): { sql: string; params: unknown[] } {
+  const conditions: string[] = [];
+  const params: unknown[] = [];
+
+  if (scope.taskId !== undefined) {
+    conditions.push("n.task_id = ?");
+    params.push(scope.taskId);
+  }
+  if (scope.epicId !== undefined) {
+    // The epic's own notes *or* any child's. `parent_id` is a single level by
+    // design (spec §5), so this needs no recursion.
+    conditions.push("(t.id = ? OR t.parent_id = ?)");
+    params.push(scope.epicId, scope.epicId);
+  }
+  if (scope.kind !== undefined) {
+    conditions.push("n.kind = ?");
+    params.push(narrowNoteKind(scope.kind));
+  }
+
+  return {
+    sql: conditions.length === 0 ? "" : `WHERE ${conditions.join(" AND ")}`,
+    params,
+  };
+}
+
+/**
+ * The newest note in a scope, or `undefined`.
+ *
+ * What `brief` calls to find the handoff it leads with. Ordered
+ * `created_at DESC, rowid DESC` for the reason {@link listNotes} documents: ids
+ * are random, timestamps are millisecond-precision, and notes written together
+ * routinely share one — so the id is not a tie-break, it is noise.
+ */
+export function latestNoteInScope(store: OpenStore, scope: NoteScope): Note | undefined {
+  const { sql, params } = scopeConditions(scope);
+  const row = store.db
+    .prepare(
+      `SELECT n.* FROM notes n
+         JOIN tasks t ON t.id = n.task_id
+       ${sql}
+       ORDER BY n.created_at DESC, n.rowid DESC
+       LIMIT 1`,
+    )
+    .get(...params) as NoteRow | undefined;
+
+  // Through `rowToNote`, never straight out of the row: that is where the
+  // BLOB-in-a-TEXT-column refusal lives, and a second read that skipped it
+  // would hand a Buffer to a formatter and report a broken machine.
+  return row === undefined ? undefined : rowToNote(row);
+}
+
+/**
+ * How many notes of each kind a scope holds, omitting kinds with none.
+ *
+ * `brief` shows one note in full and counts the rest, so the reader knows what
+ * else is there without paying for it. A kind with no notes is absent rather
+ * than zero — "2 decision" is worth a line, "0 acceptance" is not.
+ */
+export function countNotesByKind(
+  store: OpenStore,
+  scope: NoteScope,
+): Partial<Record<NoteKind, number>> {
+  const { sql, params } = scopeConditions(scope);
+  const rows = store.db
+    .prepare(
+      `SELECT n.kind AS kind, COUNT(*) AS count FROM notes n
+         JOIN tasks t ON t.id = n.task_id
+       ${sql}
+       GROUP BY n.kind`,
+    )
+    .all(...params) as Array<{ kind: unknown; count: unknown }>;
+
+  const counts: Partial<Record<NoteKind, number>> = {};
+  for (const row of rows) {
+    counts[narrowNoteKind(row.kind)] = Number(row.count);
+  }
+  return counts;
 }
