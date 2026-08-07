@@ -255,10 +255,13 @@ describe("the two shapes are different, not nested", () => {
     const taskBrief = briefEntity(fixture.store, task) as unknown as Record<string, unknown>;
     const epicBrief = briefEntity(fixture.store, epic) as unknown as Record<string, unknown>;
 
-    expect(Object.hasOwn(taskBrief, "blockers")).toBe(true);
+    // `children` is the only real difference. Blockers are on both: an epic can
+    // carry a dependency like anything else, and `brief`'s first question is
+    // whether the thing can be picked up.
     expect(Object.hasOwn(taskBrief, "children")).toBe(false);
     expect(Object.hasOwn(epicBrief, "children")).toBe(true);
-    expect(Object.hasOwn(epicBrief, "blockers")).toBe(false);
+    expect(Object.hasOwn(taskBrief, "blockers")).toBe(true);
+    expect(Object.hasOwn(epicBrief, "blockers")).toBe(true);
   });
 
   it("truncates an over-cap children list and reports it", () => {

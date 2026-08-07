@@ -120,9 +120,10 @@ describe("katra brief", () => {
     const taskDoc = (await runCli(["brief", child, "--json"], { cwd: repo.dir })).json();
 
     expect(Object.hasOwn(epicDoc as object, "children")).toBe(true);
-    expect(Object.hasOwn(epicDoc as object, "blockers")).toBe(false);
-    expect(Object.hasOwn(taskDoc as object, "blockers")).toBe(true);
     expect(Object.hasOwn(taskDoc as object, "children")).toBe(false);
+    // Both carry blockers — that is not what the union discriminates.
+    expect(Object.hasOwn(epicDoc as object, "blockers")).toBe(true);
+    expect(Object.hasOwn(taskDoc as object, "blockers")).toBe(true);
   });
 
   it("groups an epic's children under their lanes", async () => {
@@ -200,5 +201,56 @@ describe("brief and untrusted text", () => {
     ).json() as BriefResult;
 
     expect(document.handoff?.note.body).toBe(body);
+  });
+});
+
+describe("brief on an epic answers for the epic", () => {
+  it("names the child's task when truncating a handoff that came from a child", async () => {
+    // The hint has to name a command that works. On an epic the handoff comes
+    // from the epic *or any child*, and `note list` is task-scoped — so naming
+    // the epic sends the reader to a command that prints "no notes".
+    const epic = await add(["an epic", "--level", "epic"]);
+    const child = await add(["a child", "--parent", epic]);
+    await note(child, "x".repeat(BRIEF_HANDOFF_CHARS + 50));
+
+    const out = await brief([epic]);
+
+    expect(out).toContain(`katra note list ${child}`);
+    expect(out).not.toContain(`katra note list ${epic}`);
+  });
+
+  it("does not name a task-scoped command for an epic's aggregated note counts", async () => {
+    // No single id answers this: the tally spans children. Naming `note list`
+    // would assert notes exist and then point at something that says they do not.
+    const epic = await add(["an epic", "--level", "epic"]);
+    const child = await add(["a child", "--parent", epic]);
+    await note(child, "a decision", "decision");
+
+    const out = await brief([epic]);
+
+    expect(out).toContain("notes:");
+    expect(out).toContain("across this epic and its children");
+    expect(out).not.toContain(`katra note list ${epic}`);
+  });
+
+  it("reports an epic's own blockers, as show does", async () => {
+    // Nothing forbids an epic carrying a dependency, and `brief`'s stated first
+    // question is whether the thing can be started. Omitting the line answered
+    // that question by silence.
+    const epic = await add(["an epic", "--level", "epic"]);
+    const blocker = await add(["blocks the epic"]);
+    await runCli(["dep", epic, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const out = await brief([epic]);
+
+    expect(out).toContain("blockers");
+    expect(out).toContain(blocker);
+    expect(out).toContain("blocks the epic");
+  });
+
+  it("says blockers none on an unblocked epic rather than omitting the line", async () => {
+    const epic = await add(["an epic", "--level", "epic"]);
+
+    expect(await brief([epic])).toContain("blockers    none");
   });
 });

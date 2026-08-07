@@ -21,7 +21,7 @@ import type { BoardCounts, BoardResult, BoardSection, BoardTask } from "./contra
 import { readTx } from "./db/connection.js";
 import { IN_FLIGHT_LANES, sqlEnum, TERMINAL_LANES, UNTRIAGED_LANES } from "./enums.js";
 import { listEvents } from "./events/repo.js";
-import { listBlockers, READINESS_VIEW } from "./graph/deps.js";
+import { listBlockersFor, READINESS_VIEW } from "./graph/deps.js";
 import { latestHandoff } from "./notes/repo.js";
 import type { OpenStore } from "./store.js";
 import { BRIEF_HANDOFF_CHARS } from "./tasks/brief.js";
@@ -180,15 +180,22 @@ export function readBoard(store: OpenStore, options: BoardOptions = {}): BoardRe
     const toSection = (
       found: { rows: BoardRow[]; truncated: boolean },
       withBlockers: boolean,
-    ): BoardSection => ({
-      // `listBlockers` per row is an N+1, bounded by the section cap and paid
-      // only where the answer is the point — "blocked by what" is the whole
-      // content of that section.
-      tasks: found.rows.map((row) =>
-        toBoardTask(row, withBlockers ? listBlockers(store, row.id) : []),
-      ),
-      truncated: found.truncated,
-    });
+    ): BoardSection => {
+      // One statement for the whole section, not one per row. `--limit` is
+      // caller-supplied and `narrowCount` allows up to a million, so a per-row
+      // read would let a caller hold this deferred snapshot open across a
+      // million statements — the WAL-checkpointing hazard `readTx` documents.
+      const blockers = withBlockers
+        ? listBlockersFor(
+            store,
+            found.rows.map((row) => row.id),
+          )
+        : new Map<string, BoardTask["blockers"]>();
+      return {
+        tasks: found.rows.map((row) => toBoardTask(row, blockers.get(row.id) ?? [])),
+        truncated: found.truncated,
+      };
+    };
 
     return {
       counts,

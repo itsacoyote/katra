@@ -64,6 +64,47 @@ export function listBlockers(store: OpenStore, id: string): Blocker[] {
 }
 
 /**
+ * The same read for many tasks at once, keyed by task id.
+ *
+ * `board` renders a whole section of blocked tasks, and calling
+ * {@link listBlockers} per row would issue one statement per task **inside**
+ * `readTx`'s deferred snapshot. `--limit` is caller-supplied and `narrowCount`
+ * permits up to a million, so that fan-out is bounded by the caller, not by
+ * anything the module controls — and a read transaction held open across it
+ * stops WAL checkpointing for the whole store, which is what `readTx`'s own
+ * docstring warns about.
+ *
+ * Tasks with no unfinished blockers are absent from the map rather than mapped
+ * to an empty array; callers default.
+ */
+export function listBlockersFor(store: OpenStore, ids: readonly string[]): Map<string, Blocker[]> {
+  const blockers = new Map<string, Blocker[]>();
+  if (ids.length === 0) return blockers;
+
+  // Placeholders generated from the id count: better-sqlite3 binds no array
+  // type, and this is the one shape where the parameter count is not fixed by
+  // the query text.
+  const rows = store.db
+    .prepare(
+      `SELECT d.task_id AS task_id, b.id AS id, b.title AS title, b.lane AS lane
+         FROM deps d
+         JOIN tasks b ON b.id = d.depends_on_id
+        WHERE d.task_id IN (${ids.map(() => "?").join(",")})
+          AND b.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
+        ORDER BY b.priority, b.created_at, b.rowid`,
+    )
+    .all(...ids) as Array<{ task_id: string; id: string; title: string; lane: string }>;
+
+  for (const row of rows) {
+    const blocker = { id: row.id, title: row.title, lane: narrowLane(row.lane) };
+    const existing = blockers.get(row.task_id);
+    if (existing === undefined) blockers.set(row.task_id, [blocker]);
+    else existing.push(blocker);
+  }
+  return blockers;
+}
+
+/**
  * Whether `taskId` is reachable from `dependsOnId` — i.e. whether the proposed
  * edge would close a loop.
  *

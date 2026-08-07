@@ -69,7 +69,13 @@ export function capText(text: string, max: number): CappedText {
   // `kept.length === max` test below, so the string would come back whole and
   // `clamp` would append an ellipsis to it — returning something *wider* than
   // the width it was given, from the helper whose job is bounding text.
-  if (!(max >= 0)) return { text: "", truncated: text !== "" };
+  // Also rejects a non-integer: `kept.length === 2.5` can never fire, so a
+  // fractional cap would let the whole string through with `truncated: false` —
+  // the same failure the negative and NaN cases produce. Infinity is the one
+  // non-integer that means something here.
+  if (!(max >= 0) || (max !== Number.POSITIVE_INFINITY && !Number.isInteger(max))) {
+    return { text: "", truncated: text !== "" };
+  }
 
   // Code units are never fewer than code points, so a string that fits by this
   // measure fits by the real one. It is what keeps `--full` — where `max` is

@@ -56,7 +56,7 @@ filters.** Its output is always the same five parts, in the same order:
 ```console
 $ katra board
 14 open · 2 in flight · 6 ready · 3 blocked · 3 untriaged
-# The four sum to open. Counts are totals; sections below are capped.
+# The last four sum to open. Counts are totals; sections below are capped.
 
 in flight
   kt-x93  In Progress  wire up the note renderer
@@ -182,9 +182,17 @@ where it is done repeatedly and inconsistently.
 
 **Give `board` an `--epic` filter, matching `list`.** Rejected, and not on
 slippery-slope grounds — **`brief <epic>` already is it.** Line the two up: an
-epic-scoped board would show children grouped by lane, the blocked ones with
-their blockers, and activity across the epic and its children. That is
-`brief <epic>`'s specified output with the description removed. `board --epic`
+epic-scoped board would show children grouped by lane and activity across the
+epic and its children. That is `brief <epic>`'s output with the description
+removed.
+
+One qualification, added after a review pointed out this paragraph was citing a
+capability that did not exist: `brief <epic>` reports **the epic's own**
+blockers, not each child's. A board section marking which children are blocked
+would be genuinely new work. It is not a reason to build `board --epic` — the
+same argument would apply to adding it to `brief <epic>`, which is where an
+epic-scoped question belongs — but the rejection above rests on the grouping and
+the activity, not on per-child blockers. `board --epic`
 would be a second spelling of a read F3 already ships, which is the same mistake
 ADR-008 caught in `log --all`.
 

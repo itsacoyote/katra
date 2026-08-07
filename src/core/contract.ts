@@ -228,6 +228,18 @@ interface BriefCommon {
   readonly noteCounts: Partial<Record<NoteKind, number>>;
   readonly activity: readonly LoggedEvent[];
   readonly activityTruncated: boolean;
+  /**
+   * Unfinished dependencies — what stops this being started.
+   *
+   * On **both** shapes. An epic can carry a dependency like anything else, and
+   * `brief`'s stated first question is whether the thing can be picked up, so
+   * an epic arm without this answered by omission. `docs/katra-spec.md` §6b
+   * lists open blockers as part of the context pack without qualifying it by
+   * level.
+   */
+  readonly blockers: readonly Blocker[];
+  /** Tasks waiting on this one — what finishing it would release. */
+  readonly blocking: readonly Blocker[];
 }
 
 /**
@@ -245,11 +257,7 @@ interface BriefCommon {
  * one of two kinds; `board` describes one thing that is always the same shape.
  */
 export type BriefResult =
-  | (BriefCommon & {
-      readonly level: "task";
-      readonly blockers: readonly Blocker[];
-      readonly blocking: readonly Blocker[];
-    })
+  | (BriefCommon & { readonly level: "task" })
   | (BriefCommon & {
       readonly level: "epic";
       /** Children grouped by lane, in lane order, so the shape of the work reads. */

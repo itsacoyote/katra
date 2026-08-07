@@ -172,6 +172,15 @@ function childrenByLane(store: OpenStore, epicId: string, caps: Caps): BriefLane
  *   lingering read snapshot stops WAL checkpointing for the *whole store*, not
  *   just this handle.
  *
+ * **The order below is load-bearing.** `handoff` is read before `noteCounts`,
+ * and the rendering computes `remaining = noteCounts.handoff - 1` to decide
+ * whether to say "1 more handoff". Reading the counts first would let a note
+ * written between the two make `remaining` describe a handoff the reader never
+ * saw. In this order the count can only be ahead, so the line degrades to one
+ * extra rather than to a missing one — and a concurrent *delete* drives it
+ * negative, where the `> 0` guard catches it. Swap the two properties and the
+ * safety goes with them.
+ *
  * Recorded in `docs/f3-traceability.md`'s known limits rather than left as an
  * absence, because "brief does not do what board does" reads as an oversight
  * unless the reason is written down.
@@ -201,15 +210,14 @@ export function briefEntity(
     noteCounts: countNotesByKind(store, scope),
     activity: activity.events,
     activityTruncated: activity.truncated,
+    // On both arms: `showTaskWithin` computes these for any level, and an epic
+    // with a dependency is an ordinary thing the schema permits.
+    blockers: detail.blockers,
+    blocking: detail.blocking,
   };
 
   if (isEpic) {
     return { ...common, level: "epic", children: childrenByLane(store, id, caps) };
   }
-  return {
-    ...common,
-    level: "task",
-    blockers: detail.blockers,
-    blocking: detail.blocking,
-  };
+  return { ...common, level: "task" };
 }

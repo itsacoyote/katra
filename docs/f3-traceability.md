@@ -58,6 +58,8 @@ for.
 | `--limit 0` does not fire the pointer | `board.test.ts` (cli) — "treats --limit 0 as truthfully empty sections, not unbounded" | The pointer keys off the counts, never the rendered rows — a cap that emptied the sections would otherwise trigger it on a healthy backlog |
 | Board and `next` agree about an epic | `f3-feature.test.ts` — "agrees when the only planned work is an epic — neither offers it" | The behaviour change F3 makes to `next`, checked from both sides at once |
 
+| 4c | `brief <epic>` reports the epic's own blockers, and its hints name commands that work | `brief.test.ts` (cli) — "reports an epic's own blockers, as show does", "names the child's task when truncating a handoff that came from a child", "does not name a task-scoped command for an epic's aggregated note counts" | ✅ the epic arm discarded blockers `showTaskWithin` had already computed, and both hints named the epic — where `note list` filters `task_id` and prints nothing |
+
 ## Known limits
 
 - **Epic-scoped notes and events disagree after a reparent.** `listEvents`
@@ -72,6 +74,9 @@ for.
   epic costs 501 queries even though the per-lane cap keeps the rendering
   short. Left unoptimised deliberately: epics with hundreds of children are not
   the shape katra is built for, and criterion 6h profiles `board`, not this.
+- **`brief <epic>` shows the epic's blockers, not each child's.** A child that
+  cannot start is visible in the lane grouping but not marked as blocked.
+  ADR-009's rejection of `board --epic` was corrected to stop citing this.
 - **`brief` is not snapshotted; `board` is.** `briefEntity` runs five separate
   auto-commit reads, so its note counts can be one note ahead of the handoff
   printed above them. That is a deliberate trade against the entry below: the

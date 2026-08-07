@@ -201,6 +201,10 @@ const TITLE_WIDTH = 44;
  * occupies exactly `width` columns and {@link columnWidth} agrees with it.
  */
 function clamp(text: string, width: number): string {
+  // The ellipsis costs a character, so there is no room for it below two. A
+  // width of one that returned "…" would be wider than the width asked for,
+  // from the helper whose contract is that it never is.
+  if (width <= 1) return capText(text, width).text;
   // Two calls, deliberately. Capping at `width - 1` and asking *that* whether
   // it truncated ellipsizes a string of exactly `width`, which used to render
   // whole — the boundary title silently loses its last character. Ask the full
@@ -453,31 +457,34 @@ export function formatBrief(brief: BriefResult): string {
     lines.push(field("epic", `${brief.epic.id}  ${text(brief.epic.title)}`));
   }
 
-  if (brief.level === "task") {
-    // Blockers first and stated even when empty: "can I start this?" is the
-    // question a resuming session asks before any other, and a missing line
-    // reads as "this view does not know".
-    if (brief.blockers.length === 0) {
-      lines.push(field("blockers", "none"));
-    } else {
-      for (const [index, blocker] of brief.blockers.entries()) {
-        lines.push(
-          field(
-            index === 0 ? "blockers" : "",
-            `${blocker.id}  ${blocker.lane}  ${text(blocker.title)}`,
-          ),
-        );
-      }
-    }
-    for (const [index, dependent] of brief.blocking.entries()) {
+  // Blockers first, on both shapes, and stated even when empty: "can I start
+  // this?" is the question a resuming session asks before any other, and a
+  // missing line reads as "this view does not know". An epic can carry a
+  // dependency like anything else — `addDependency` has no level check and
+  // `show <epic>` prints them — so an epic brief that omitted this answered the
+  // question by silence.
+  if (brief.blockers.length === 0) {
+    lines.push(field("blockers", "none"));
+  } else {
+    for (const [index, blocker] of brief.blockers.entries()) {
       lines.push(
         field(
-          index === 0 ? "blocking" : "",
-          `${dependent.id}  ${dependent.lane}  ${text(dependent.title)}`,
+          index === 0 ? "blockers" : "",
+          `${blocker.id}  ${blocker.lane}  ${text(blocker.title)}`,
         ),
       );
     }
-  } else {
+  }
+  for (const [index, dependent] of brief.blocking.entries()) {
+    lines.push(
+      field(
+        index === 0 ? "blocking" : "",
+        `${dependent.id}  ${dependent.lane}  ${text(dependent.title)}`,
+      ),
+    );
+  }
+
+  if (brief.level === "epic") {
     for (const group of brief.children) {
       // `showing 8 of 40`, the same wording board uses for a capped section.
       // "more not shown" hides the backlog size, and two conventions inside one
@@ -507,7 +514,11 @@ export function formatBrief(brief: BriefResult): string {
     if (truncated) {
       // Names the command, with the resolved id: a reader who needs the rest
       // should not have to work out how to ask for it.
-      lines.push(`  … truncated — \`katra note list ${brief.task.id}\` for the whole note`);
+      // The note's **own** task, not the entity briefed. On an epic the handoff
+      // comes from the epic *or any child*, so naming the epic sends the reader
+      // to `note list <epic>` — which filters `task_id = ?` and prints nothing.
+      // A hint that misleads is worse than no hint.
+      lines.push(`  … truncated — \`katra note list ${note.taskId}\` for the whole note`);
     }
   }
 
@@ -521,7 +532,14 @@ export function formatBrief(brief: BriefResult): string {
   const remaining = (brief.noteCounts.handoff ?? 0) - shownHandoff;
   if (remaining > 0) others.push(`${remaining} more handoff`);
   if (others.length > 0) {
-    lines.push("", `notes: ${others.join(", ")} — \`katra note list ${brief.task.id}\``);
+    // No command answers this on an epic: the tally aggregates across children
+    // and `note list` is task-scoped, so naming it would assert notes exist and
+    // then point at something that says they do not. State the scope instead.
+    const where =
+      brief.level === "task"
+        ? ` — \`katra note list ${brief.task.id}\``
+        : " — across this epic and its children";
+    lines.push("", `notes: ${others.join(", ")}${where}`);
   }
 
   if (brief.activity.length > 0) {
