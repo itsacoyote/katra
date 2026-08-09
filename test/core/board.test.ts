@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { BOARD_SECTION_LIMIT, readBoard } from "../../src/core/board.js";
 import { addDependency, ID_CHUNK } from "../../src/core/graph/deps.js";
 import { createNote } from "../../src/core/notes/repo.js";
@@ -7,6 +7,21 @@ import { nextTask } from "../../src/core/tasks/next.js";
 import { seedDep, seedEpic, seedEvent, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/**
+ * A pass-through count of `readTx` calls, for the snapshot test below. The
+ * wrapper delegates to the real implementation, so every other test in this
+ * file runs against genuine transactions.
+ */
+const readTxSpy = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("../../src/core/db/connection.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../src/core/db/connection.js")>();
+  const readTx: typeof original.readTx = (db, read) => {
+    readTxSpy.calls += 1;
+    return original.readTx(db, read);
+  };
+  return { ...original, readTx };
+});
 
 let fixture: StoreFixture;
 beforeEach(() => {
@@ -368,6 +383,26 @@ describe("each blocked task gets its own blockers", () => {
     for (const row of blocked) {
       expect(row.blockers.map((blocker) => blocker.id)).toEqual([pairs.get(row.id)]);
     }
+  });
+});
+
+describe("the board reads inside one snapshot", () => {
+  it("opens exactly one read transaction per board call, digest included", () => {
+    // Requirement 7d's mechanism. A single-threaded suite cannot stage a torn
+    // read — five auto-commit reads return the same answer when nobody writes
+    // between them — so the test pins the transaction count instead. Zero
+    // means `readTx` was dropped; two means the digest read outside the
+    // snapshot, which is the bug the command layer shipped once.
+    const task = seedTask(fixture.store, { lane: "In Review" });
+    createNote(fixture.store, { taskId: task, body: "a handoff", kind: "handoff" });
+
+    readTxSpy.calls = 0;
+    readBoard(fixture.store);
+    expect(readTxSpy.calls).toBe(1);
+
+    readTxSpy.calls = 0;
+    readBoard(fixture.store, { digest: true, limit: 3 });
+    expect(readTxSpy.calls).toBe(1);
   });
 });
 

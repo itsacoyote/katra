@@ -227,7 +227,13 @@ describe("briefEntity on an epic", () => {
     const planned = brief.children.find((group) => group.lane === "Planned");
     expect(planned?.tasks).toHaveLength(3);
     expect(planned?.truncated).toBe(false);
-    expect(brief.children.find((group) => group.lane === "Done")?.truncated).toBe(true);
+    const done = brief.children.find((group) => group.lane === "Done");
+    expect(done?.truncated).toBe(true);
+    // Exactly the cap, not just "truncated": the flag alone cannot tell a
+    // per-lane cap from a shared budget that left this lane a remainder —
+    // Planned renders first in lane order, so a shared budget shows here as a
+    // count below the constant.
+    expect(done?.tasks).toHaveLength(BRIEF_CHILDREN_PER_LANE);
   });
 
   it("raises the per-lane children cap under --full", () => {

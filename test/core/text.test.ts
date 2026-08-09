@@ -46,12 +46,17 @@ describe("capText", () => {
     });
   });
 
-  it("round-trips a capped body through JSON and back", () => {
+  it("survives a UTF-8 round-trip without replacement characters", () => {
     // `--json` is the agent-facing contract, and a lone surrogate is not valid
-    // Unicode however tolerant JS strings are about holding one.
+    // Unicode however tolerant JS strings are about holding one. A JSON
+    // round-trip cannot detect one — `JSON.stringify` escapes a lone surrogate
+    // losslessly, so the first version of this test passed against a naive
+    // `.slice()`. UTF-8 is the honest probe: `TextEncoder` replaces a lone
+    // surrogate with U+FFFD, so encode-decode changes the string exactly when
+    // the cap cut inside a pair.
     const capped = capText(`${EMOJI.repeat(10)}tail`, 7).text;
 
-    expect(JSON.parse(JSON.stringify({ body: capped })).body).toBe(capped);
+    expect(new TextDecoder().decode(new TextEncoder().encode(capped))).toBe(capped);
     expect(capped).not.toMatch(/�/u);
   });
 

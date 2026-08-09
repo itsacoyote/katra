@@ -145,6 +145,33 @@ describe("katra board", () => {
     expect(result.exitCode).toBe(EXIT.user);
   });
 
+  it("refuses a non-numeric limit with exit 1", async () => {
+    const result = await runCli(["board", "--limit", "abc"], { cwd: repo.dir });
+    expect(result.exitCode).toBe(EXIT.user);
+  });
+
+  it("refuses an unknown flag with the usage exit code", async () => {
+    // ADR-009: the board takes no filters, so `--epic` must be a refusal, not
+    // a silently ignored argument. 2, not 1: the invocation is malformed —
+    // there is no such flag to refuse on the merits.
+    const result = await runCli(["board", "--epic"], { cwd: repo.dir });
+    expect(result.exitCode).toBe(EXIT.usage);
+  });
+
+  it("applies --limit and --digest together", async () => {
+    const noted = await add(["carries the handoff"]);
+    await note(noted, "the handoff");
+    for (let i = 0; i < 3; i++) {
+      const id = await add([`task ${i}`]);
+      await lane(id, "Planned");
+    }
+
+    const out = await board(["--digest", "--limit", "2"]);
+
+    expect(out.split("\n")[0]).toContain("handoff");
+    expect(out).toContain("showing 2 of 3");
+  });
+
   it("treats --limit 0 as truthfully empty sections, not unbounded", async () => {
     const id = await add(["a task"]);
     await lane(id, "Planned");

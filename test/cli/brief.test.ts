@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
 import type { BriefResult } from "../../src/core/contract.js";
+import { openStore } from "../../src/core/store.js";
 import { BRIEF_HANDOFF_CHARS } from "../../src/core/tasks/brief.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
 import { createGitRepo } from "../helpers/fixture.js";
+import { seedTask } from "../helpers/seed.js";
 
 let repo: GitFixture;
 beforeEach(async () => {
@@ -144,9 +146,66 @@ describe("katra brief", () => {
     expect(shape).toContain("planned work");
   });
 
+  it("reports what a task blocks, naming the dependent", async () => {
+    // Requirement 2's other direction. The blocking data was asserted at core
+    // level while no test rendered the section — coverage found the loop with
+    // zero hits, so it could be deleted with the whole suite green.
+    const blocker = await add(["the foundation"]);
+    const dependent = await add(["waits on the foundation"]);
+    await runCli(["dep", dependent, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const out = await brief([blocker]);
+
+    // The line itself, so an activity row naming the dependent cannot carry it.
+    const line = out.split("\n").find((l) => l.trimStart().startsWith("blocking")) ?? "";
+    expect(line).toContain(dependent);
+    expect(line).toContain("waits on the foundation");
+  });
+
   it("refuses an id nothing matches, with exit 1", async () => {
     const result = await runCli(["brief", "kt-zzzzzz"], { cwd: repo.dir });
     expect(result.exitCode).toBe(EXIT.user);
+  });
+
+  it("lists candidates when the id prefix is ambiguous", async () => {
+    // Ids are random, so a shared prefix is seeded rather than added.
+    const { store } = openStore(repo.dir, {});
+    try {
+      seedTask(store, { id: "kt-ab0001" });
+      seedTask(store, { id: "kt-ab0002" });
+    } finally {
+      store.close();
+    }
+
+    const result = await runCli(["brief", "ab"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toContain("kt-ab0001");
+    expect(result.stderr).toContain("kt-ab0002");
+  });
+
+  it("refuses a missing id argument with the usage exit code", async () => {
+    // 2, not 1: the invocation itself is malformed, which EXIT.usage exists
+    // for — a missing argument is not a well-formed request katra refused.
+    const result = await runCli(["brief"], { cwd: repo.dir });
+    expect(result.exitCode).toBe(EXIT.usage);
+  });
+
+  it("honours --full for an epic's child handoff under --json", async () => {
+    // Three wirings in one pass: --full through the CLI, --full on an epic,
+    // and --full composed with --json — none of which any single unit test
+    // exercises end to end.
+    const epic = await add(["an epic", "--level", "epic"]);
+    const child = await add(["a child", "--parent", epic]);
+    await note(child, "x".repeat(BRIEF_HANDOFF_CHARS + 50));
+
+    const result = await runCli(["brief", epic, "--full", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stderr).toBe("");
+    const document = result.json() as BriefResult;
+    expect(document.handoff?.truncated).toBe(false);
+    expect(document.handoff?.note.body).toHaveLength(BRIEF_HANDOFF_CHARS + 50);
   });
 
   it("emits parseable JSON with nothing on stderr", async () => {
