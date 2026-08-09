@@ -319,14 +319,24 @@ describe("the notes line counts each handoff once", () => {
     expect(line).toContain("1 handoff");
   });
 
-  it("says 'more' only when one was already shown above", () => {
+  it("says 'more' only when one was already shown above", async () => {
+    const { formatBrief } = await import("../../src/cli/format.js");
     const task = seedTask(fixture.store);
     createNote(fixture.store, { taskId: task, body: "older", kind: "handoff" });
     createNote(fixture.store, { taskId: task, body: "newest", kind: "handoff" });
 
     const brief = briefEntity(fixture.store, task);
+    const notesLine = (value: typeof brief) =>
+      formatBrief(value)
+        .split("\n")
+        .find((line) => line.startsWith("notes:"));
 
     expect(brief.handoff?.note.body).toBe("newest");
-    expect(brief.noteCounts.handoff).toBe(2);
+    expect(notesLine(brief)).toContain("1 more handoff");
+
+    // Nothing shown above: "more" would name a note the reader never saw.
+    const nothingShown = notesLine({ ...brief, handoff: null });
+    expect(nothingShown).toContain("2 handoff");
+    expect(nothingShown).not.toContain("more");
   });
 });

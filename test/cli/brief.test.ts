@@ -248,12 +248,12 @@ describe("brief on an epic answers for the epic", () => {
     expect(out).toContain("blocks the epic");
   });
 
-  it("says blockers none on an unblocked epic rather than omitting the line", async () => {
+  it("qualifies an unblocked epic's blockers line rather than claiming none", async () => {
     const epic = await add(["an epic", "--level", "epic"]);
 
     const out = await brief([epic]);
-    expect(out).toContain("blockers");
-    // Qualified, so "none" cannot be read as a claim about the children.
-    expect(out).toContain("children not checked");
+    // The whole line, so the blocked arm's `field("blockers", …)` cannot
+    // satisfy it — "none" alone would read as a claim about the children.
+    expect(out).toMatch(/^ {2}blockers {4}none on the epic itself — children not checked$/m);
   });
 });

@@ -71,7 +71,7 @@ export function listBlockers(store: OpenStore, id: string): Blocker[] {
  * Chunking costs one extra statement per 500 rows; the ceiling costs an
  * exception.
  */
-const ID_CHUNK = 500;
+export const ID_CHUNK = 500;
 
 /**
  * The same read for many tasks at once, keyed by task id.

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { BOARD_SECTION_LIMIT, readBoard } from "../../src/core/board.js";
-import { addDependency } from "../../src/core/graph/deps.js";
+import { addDependency, ID_CHUNK } from "../../src/core/graph/deps.js";
 import { createNote } from "../../src/core/notes/repo.js";
 import { BRIEF_HANDOFF_CHARS } from "../../src/core/tasks/brief.js";
 import { nextTask } from "../../src/core/tasks/next.js";
@@ -344,5 +344,29 @@ describe("each blocked task gets its own blockers", () => {
     const found = readBoard(fixture.store).blocked.tasks.find((task) => task.id === stuck);
 
     expect(found?.blockers.map((blocker) => blocker.id)).toEqual([high, low]);
+  });
+
+  it("gives each row its own blockers past the chunk boundary", () => {
+    // One pair past ID_CHUNK, so the batched read must cross a chunk boundary.
+    // Seeded in one transaction: a thousand auto-commit inserts would measure
+    // the write path, which is not what this test is about.
+    const pairs = new Map<string, string>();
+    fixture.store.db.transaction(() => {
+      for (let i = 0; i < ID_CHUNK + 1; i++) {
+        const blocker = seedTask(fixture.store, { lane: "Planned", title: `blocks ${i}` });
+        const stuck = seedTask(fixture.store, { lane: "Planned", title: `stuck ${i}` });
+        seedDep(fixture.store, stuck, blocker);
+        pairs.set(stuck, blocker);
+      }
+    })();
+
+    const blocked = readBoard(fixture.store, { limit: ID_CHUNK + 1 }).blocked.tasks;
+
+    expect(blocked).toHaveLength(ID_CHUNK + 1);
+    // Every row, not a sample: a read that stops at the first chunk leaves the
+    // tail marked blocked with an empty blocker list.
+    for (const row of blocked) {
+      expect(row.blockers.map((blocker) => blocker.id)).toEqual([pairs.get(row.id)]);
+    }
   });
 });
