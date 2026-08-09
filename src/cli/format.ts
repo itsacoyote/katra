@@ -123,7 +123,7 @@ export function formatTaskList(tasks: readonly Task[]): string {
 export function formatUpdatedTasks(tasks: readonly TaskDetail[]): string {
   if (tasks.length === 0) return "no tasks updated";
 
-  const width = tasks.reduce((widest, { task }) => Math.max(widest, task.lane.length), 0);
+  const width = columnWidth(tasks, ({ task }) => task.lane);
   return [
     `updated ${tasks.length} tasks`,
     ...tasks.map(({ task }) => `  ${task.id}  ${padTo(task.lane, width)}  ${text(task.title)}`),
@@ -201,10 +201,11 @@ const TITLE_WIDTH = 44;
  * occupies exactly `width` columns and {@link columnWidth} agrees with it.
  */
 function clamp(text: string, width: number): string {
-  // The ellipsis costs a character, so there is no room for it below two. A
-  // width of one that returned "…" would be wider than the width asked for,
-  // from the helper whose contract is that it never is.
-  if (width <= 1) return capText(text, width).text;
+  // Only zero is degenerate. An earlier version guarded `width <= 1` on the
+  // claim that a one-character result would be too wide — but "…" *is* one
+  // character, and returning the first character bare made the bound stop
+  // reporting itself, which is the one thing a truncation must never do.
+  if (width <= 0) return "";
   // Two calls, deliberately. Capping at `width - 1` and asking *that* whether
   // it truncated ellipsizes a string of exactly `width`, which used to render
   // whole — the boundary title silently loses its last character. Ask the full
@@ -464,7 +465,16 @@ export function formatBrief(brief: BriefResult): string {
   // `show <epic>` prints them — so an epic brief that omitted this answered the
   // question by silence.
   if (brief.blockers.length === 0) {
-    lines.push(field("blockers", "none"));
+    // Qualified on an epic. Everything else in this feature treats an epic as
+    // not-work — `next` will not offer one, `board` excludes them from every
+    // section — so a bare "none" here reads as "nothing under this is blocked",
+    // which is a claim about the children that was never checked.
+    lines.push(
+      field(
+        "blockers",
+        brief.level === "epic" ? "none on the epic itself — children not checked" : "none",
+      ),
+    );
   } else {
     for (const [index, blocker] of brief.blockers.entries()) {
       lines.push(
@@ -522,15 +532,18 @@ export function formatBrief(brief: BriefResult): string {
     }
   }
 
+  // `handoff` is filtered out unconditionally and re-added below, so exactly one
+  // mechanism owns that kind. Filtering it only when a handoff was *shown* let
+  // both fire when the scope held one and `handoff` was null — the skew
+  // `briefEntity` documents as safe — printing "1 handoff, 1 more handoff" and
+  // claiming two where one exists.
   const others = Object.entries(brief.noteCounts)
-    .filter(([kind]) => !(kind === "handoff" && brief.handoff !== null))
+    .filter(([kind]) => kind !== "handoff")
     .map(([kind, count]) => `${count} ${kind}`);
-  // The handoff shown above is discounted from its own kind's tally, so a lone
-  // handoff produces no line at all rather than "1 handoff" beside the thing
-  // itself.
   const shownHandoff = brief.handoff === null ? 0 : 1;
   const remaining = (brief.noteCounts.handoff ?? 0) - shownHandoff;
-  if (remaining > 0) others.push(`${remaining} more handoff`);
+  // "more" only when one was already displayed above.
+  if (remaining > 0) others.push(`${remaining}${shownHandoff === 0 ? "" : " more"} handoff`);
   if (others.length > 0) {
     // No command answers this on an epic: the tally aggregates across children
     // and `note list` is task-scoped, so naming it would assert notes exist and

@@ -64,6 +64,16 @@ export function listBlockers(store: OpenStore, id: string): Blocker[] {
 }
 
 /**
+ * How many ids go into one `IN (…)`.
+ *
+ * Well under SQLite's 32,766-variable ceiling, so the margin survives a build
+ * compiled with a lower `SQLITE_MAX_VARIABLE_NUMBER` — older defaults were 999.
+ * Chunking costs one extra statement per 500 rows; the ceiling costs an
+ * exception.
+ */
+const ID_CHUNK = 500;
+
+/**
  * The same read for many tasks at once, keyed by task id.
  *
  * `board` renders a whole section of blocked tasks, and calling
@@ -81,25 +91,31 @@ export function listBlockersFor(store: OpenStore, ids: readonly string[]): Map<s
   const blockers = new Map<string, Blocker[]>();
   if (ids.length === 0) return blockers;
 
-  // Placeholders generated from the id count: better-sqlite3 binds no array
-  // type, and this is the one shape where the parameter count is not fixed by
-  // the query text.
-  const rows = store.db
-    .prepare(
-      `SELECT d.task_id AS task_id, b.id AS id, b.title AS title, b.lane AS lane
-         FROM deps d
-         JOIN tasks b ON b.id = d.depends_on_id
-        WHERE d.task_id IN (${ids.map(() => "?").join(",")})
-          AND b.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
-        ORDER BY b.priority, b.created_at, b.rowid`,
-    )
-    .all(...ids) as Array<{ task_id: string; id: string; title: string; lane: string }>;
+  // Chunked, because one placeholder per id runs into SQLite's bound-variable
+  // ceiling. Measured against the bundled build: 32,766 placeholders bind,
+  // 32,767 throws `too many SQL variables` — which surfaces as `internal` and
+  // exit 4, telling an agent the machine is broken (ADR-005) over a large but
+  // legal `--limit`. The per-row read this replaced had no such cliff, so
+  // batching without chunking would trade a slow path for a failing one.
+  for (let start = 0; start < ids.length; start += ID_CHUNK) {
+    const chunk = ids.slice(start, start + ID_CHUNK);
+    const rows = store.db
+      .prepare(
+        `SELECT d.task_id AS task_id, b.id AS id, b.title AS title, b.lane AS lane
+           FROM deps d
+           JOIN tasks b ON b.id = d.depends_on_id
+          WHERE d.task_id IN (${chunk.map(() => "?").join(",")})
+            AND b.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
+          ORDER BY b.priority, b.created_at, b.rowid`,
+      )
+      .all(...chunk) as Array<{ task_id: string; id: string; title: string; lane: string }>;
 
-  for (const row of rows) {
-    const blocker = { id: row.id, title: row.title, lane: narrowLane(row.lane) };
-    const existing = blockers.get(row.task_id);
-    if (existing === undefined) blockers.set(row.task_id, [blocker]);
-    else existing.push(blocker);
+    for (const row of rows) {
+      const blocker = { id: row.id, title: row.title, lane: narrowLane(row.lane) };
+      const existing = blockers.get(row.task_id);
+      if (existing === undefined) blockers.set(row.task_id, [blocker]);
+      else existing.push(blocker);
+    }
   }
   return blockers;
 }

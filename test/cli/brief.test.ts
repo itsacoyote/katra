@@ -112,7 +112,7 @@ describe("katra brief", () => {
     expect(showOut).not.toContain("and a second line the preview flattens away");
   });
 
-  it("renders an epic brief without blockers, and a task brief without children", async () => {
+  it("carries blockers on both shapes, and children only on the epic", async () => {
     const epic = await add(["an epic", "--level", "epic"]);
     const child = await add(["a child", "--parent", epic]);
 
@@ -251,6 +251,9 @@ describe("brief on an epic answers for the epic", () => {
   it("says blockers none on an unblocked epic rather than omitting the line", async () => {
     const epic = await add(["an epic", "--level", "epic"]);
 
-    expect(await brief([epic])).toContain("blockers    none");
+    const out = await brief([epic]);
+    expect(out).toContain("blockers");
+    // Qualified, so "none" cannot be read as a claim about the children.
+    expect(out).toContain("children not checked");
   });
 });

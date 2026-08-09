@@ -245,7 +245,7 @@ describe("briefEntity on an epic", () => {
 });
 
 describe("the two shapes are different, not nested", () => {
-  it("omits the children field for a task, and the blockers field for an epic", () => {
+  it("carries blockers on both shapes, and children only on the epic", () => {
     // The discriminated union, from the inside. One shape with optional fields
     // would leave a --json consumer unable to tell "does not apply" from
     // "nothing filled it in".
@@ -290,5 +290,43 @@ describe("the two shapes are different, not nested", () => {
     if (brief.level !== "epic") throw new Error("unreachable");
     expect(brief.children[0]?.total).toBe(2);
     expect(brief.children[0]?.truncated).toBe(false);
+  });
+});
+
+describe("the notes line counts each handoff once", () => {
+  it("does not say both '1 handoff' and '1 more handoff'", async () => {
+    // The state a concurrent write produces: `briefEntity` reads the handoff
+    // before the counts, so a note written between the two leaves `handoff`
+    // null while `noteCounts.handoff` is 1. That skew is documented as safe —
+    // it should degrade to one extra line, never to a contradiction.
+    //
+    // Constructed at the formatter, because the race cannot be staged through
+    // the CLI: the two reads are microseconds apart.
+    const { formatBrief } = await import("../../src/cli/format.js");
+    const task = seedTask(fixture.store, { title: "a task" });
+    const real = briefEntity(fixture.store, task);
+
+    const skewed = { ...real, handoff: null, noteCounts: { handoff: 1 } };
+
+    const line = formatBrief(skewed)
+      .split("\n")
+      .find((l) => l.startsWith("notes:"));
+
+    // The defect is the kind being named twice — "1 handoff, 1 more handoff"
+    // claims two notes where one exists. Counting occurrences catches it
+    // whichever of the two mechanisms produced the duplicate.
+    expect(line?.match(/handoff/g) ?? []).toHaveLength(1);
+    expect(line).toContain("1 handoff");
+  });
+
+  it("says 'more' only when one was already shown above", () => {
+    const task = seedTask(fixture.store);
+    createNote(fixture.store, { taskId: task, body: "older", kind: "handoff" });
+    createNote(fixture.store, { taskId: task, body: "newest", kind: "handoff" });
+
+    const brief = briefEntity(fixture.store, task);
+
+    expect(brief.handoff?.note.body).toBe("newest");
+    expect(brief.noteCounts.handoff).toBe(2);
   });
 });

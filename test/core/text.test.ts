@@ -128,3 +128,13 @@ describe("capText at degenerate widths", () => {
     expect(capText(body, Number.POSITIVE_INFINITY)).toEqual({ text: body, truncated: false });
   });
 });
+
+describe("capText rejects a fractional cap", () => {
+  it("keeps nothing at a non-integer width", () => {
+    // `kept.length === 2.5` can never fire, so a fractional cap would let the
+    // whole string through with `truncated: false` — the same hole the negative
+    // and NaN cases have. Infinity is the one non-integer that means something.
+    expect(capText("abc", 2.5)).toEqual({ text: "", truncated: true });
+    expect(capText("abc", Number.POSITIVE_INFINITY).truncated).toBe(false);
+  });
+});

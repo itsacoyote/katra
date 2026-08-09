@@ -310,3 +310,39 @@ describe("the digest reads inside the same snapshot", () => {
     expect(board.digest?.note.body).toHaveLength(BRIEF_HANDOFF_CHARS);
   });
 });
+
+describe("each blocked task gets its own blockers", () => {
+  it("does not hand every blocked task the union of all blockers", () => {
+    // The bug a per-row-to-batched rewrite introduces, and the only part of the
+    // batching that a single-blocked-task fixture cannot see: one shared query
+    // grouped by the wrong key gives every row everyone else's blockers.
+    const firstBlocker = seedTask(fixture.store, { lane: "Planned", title: "blocks the first" });
+    const secondBlocker = seedTask(fixture.store, { lane: "Planned", title: "blocks the second" });
+    const first = seedTask(fixture.store, { lane: "Planned", title: "first" });
+    const second = seedTask(fixture.store, { lane: "Planned", title: "second" });
+    addDependency(fixture.store, first, firstBlocker);
+    addDependency(fixture.store, second, secondBlocker);
+
+    const blocked = readBoard(fixture.store).blocked.tasks;
+
+    expect(blocked).toHaveLength(2);
+    for (const task of blocked) {
+      expect(task.blockers).toHaveLength(1);
+    }
+    const byId = new Map(blocked.map((task) => [task.id, task.blockers[0]?.id]));
+    expect(byId.get(first)).toBe(firstBlocker);
+    expect(byId.get(second)).toBe(secondBlocker);
+  });
+
+  it("gives a task with several blockers all of them, ranked", () => {
+    const high = seedTask(fixture.store, { lane: "Planned", priority: 0, title: "high" });
+    const low = seedTask(fixture.store, { lane: "Planned", priority: 4, title: "low" });
+    const stuck = seedTask(fixture.store, { lane: "Planned", title: "stuck" });
+    addDependency(fixture.store, stuck, low);
+    addDependency(fixture.store, stuck, high);
+
+    const found = readBoard(fixture.store).blocked.tasks.find((task) => task.id === stuck);
+
+    expect(found?.blockers.map((blocker) => blocker.id)).toEqual([high, low]);
+  });
+});
