@@ -370,3 +370,27 @@ describe("each blocked task gets its own blockers", () => {
     }
   });
 });
+
+describe("recent and untrusted event fields", () => {
+  it("one-lines a hostile ref and entity id", async () => {
+    // `events.ref` and `events.entity_id` have no CHECK constraint — today only
+    // generated ids reach them, but F5 routes external refs through `ref`, and
+    // the seed helper writes what production cannot yet. Built by codepoint so
+    // no invisible literal sits in test source.
+    const { formatBoard } = await import("../../src/cli/format.js");
+    const ESC = String.fromCharCode(0x1b);
+    const NL = String.fromCharCode(0x0a);
+    seedEvent(fixture.store, {
+      entityId: `kt-evil${ESC}[31m${NL}flush`,
+      ref: `nt-x${NL}cut`,
+    });
+
+    const out = formatBoard(readBoard(fixture.store));
+
+    expect(out).not.toContain(ESC);
+    // An embedded newline would give stored text its own flush-left line,
+    // indistinguishable from a line the board itself printed.
+    expect(out).not.toMatch(/^flush/m);
+    expect(out).not.toMatch(/^cut/m);
+  });
+});

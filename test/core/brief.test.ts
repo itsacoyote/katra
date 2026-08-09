@@ -7,7 +7,7 @@ import {
   BRIEF_HANDOFF_CHARS,
   briefEntity,
 } from "../../src/core/tasks/brief.js";
-import { seedEpic, seedTask } from "../helpers/seed.js";
+import { seedEpic, seedEvent, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -338,5 +338,42 @@ describe("the notes line counts each handoff once", () => {
     const nothingShown = notesLine({ ...brief, handoff: null });
     expect(nothingShown).toContain("2 handoff");
     expect(nothingShown).not.toContain("more");
+  });
+});
+
+describe("activity and untrusted event fields", () => {
+  it("one-lines a child event's entity id in an epic's activity", async () => {
+    // The subject column renders only when the event names a different entity
+    // than the one briefed — an epic's activity is where that path runs.
+    // `events.entity_id` has no CHECK constraint; the seed helper writes what
+    // production cannot yet. Built by codepoint so no invisible literal sits
+    // in test source.
+    const { formatBrief } = await import("../../src/cli/format.js");
+    const NL = String.fromCharCode(0x0a);
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    seedEvent(fixture.store, { entityId: `kt-evil${NL}flush`, epicId: epic });
+
+    const out = formatBrief(briefEntity(fixture.store, epic));
+
+    // An embedded newline would give stored text its own flush-left line,
+    // indistinguishable from a line brief itself printed.
+    expect(out).toContain("flush");
+    expect(out).not.toMatch(/^flush/m);
+  });
+
+  it("one-lines a child event's entity id in show's activity too", async () => {
+    // `show` renders the identical subject column. F2 shipped a sanitizer that
+    // covered one renderer and not another of the same string — this pins the
+    // pair so they cannot diverge again.
+    const { formatTaskView } = await import("../../src/cli/format.js");
+    const { viewTask } = await import("../../src/core/tasks/view.js");
+    const NL = String.fromCharCode(0x0a);
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    seedEvent(fixture.store, { entityId: `kt-evil${NL}flush`, epicId: epic });
+
+    const out = formatTaskView(viewTask(fixture.store, epic));
+
+    expect(out).toContain("flush");
+    expect(out).not.toMatch(/^flush/m);
   });
 });

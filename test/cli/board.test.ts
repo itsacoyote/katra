@@ -71,6 +71,39 @@ describe("katra board", () => {
     expect(out).toContain(`blocked by ${blocker}`);
   });
 
+  it("clamps a section row's title to the width log allows", async () => {
+    // The same field is cut at 44 in `log`; the schema puts no length on a
+    // title, so an uncapped board row would make the orientation view the one
+    // place a hostile title floods.
+    const task = await add(["x".repeat(60)]);
+    await lane(task, "In Progress");
+
+    const out = await board();
+
+    expect(out).toContain(`${"x".repeat(43)}…`);
+    expect(out).not.toContain("x".repeat(44));
+  });
+
+  it("names the first three blockers and counts the rest", async () => {
+    const stuck = await add(["cannot start"]);
+    await lane(stuck, "Planned");
+    const blockers: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      const blocker = await add([`blocker ${i}`]);
+      await runCli(["dep", stuck, "--blocked-by", blocker], { cwd: repo.dir });
+      blockers.push(blocker);
+    }
+
+    const out = await board();
+
+    // The row alone: the trailing blockers still appear elsewhere on the
+    // board — `recent` names them in their created events.
+    const row = out.split("\n").find((line) => line.includes("blocked by")) ?? "";
+    expect(row).toContain(`blocked by ${blockers[0]}, ${blockers[1]}, ${blockers[2]}, +2 more`);
+    expect(row).not.toContain(blockers[3] ?? "blocker 3");
+    expect(row).not.toContain(blockers[4] ?? "blocker 4");
+  });
+
   it("exits 0 with one line on an empty store", async () => {
     // An empty board is not a refusal — the same reasoning ADR-006 applies to
     // `next`. An agent branches on exit codes, so 1 must never mean "nothing
@@ -206,18 +239,25 @@ describe("katra board --digest", () => {
 });
 
 describe("board and untrusted text", () => {
+  // Built by codepoint — an invisible literal in test source is unreviewable.
+  const ALM = String.fromCharCode(0x061c);
+  const LS = String.fromCharCode(0x2028);
   const ESC = "";
   const BIDI = "‮";
 
   it("strips ESC and bidi control characters from every rendered field", async () => {
-    const task = await add([`title ${ESC}[31m${BIDI}red`]);
+    const task = await add([`title ${ESC}[31m${BIDI}${ALM}red${LS}end`]);
     await lane(task, "In Progress");
-    await note(task, `body ${ESC}[32m${BIDI}green`);
+    await note(task, `body ${ESC}[32m${BIDI}${ALM}green${LS}split`);
 
     const out = await board(["--digest"]);
 
     expect(out).not.toContain(ESC);
     expect(out).not.toContain(BIDI);
+    // ALM is the Trojan Source mark the first bidi class missed; the line
+    // separators break a row in any non-terminal renderer.
+    expect(out).not.toContain(ALM);
+    expect(out).not.toContain(LS);
     expect(out).toContain("green");
   });
 

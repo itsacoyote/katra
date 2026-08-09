@@ -163,6 +163,9 @@ describe("katra brief", () => {
 });
 
 describe("brief and untrusted text", () => {
+  // Built by codepoint — an invisible literal in test source is unreviewable.
+  const ALM = String.fromCharCode(0x061c);
+  const LS = String.fromCharCode(0x2028);
   const ESC = "";
   const BIDI = "‮";
 
@@ -171,18 +174,25 @@ describe("brief and untrusted text", () => {
     // pasted output and model text land, and `brief` is the command that hands
     // it to the next agent. F2 shipped a version of this bug once, where the
     // same string was sanitised in one renderer and raw in another.
-    const result = await runCli(["add", `title ${ESC}[31m${BIDI}red`, "--body-file", "-"], {
-      cwd: repo.dir,
-      stdin: `description ${ESC}[1m${BIDI}bold`,
-    });
+    const result = await runCli(
+      ["add", `title ${ESC}[31m${BIDI}${ALM}red${LS}end`, "--body-file", "-"],
+      {
+        cwd: repo.dir,
+        stdin: `description ${ESC}[1m${BIDI}${ALM}bold${LS}tail`,
+      },
+    );
     expect(result.exitCode).toBe(EXIT.ok);
     const task = result.stdout.trim();
-    await note(task, `body ${ESC}[32m${BIDI}green\nsecond line`);
+    await note(task, `body ${ESC}[32m${BIDI}${ALM}green${LS}split\nsecond line`);
 
     const out = await brief([task]);
 
     expect(out).not.toContain(ESC);
     expect(out).not.toContain(BIDI);
+    // ALM is the Trojan Source mark the first bidi class missed; the line
+    // separators break a row in any non-terminal renderer.
+    expect(out).not.toContain(ALM);
+    expect(out).not.toContain(LS);
     // The text itself survives — this strips the payload, not the content.
     expect(out).toContain("green");
     expect(out).toContain("second line");

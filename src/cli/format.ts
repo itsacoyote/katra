@@ -146,28 +146,37 @@ function oneLine(value: string): string {
 }
 
 /**
- * Characters that reorder text without being visible.
+ * C0/C1 control characters, plus the Unicode line separators.
  *
- * Trojan Source (CVE-2021-42574) applied to a backlog: an override or isolate
- * inside a title or a note body makes the rendered line read in an order that
- * misstates what it says. Stripping control characters does not catch these —
- * they are ordinary printable codepoints — and neither does `JSON.stringify`,
- * so they survived every other guard in this file.
- *
- * Removed rather than replaced with a marker: a marker in the middle of a line
- * is itself a rendering change, and katra has no styling vocabulary to make it
- * legible.
+ * `U+2028`/`U+2029` sit outside the control blocks and move no terminal
+ * cursor, but any non-terminal consumer of this output — an editor, a web
+ * view, an agent's renderer — breaks the line on them, so two readers would
+ * disagree about how many rows a table has.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
-const CONTROLS = /[\u0000-\u001F\u007F-\u009F]+/g;
+const CONTROLS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g;
 
 /**
  * The same set minus newline and tab, for text rendered across several lines.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
-const CONTROLS_KEEPING_LAYOUT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F]+/g;
+const CONTROLS_KEEPING_LAYOUT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029]+/g;
 
-const BIDI = /[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+/**
+ * Characters that reorder text without being visible.
+ *
+ * Trojan Source (CVE-2021-42574) applied to a backlog: an override or isolate
+ * inside a title or a note body makes the rendered line read in an order that
+ * misstates what it says. Stripping control characters does not catch these \u2014
+ * they are ordinary printable codepoints \u2014 and neither does `JSON.stringify`,
+ * so they survived every other guard in this file. `U+061C` is the one mark
+ * in the CVE's own list the first version of this class omitted.
+ *
+ * Removed rather than replaced with a marker: a marker in the middle of a line
+ * is itself a rendering change, and katra has no styling vocabulary to make it
+ * legible.
+ */
+const BIDI = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
 
 /** What an event says happened, beyond its type and what it is about. */
 function describeEvent(event: LoggedEvent): string {
@@ -176,7 +185,10 @@ function describeEvent(event: LoggedEvent): string {
     parts.push(`${event.fromLane} -> ${event.toLane}`);
   }
   if (event.reason !== null) parts.push(oneLine(event.reason));
-  if (event.ref !== null) parts.push(event.ref);
+  // `events.ref` carries generated note ids today, but the column has no CHECK
+  // constraint and F5 routes external refs through it — one-line it before the
+  // first URL arrives, not after.
+  if (event.ref !== null) parts.push(oneLine(event.ref));
   return parts.join("  ");
 }
 
@@ -423,7 +435,7 @@ export function formatTaskView(view: TaskView): string {
       const subject =
         event.entityId === view.task.id
           ? ""
-          : `  ${event.entityId}  ${previewBody(event.entityTitle ?? "", TITLE_WIDTH)}`;
+          : `  ${oneLine(event.entityId)}  ${previewBody(event.entityTitle ?? "", TITLE_WIDTH)}`;
       lines.push(
         `  ${when}  ${event.type.padEnd(14)}${subject}  ${describeEvent(event)}`.trimEnd(),
       );
@@ -480,7 +492,7 @@ export function formatBrief(brief: BriefResult): string {
       lines.push(
         field(
           index === 0 ? "blockers" : "",
-          `${blocker.id}  ${blocker.lane}  ${text(blocker.title)}`,
+          `${blocker.id}  ${blocker.lane}  ${clamp(text(blocker.title), TITLE_WIDTH)}`,
         ),
       );
     }
@@ -489,7 +501,7 @@ export function formatBrief(brief: BriefResult): string {
     lines.push(
       field(
         index === 0 ? "blocking" : "",
-        `${dependent.id}  ${dependent.lane}  ${text(dependent.title)}`,
+        `${dependent.id}  ${dependent.lane}  ${clamp(text(dependent.title), TITLE_WIDTH)}`,
       ),
     );
   }
@@ -504,7 +516,7 @@ export function formatBrief(brief: BriefResult): string {
         : String(group.tasks.length);
       lines.push("", `${group.lane} (${heading})`);
       for (const child of group.tasks) {
-        lines.push(`  ${child.id}  ${text(child.title)}`);
+        lines.push(`  ${child.id}  ${clamp(text(child.title), TITLE_WIDTH)}`);
       }
     }
   }
@@ -562,7 +574,7 @@ export function formatBrief(brief: BriefResult): string {
       const subject =
         event.entityId === brief.task.id
           ? ""
-          : `  ${event.entityId}  ${previewBody(event.entityTitle ?? "", TITLE_WIDTH)}`;
+          : `  ${oneLine(event.entityId)}  ${previewBody(event.entityTitle ?? "", TITLE_WIDTH)}`;
       lines.push(
         `  ${when}  ${padTo(event.type, 14)}${subject}  ${describeEvent(event)}`.trimEnd(),
       );
@@ -572,6 +584,9 @@ export function formatBrief(brief: BriefResult): string {
 
   return lines.join("\n");
 }
+
+/** How many blocker ids a blocked row names before deferring to `show`. */
+const BLOCKERS_SHOWN = 3;
 
 /**
  * The board: where the repository stands, in five parts.
@@ -616,10 +631,16 @@ export function formatBoard(board: BoardResult): string {
     const laneWidth = columnWidth(section.tasks, (task) => task.lane);
     return section.tasks.map((task) => {
       const marker = task.blocked && !showBlockers ? "  (blocked)" : "";
+      // The first few blockers, not all of them: the row is bounded and the
+      // list is not — the rest are one `show` or `--json` away. The title gets
+      // the clamp `log` already applies to the same column; the schema puts no
+      // length on it.
+      const shown = task.blockers.slice(0, BLOCKERS_SHOWN).map((blocker) => blocker.id);
+      const rest = task.blockers.length - shown.length;
       const blockers = showBlockers
-        ? `  blocked by ${task.blockers.map((blocker) => blocker.id).join(", ")}`
+        ? `  blocked by ${shown.join(", ")}${rest > 0 ? `, +${rest} more` : ""}`
         : "";
-      return `  ${padTo(task.id, idWidth)}  P${task.priority}  ${padTo(task.lane, laneWidth)}  ${text(task.title)}${marker}${blockers}`;
+      return `  ${padTo(task.id, idWidth)}  P${task.priority}  ${padTo(task.lane, laneWidth)}  ${clamp(text(task.title), TITLE_WIDTH)}${marker}${blockers}`;
     });
   };
 
@@ -652,7 +673,7 @@ export function formatBoard(board: BoardResult): string {
       const when = event.createdAt.slice(0, 16).replace("T", " ");
       const title = event.entityTitle === null ? "" : previewBody(event.entityTitle, TITLE_WIDTH);
       lines.push(
-        `  ${when}  ${padTo(event.type, 14)}  ${event.entityId}  ${title}  ${describeEvent(event)}`.trimEnd(),
+        `  ${when}  ${padTo(event.type, 14)}  ${oneLine(event.entityId)}  ${title}  ${describeEvent(event)}`.trimEnd(),
       );
     }
     // The section owes the same report every other bound in katra owes. It was
