@@ -162,6 +162,8 @@ npx @itsacoyote/katra --help
 
 > The unscoped `katra` name on npm belongs to an unrelated, abandoned package, so katra publishes under the `@itsacoyote` scope. The installed command is still `katra`.
 
+Then, per repository: `katra init` creates the store, and [`docs/agents-snippet.md`](docs/agents-snippet.md) is the block to paste into that repository's `AGENTS.md` so agent sessions actually use it.
+
 ## Development
 
 Requires **Node ≥ 22.12** and **pnpm**.
