@@ -12,6 +12,7 @@
  * the transaction writes.
  */
 
+import { assertNotReadOnly } from "../db/connection.js";
 import type { Lane } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { narrowEventType, narrowLane, narrowNullableText, narrowText } from "../narrow.js";
@@ -222,6 +223,11 @@ export function appendEvent(store: OpenStore, event: NewEvent, now: string): num
         "commits on its own can outlive the change it describes",
     });
   }
+  // ...and `inTransaction` alone stopped being enough once `readTx` existed: a
+  // deferred read sets the same flag, so the check above passes inside one and
+  // the insert goes on to attempt a lock upgrade it cannot get. The guard means
+  // "inside a *write* transaction", and this is the half that says so.
+  assertNotReadOnly(store.db, "appendEvent");
 
   const info = store.db
     .prepare(

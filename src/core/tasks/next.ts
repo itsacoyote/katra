@@ -23,6 +23,22 @@ export type { BlockedTask, NextResult };
 /** The lane `next` draws from: work that has been planned but not started. */
 export const NEXT_LANE = "Planned";
 
+/**
+ * How katra ranks tasks against each other, everywhere.
+ *
+ * Priority, then oldest first, then `rowid` — the last because two tasks
+ * written in the same millisecond are routine and would otherwise come back in
+ * an arbitrary order between runs.
+ *
+ * Exported because `board` ranks three sections by it and this fragment is
+ * already hand-written at seven call sites. An eighth and ninth typed by hand
+ * is how two commands quietly start disagreeing about what comes first — and
+ * `board`'s contract is that its top ready row *is* what `next` returns.
+ *
+ * The `t.` prefix is part of it: every consumer aliases `tasks` to `t`.
+ */
+export const TASK_RANKING = "ORDER BY t.priority, t.created_at, t.rowid";
+
 export interface NextFilters {
   readonly kind?: Kind;
   readonly level?: Level;
@@ -68,15 +84,50 @@ function filtersOnly(filters: NextFilters): Conditions {
  * Built on {@link filtersOnly} rather than repeating it: a fourth filter added
  * to one and not the other would make `next` and its untriaged count disagree
  * about which tasks they are talking about, silently.
+ *
+ * **Epics are excluded here, so both branches inherit it.** `next` used to
+ * exclude them from its untriaged count and nowhere else, which meant a
+ * `Planned` epic at a low priority number was returned as the task to work on,
+ * and a blocked one was listed as work waiting to start. An epic is a
+ * container; nobody picks one up. An explicit `--level` still wins, so
+ * `next --level epic` asks the literal question.
+ *
+ * Fixing only the candidate query would have been worse than fixing neither:
+ * `next` would refuse to *offer* an epic while still advertising one as blocked
+ * work.
  */
 function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
   const narrowing = filtersOnly(filters);
-  const parts = ["t.lane = ?", "r.is_ready = ?", ...(narrowing.sql === "" ? [] : [narrowing.sql])];
+  const parts = [
+    "t.lane = ?",
+    "r.is_ready = ?",
+    ...(filters.level === undefined ? ["t.level = 'task'"] : []),
+    ...(narrowing.sql === "" ? [] : [narrowing.sql]),
+  ];
 
   return {
     sql: parts.join(" AND "),
     params: [NEXT_LANE, ready ? 1 : 0, ...narrowing.params],
   };
+}
+
+/**
+ * What "startable" means, as a SQL fragment and its parameters.
+ *
+ * The real shared surface between `next` and `board`, together with
+ * {@link TASK_RANKING}. Board issues its own `SELECT` — it needs `is_ready` per
+ * row for the in-flight blocked marker, which this query does not carry — so
+ * the two are not one query. They share the *predicate*, which is the thing
+ * that would otherwise drift: without it board hand-writes a fourth copy of
+ * "planned and unblocked and not an epic" and the first ready row stops
+ * agreeing with what `next` returns.
+ *
+ * The fragment assumes the aliases `t` and `r`, and is parenthesis-free: both
+ * consumers concatenate it with `AND`, so a top-level `OR` added here would
+ * silently change what every caller means.
+ */
+export function readyPredicate(filters: NextFilters = {}): Conditions {
+  return conditionsFor(filters, true);
 }
 
 /**
@@ -90,13 +141,13 @@ function conditionsFor(filters: NextFilters, ready: boolean): Conditions {
  * Filters narrow the candidate pool; they never turn one result into several.
  */
 export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResult {
-  const ready = conditionsFor(filters, true);
+  const ready = readyPredicate(filters);
   const candidate = store.db
     .prepare(
       `SELECT t.id AS id FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
         WHERE ${ready.sql}
-        ORDER BY t.priority, t.created_at, t.rowid
+        ${TASK_RANKING}
         LIMIT 1`,
     )
     .get(...ready.params) as { id: string } | undefined;
@@ -130,7 +181,7 @@ export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResul
       `SELECT t.id AS id, t.title AS title FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
         WHERE ${stuck.sql}
-        ORDER BY t.priority, t.created_at, t.rowid`,
+        ${TASK_RANKING}`,
     )
     .all(...stuck.params) as Array<{ id: string; title: string }>;
 

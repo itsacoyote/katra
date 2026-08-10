@@ -358,3 +358,45 @@ describe("log reports its own bound", () => {
     expect(exact.truncated).toBe(false);
   });
 });
+
+describe("column alignment across character widths", () => {
+  it("aligns log columns when a title contains non-BMP characters", () => {
+    // The unit trap behind `clamp`'s code-point fix. Column widths used to be
+    // computed with `.length` — UTF-16 code units — while the cap counts code
+    // points. A title of emoji then measures twice its visible width and pads
+    // every ASCII row beside it to match, so fixing the cap alone would have
+    // misaligned the whole table while every existing test stayed green.
+    // The actor column carries the emoji, not the title: a padded column has to
+    // be followed by something for its width to be observable, and the title is
+    // rendered last, where trailing padding is trimmed away again.
+    const stamp = "2026-01-01T00:00:00.000Z";
+    const row = (id: string, actor: string, index: number): LoggedEvent => ({
+      id: index,
+      type: "created",
+      entityId: id,
+      epicId: null,
+      actor,
+      fromLane: null,
+      toLane: null,
+      ref: null,
+      reason: null,
+      title: "a title",
+      entityTitle: "a title",
+      createdAt: stamp,
+    });
+
+    const lines = formatEventLog(
+      [row("kt-aaaaaa", "🜃🜃🜃🜃🜃🜃", 2), row("kt-bbbbbb", "main @ /wt", 1)],
+      false,
+    ).split("\n");
+
+    // Six emoji are six characters and twelve code units. Padding by code
+    // units would decide the emoji row is already past the ten-character
+    // column and add nothing, leaving the title four characters to its left.
+    // Counted in code points, not code units: measuring the offset the same
+    // broken way the bug measured widths would hide the bug.
+    const offsets = lines.map((line) => [...line.slice(0, line.indexOf("a title"))].length);
+    expect(offsets[0]).toBe(offsets[1]);
+    expect(offsets[0]).toBeGreaterThan(0);
+  });
+});

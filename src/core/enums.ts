@@ -55,6 +55,26 @@ export const TERMINAL_LANES = ["Done", "Cancelled"] as const satisfies readonly 
 export type TerminalLane = (typeof TERMINAL_LANES)[number];
 
 /**
+ * Lanes that mean somebody is working on it right now.
+ *
+ * `board`'s in-flight section, and the reason it is defined by lane rather than
+ * by a claim: claims do not exist yet, and lanes are what the store actually
+ * records. When claims land this can be refined without the board changing
+ * shape.
+ */
+export const IN_FLIGHT_LANES = ["In Progress", "In Review"] as const satisfies readonly Lane[];
+
+/**
+ * Lanes holding work nobody has planned yet.
+ *
+ * The residue that made `board` need a fifth count. `in flight` takes two
+ * lanes, `ready` takes `Planned`, `blocked` takes anything unstartable — and
+ * these two, when startable, fall through all three. `add` writes into
+ * `Defined`, so on a young store this is the largest group of all.
+ */
+export const UNTRIAGED_LANES = ["Defined", "Researching"] as const satisfies readonly Lane[];
+
+/**
  * What an event records.
  *
  * Seven, where `docs/katra-spec.md` §5 lists nine. `claimed` and `released`

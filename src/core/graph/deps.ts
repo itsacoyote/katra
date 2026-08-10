@@ -64,6 +64,63 @@ export function listBlockers(store: OpenStore, id: string): Blocker[] {
 }
 
 /**
+ * How many ids go into one `IN (…)`.
+ *
+ * Well under SQLite's 32,766-variable ceiling, so the margin survives a build
+ * compiled with a lower `SQLITE_MAX_VARIABLE_NUMBER` — older defaults were 999.
+ * Chunking costs one extra statement per 500 rows; the ceiling costs an
+ * exception.
+ */
+export const ID_CHUNK = 500;
+
+/**
+ * The same read for many tasks at once, keyed by task id.
+ *
+ * `board` renders a whole section of blocked tasks, and calling
+ * {@link listBlockers} per row would issue one statement per task **inside**
+ * `readTx`'s deferred snapshot. `--limit` is caller-supplied and `narrowCount`
+ * permits up to a million, so that fan-out is bounded by the caller, not by
+ * anything the module controls — and a read transaction held open across it
+ * stops WAL checkpointing for the whole store, which is what `readTx`'s own
+ * docstring warns about.
+ *
+ * Tasks with no unfinished blockers are absent from the map rather than mapped
+ * to an empty array; callers default.
+ */
+export function listBlockersFor(store: OpenStore, ids: readonly string[]): Map<string, Blocker[]> {
+  const blockers = new Map<string, Blocker[]>();
+  if (ids.length === 0) return blockers;
+
+  // Chunked, because one placeholder per id runs into SQLite's bound-variable
+  // ceiling. Measured against the bundled build: 32,766 placeholders bind,
+  // 32,767 throws `too many SQL variables` — which surfaces as `internal` and
+  // exit 4, telling an agent the machine is broken (ADR-005) over a large but
+  // legal `--limit`. The per-row read this replaced had no such cliff, so
+  // batching without chunking would trade a slow path for a failing one.
+  for (let start = 0; start < ids.length; start += ID_CHUNK) {
+    const chunk = ids.slice(start, start + ID_CHUNK);
+    const rows = store.db
+      .prepare(
+        `SELECT d.task_id AS task_id, b.id AS id, b.title AS title, b.lane AS lane
+           FROM deps d
+           JOIN tasks b ON b.id = d.depends_on_id
+          WHERE d.task_id IN (${chunk.map(() => "?").join(",")})
+            AND b.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
+          ORDER BY b.priority, b.created_at, b.rowid`,
+      )
+      .all(...chunk) as Array<{ task_id: string; id: string; title: string; lane: string }>;
+
+    for (const row of rows) {
+      const blocker = { id: row.id, title: row.title, lane: narrowLane(row.lane) };
+      const existing = blockers.get(row.task_id);
+      if (existing === undefined) blockers.set(row.task_id, [blocker]);
+      else existing.push(blocker);
+    }
+  }
+  return blockers;
+}
+
+/**
  * Whether `taskId` is reachable from `dependsOnId` — i.e. whether the proposed
  * edge would close a loop.
  *

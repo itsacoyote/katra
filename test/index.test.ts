@@ -65,6 +65,8 @@ describe("the public barrel", () => {
       katra.EventLog,
       katra.NoteList,
       katra.NextResult,
+      katra.BriefResult,
+      katra.BoardResult,
       katra.DeleteResult,
       katra.LifecycleResult,
       katra.DependencyResult,
@@ -77,9 +79,13 @@ describe("the public barrel", () => {
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
-    // noUnusedLocals, and exporting it trips the no-exports-in-test rule.
-    const count: PublishedDocuments["length"] = 15;
-    expect(count).toBe(15);
+    // noUnusedLocals, and exporting it trips the no-exports-in-test rule. The
+    // runtime assertion is ballast — vitest's esbuild pipeline type-checks
+    // nothing, so this test cannot fail under `pnpm test`. The real gate is
+    // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
+    // document type from the barrel is a compile error at the tuple above.
+    const count: PublishedDocuments["length"] = 17;
+    expect(count).toBe(17);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {
