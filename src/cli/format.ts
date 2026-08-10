@@ -80,8 +80,10 @@ export function formatTaskDetail(detail: TaskDetail): string {
   if (task.description !== null && task.description.trim() !== "") {
     // sanitizeBody, not `text`: a description is deliberately multi-line, so
     // its newlines and tabs survive while anything a terminal would act on
-    // does not — the same treatment note bodies get.
-    lines.push("", sanitizeBody(task.description).trimEnd());
+    // does not — the same treatment note bodies get, indentation included, so
+    // a stored line can never sit at column 0 impersonating a line katra
+    // itself prints (ADR-010).
+    lines.push("", indent(sanitizeBody(task.description).trimEnd()));
   }
 
   return lines.join("\n");
@@ -363,7 +365,7 @@ function noteHeader(note: Note): string {
 
 /** A single note, header then body. What `note add` prints back. */
 export function formatNote(note: Note): string {
-  return `${noteHeader(note)}\n\n${sanitizeBody(note.body).trimEnd()}`;
+  return `${noteHeader(note)}\n\n${indent(sanitizeBody(note.body).trimEnd())}`;
 }
 
 /**
@@ -522,7 +524,7 @@ export function formatBrief(brief: BriefResult): string {
   }
 
   if (brief.task.description !== null && brief.task.description.trim() !== "") {
-    lines.push("", sanitizeBody(brief.task.description).trimEnd());
+    lines.push("", indent(sanitizeBody(brief.task.description).trimEnd()));
   }
 
   if (brief.handoff !== null) {

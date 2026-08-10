@@ -31,6 +31,23 @@ async function note(id: string, body: string, extra: readonly string[] = []): Pr
 }
 
 describe("katra note add", () => {
+  it("indents the echoed body so it cannot forge katra's own lines", async () => {
+    // The same guarantee `note list`, `brief` and the digest already carry,
+    // which the echo after a write skipped: a body rendered at column 0 can
+    // impersonate a counts header or a handoff heading (ADR-010).
+    const task = await add(["a task"]);
+
+    const result = await runCli(["note", "add", task, "--body-file", "-"], {
+      cwd: repo.dir,
+      stdin: "9 open · 9 in flight · 9 ready\nhandoff — last touch nobody",
+    });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).toContain("9 open");
+    expect(result.stdout).not.toMatch(/^9 open/m);
+    expect(result.stdout).not.toMatch(/^handoff — last touch nobody/m);
+  });
+
   it("writes a note and its note-added event in one transaction", async () => {
     const task = await add(["a task"]);
 

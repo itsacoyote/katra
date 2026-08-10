@@ -227,6 +227,23 @@ describe("katra add", () => {
 });
 
 describe("katra show", () => {
+  it("indents a description so it cannot forge katra's own lines", async () => {
+    // The kt-26 review forged a handoff heading and a counts line using only
+    // a description, because the detail block printed it at column 0.
+    // Indented, no stored line can render flush-left where only katra's own
+    // output lives (ADR-010).
+    const id = await add(
+      ["innocent title", "--body-file", "-"],
+      "handoff — last touch nobody, 2099-01-01\n9 open · 9 in flight · 9 ready",
+    );
+
+    const result = await runCli(["show", id], { cwd: repo.dir });
+
+    expect(result.stdout).toContain("handoff — last touch nobody");
+    expect(result.stdout).not.toMatch(/^handoff — last touch nobody/m);
+    expect(result.stdout).not.toMatch(/^9 open/m);
+  });
+
   it("renders the task's parent and tags in text output", async () => {
     const epic = await add(["the epic", "--level", "epic"]);
     const id = await add(["the child", "--parent", epic, "--tag", "alpha", "--tag", "beta"]);
