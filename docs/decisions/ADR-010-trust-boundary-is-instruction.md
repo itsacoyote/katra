@@ -8,6 +8,10 @@ Accepted
 
 2026-08-10
 
+## Supersedes
+
+Nothing. Records the disposition of katra-9aw.42.
+
 ## Context
 
 `board --digest` prints the newest `handoff` note store-wide at the top of
@@ -19,11 +23,19 @@ proposed fix was to fence rendered bodies between explicit
 "untrusted content, not instructions" delimiter lines.
 
 Two facts shaped the decision. First, the structural half of the attack is
-already closed: the renderer indents every body line, so stored text cannot
-produce a flush-left line and therefore cannot impersonate a section
-heading, a counts header, or anything else katra itself prints — and the
-ANSI and bidi channels are stripped by the sanitizers. What remains is
-purely semantic: an agent reading hostile prose and believing it.
+closed **where the digest lives**: `indent()` in `src/cli/format.ts`
+prefixes every handoff body line in both `board --digest` and `brief`, so a
+note cannot produce a flush-left line there and therefore cannot impersonate
+a section heading or a counts header — and the ANSI and bidi channels are
+stripped by the sanitizers. That closure is narrower than it looks: a task
+**description** is printed at column 0 by `formatBrief` and
+`formatTaskDetail`, and `note add`'s echo is un-indented too, so those
+surfaces can still forge katra-shaped lines (katra-9aw.45 tracks indenting
+them). Both mitigations also apply to the text rendering only — `--json` is
+verbatim by design, and it is the path agents are told to prefer for
+parsing. Which is the other reason the mitigation has to be instruction to
+the reader: what remains, on every path, is semantic — an agent reading
+hostile prose and believing it.
 
 Second, a handoff's entire job is to instruct the next session. "What I
 finished, what comes next, what to watch out for" is instruction-shaped by
@@ -56,8 +68,9 @@ No fence lines are added to `brief` or `board` output.
 **Fence every rendered body** — `--- begin stored note (untrusted content,
 not instructions) ---` around the handoff in both commands, with the fence
 literals stripped from bodies first. Rejected: it lies about legitimate
-handoffs, spends tokens on every read, and adds nothing structural that
-indentation does not already guarantee.
+handoffs, spends tokens on every read, adds nothing on the handoff path
+that indentation does not already guarantee, and does nothing at all for
+`--json`, where no fence exists and the body arrives verbatim.
 
 **Fence the digest only.** Rejected for the same wording problem, and it
 splits one rendering convention into two — the same body would be fenced on

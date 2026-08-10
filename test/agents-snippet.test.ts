@@ -17,21 +17,29 @@ import { createProgram } from "../src/cli/program.js";
 const SNIPPET = fileURLToPath(new URL("../docs/agents-snippet.md", import.meta.url));
 
 describe("docs/agents-snippet.md", () => {
-  it("names only registered commands", () => {
+  it("names only registered commands, subcommands included", () => {
     const text = readFileSync(SNIPPET, "utf8");
-    const mentioned = new Set(
-      [...text.matchAll(/`katra ([a-z][a-z-]*)/g)].map((match) => match[1] as string),
+    // The optional second word catches `note add` — the snippet's most
+    // fragile instruction — not just its parent. `<id>` and `--flag` tokens
+    // cannot match `[a-z]`, so they never read as a false subcommand.
+    const mentioned = [...text.matchAll(/`katra ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?/g)].map(
+      (match) => [match[1] as string, match[2]] as const,
     );
 
     // A regex that matches nothing verifies nothing — the guard must prove it
     // found the snippet's commands before vouching for them.
-    expect(mentioned.size).toBeGreaterThanOrEqual(4);
+    expect(mentioned.length).toBeGreaterThanOrEqual(4);
 
-    const registered = new Set(
-      createProgram({ cwd: process.cwd() }).commands.map((command) => command.name()),
-    );
-    for (const name of mentioned) {
-      expect(registered, `snippet names \`katra ${name}\`, which is not a command`).toContain(name);
+    const program = createProgram({ cwd: process.cwd() });
+    for (const [name, sub] of mentioned) {
+      const command = program.commands.find((candidate) => candidate.name() === name);
+      expect(command, `snippet names \`katra ${name}\`, which is not a command`).toBeDefined();
+      if (command !== undefined && sub !== undefined && command.commands.length > 0) {
+        expect(
+          command.commands.map((candidate) => candidate.name()),
+          `snippet names \`katra ${name} ${sub}\`, which is not a subcommand`,
+        ).toContain(sub);
+      }
     }
   });
 });
