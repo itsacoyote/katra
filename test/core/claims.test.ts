@@ -5,13 +5,14 @@ import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import type { OpenStore } from "../../src/core/store.js";
 import { openStore } from "../../src/core/store.js";
+import { deleteTask } from "../../src/core/tasks/delete.js";
+import { cancelTask, closeTask, reopenTask } from "../../src/core/tasks/lifecycle.js";
 import { runConcurrent } from "../helpers/concurrent.js";
 import { seedClaim, seedEpic, seedPresence, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
-import { createStoreFixture } from "../helpers/store.js";
+import { createStoreFixture, OTHER_IDENTITY, openAs } from "../helpers/store.js";
 
 const HOLDER_IDENTITY: Identity = { worktree: "/repo/wt-holder", branch: () => "feature/holder" };
-const OTHER_IDENTITY: Identity = { worktree: "/repo/wt-other", branch: () => "feature/other" };
 const HOLDER_ACTOR = `${HOLDER_IDENTITY.branch()} @ ${HOLDER_IDENTITY.worktree}`;
 
 let fixture: StoreFixture;
@@ -19,11 +20,6 @@ beforeEach(() => {
   fixture = createStoreFixture({ identity: HOLDER_IDENTITY });
 });
 afterEach(() => fixture.cleanup());
-
-/** A second, independent connection to the same store, as a different worktree. */
-function openAs(identity: Identity): OpenStore {
-  return openStore(fixture.repo.dir, { identity: () => identity }).store;
-}
 
 describe("claimTask", () => {
   it("claims an unclaimed task and appends claimed in one transaction", () => {
@@ -58,7 +54,7 @@ describe("claimTask", () => {
     const id = seedTask(fixture.store);
     const held = claimTask(fixture.store, id);
 
-    const other = openAs(OTHER_IDENTITY);
+    const other = openAs(fixture.repo.dir, OTHER_IDENTITY);
     try {
       try {
         claimTask(other, id);
@@ -194,7 +190,7 @@ describe("releaseTask", () => {
     const id = seedTask(fixture.store);
     seedClaim(fixture.store, { taskId: id, holder: HOLDER_IDENTITY.worktree, actor: HOLDER_ACTOR });
 
-    const other = openAs(OTHER_IDENTITY);
+    const other = openAs(fixture.repo.dir, OTHER_IDENTITY);
     try {
       try {
         releaseTask(other, id);
@@ -216,7 +212,7 @@ describe("releaseTask", () => {
     const id = seedTask(fixture.store);
     seedClaim(fixture.store, { taskId: id, holder: HOLDER_IDENTITY.worktree, actor: HOLDER_ACTOR });
 
-    const other = openAs(OTHER_IDENTITY);
+    const other = openAs(fixture.repo.dir, OTHER_IDENTITY);
     let result: ReturnType<typeof releaseTask>;
     try {
       result = releaseTask(other, id, { force: true });
@@ -250,8 +246,13 @@ describe("identity resolves before the write lock", () => {
   it("never resolves identity inside an open transaction", () => {
     // Mirrors events-emission.test.ts's "the actor is resolved before the
     // write lock": `store.actor()` and `store.identity()` both fuse through
-    // the same resolver, so spying on `identity` alone catches both call
-    // sites claimTask/releaseTask use.
+    // the same resolver, so spying on `identity` alone catches every call
+    // site that resolves it — claimTask/releaseTask directly, and (T5)
+    // `transition` (close/cancel/reopen all funnel through it) and
+    // `deleteTask`, each of which now resolves `worktree` before opening its
+    // own `writeTx` the same way. This is the exact drift a future change
+    // could reintroduce by having one of those reach for `releaseTask`
+    // instead of `settleClaim` — see the atomicity test in lifecycle.test.ts.
     //
     // `store` is declared before `openStore` runs, not destructured from its
     // result: `openStore` itself calls `identity()` once, from inside
@@ -273,6 +274,20 @@ describe("identity resolves before the write lock", () => {
       const id = seedTask(store);
       claimTask(store, id);
       releaseTask(store, id);
+
+      const closed = seedTask(store);
+      claimTask(store, closed);
+      closeTask(store, closed);
+
+      const cancelled = seedTask(store);
+      claimTask(store, cancelled);
+      cancelTask(store, cancelled, "dropped");
+
+      reopenTask(store, cancelled);
+
+      const deleted = seedTask(store);
+      claimTask(store, deleted);
+      deleteTask(store, deleted);
 
       expect(seen.length).toBeGreaterThan(0);
       expect(seen).toEqual(seen.map(() => false));

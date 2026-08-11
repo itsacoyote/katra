@@ -73,7 +73,7 @@ export function deleteTask(store: OpenStore, idInput: string): DeleteResult {
       });
     }
 
-    settleClaim(store, id, actor, worktree, now);
+    settleClaim(store, task, actor, worktree, now);
 
     const { unblocked } = reportUnblocked(store, id, () => {
       store.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);

@@ -53,19 +53,6 @@ interface Move {
    * it happened to return the task to.
    */
   readonly event: EventType;
-  /**
-   * Whether this move settles a live claim as a side effect.
-   *
-   * `close` and `cancel` carry `true` — both are terminal, and a claim on a
-   * task no one can work on anymore is stale by construction (spec req 5).
-   * `reopen` carries `false`: reviving a task is not a takeover, and a claim
-   * that happened to survive onto a terminal task (unreachable through
-   * `claimTask`'s own guard, but not through direct seeding — see
-   * `claims/repo.ts`) is left exactly as it was. Named on `Move` rather than
-   * inferred from `event`, so the coupling to `releasesClaim` is stated once
-   * here instead of re-derived at each of the three call sites.
-   */
-  readonly releasesClaim: boolean;
 }
 
 /**
@@ -98,16 +85,17 @@ function transition(
   // Before the transaction: resolving identity spawns git subprocesses, and
   // doing that under `BEGIN IMMEDIATE` holds the write lock across them. Both
   // halves are resolved unconditionally — including on `reopen`, which never
-  // uses `worktree` — because `store.identity()` is memoised per store
-  // (`actor.ts`) and `store.actor()` already forces the same resolution, so
-  // this costs no extra spawn; keeping every path uniform beats a conditional
-  // that only some callers exercise.
+  // uses `worktree` — because `openStore` already resolved and memoised the
+  // worktree itself, in `bumpPresence` (`presence.ts`), before this ever
+  // runs: every store pays that spawn once at open time, so reading it again
+  // here costs nothing, whether or not this store's `actor` was supplied
+  // independently of `identity`.
   const actor = store.actor();
   const worktree = store.identity().worktree;
 
   return writeTx(store.db, (now) => {
     const task = loadOrThrow(store, id, idInput);
-    const { lane, markClosed, reason, event, releasesClaim } = plan(task);
+    const { lane, markClosed, reason, event } = plan(task);
 
     const { result, unblocked, reblocked } = reportReadinessChange(store, id, () => {
       store.db
@@ -118,8 +106,13 @@ function transition(
       return loadOrThrow(store, id, idInput);
     });
 
-    if (releasesClaim) {
-      settleClaim(store, id, actor, worktree, now);
+    // Only close and cancel settle a live claim — both are terminal, and a
+    // claim on a task no one can work on anymore is stale by construction
+    // (spec req 5). `markClosed` already draws exactly that line: `reopen` is
+    // the one move that leaves it `false`, since reviving a task is not a
+    // takeover.
+    if (markClosed) {
+      settleClaim(store, task, actor, worktree, now);
     }
 
     // Both lanes travel on the event as well as the verb. `closed` already
@@ -158,13 +151,7 @@ function refuseIfTerminal(task: Task, verb: string): void {
 export function closeTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
   return transition(store, idInput, (task) => {
     refuseIfTerminal(task, "close");
-    return {
-      lane: "Done",
-      markClosed: true,
-      reason: reason ?? null,
-      event: "closed",
-      releasesClaim: true,
-    };
+    return { lane: "Done", markClosed: true, reason: reason ?? null, event: "closed" };
   });
 }
 
@@ -178,13 +165,7 @@ export function closeTask(store: OpenStore, idInput: string, reason?: string): L
 export function cancelTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
   return transition(store, idInput, (task) => {
     refuseIfTerminal(task, "cancel");
-    return {
-      lane: "Cancelled",
-      markClosed: true,
-      reason: reason ?? null,
-      event: "cancelled",
-      releasesClaim: true,
-    };
+    return { lane: "Cancelled", markClosed: true, reason: reason ?? null, event: "cancelled" };
   });
 }
 
@@ -224,13 +205,6 @@ export function reopenTask(store: OpenStore, idInput: string, lane?: Lane): Life
     // No reason: `reopenTask` has no reason parameter and never had one —
     // reopening is not a judgement that needs explaining. Adding one here
     // would be scope this feature does not have.
-    return {
-      lane: target,
-      markClosed: false,
-      reason: null,
-      event: "reopened",
-      // Reviving a task is not a takeover — see `Move.releasesClaim`.
-      releasesClaim: false,
-    };
+    return { lane: target, markClosed: false, reason: null, event: "reopened" };
   });
 }

@@ -261,9 +261,9 @@ export function claimTask(store: OpenStore, idInput: string): ClaimResult {
 }
 
 /**
- * Releases `taskId`'s claim if one exists, and appends `released` — the
- * shared core of `releaseTask` and every lifecycle path that settles a claim
- * as a side effect (`transition`'s close/cancel move, `deleteTask`).
+ * Releases `task`'s claim if one exists, and appends `released` — the shared
+ * core of `releaseTask` and every lifecycle path that settles a claim as a
+ * side effect (`transition`'s close/cancel move, `deleteTask`).
  *
  * **Must run inside the caller's own open `writeTx`, never its own.**
  * `releaseTask` proves why: it resolves `actor`/`worktree` before opening its
@@ -275,6 +275,14 @@ export function claimTask(store: OpenStore, idInput: string): ClaimResult {
  * therefore arrive as parameters, the same shape `appendEvent` already takes
  * `now` in, rather than being resolved here.
  *
+ * **Takes the loaded `task`, not an id.** Every caller already has one —
+ * `releaseTask` and `deleteTask` load it for their own guards, `transition`
+ * for its plan — so this never re-reads it, and `epicIdFor(task)` runs
+ * unconditionally: an orphan claim (a `claims` row whose task no longer
+ * exists) cannot happen while `claims.task_id` carries its own foreign key
+ * with `ON DELETE CASCADE` and every connection runs with `foreign_keys =
+ * ON` (`db/connection.ts`).
+ *
  * **`priorActor`** follows `releaseTask`'s own rule, restated once so no
  * caller re-derives it: `null` when `worktree` is the claim's own holder (a
  * plain release, nothing displaced), the holder's frozen actor string
@@ -283,33 +291,28 @@ export function claimTask(store: OpenStore, idInput: string): ClaimResult {
  * every way that matters to the event stream).
  *
  * Returns the claim as it stood immediately before release, or `null` when
- * `taskId` was never claimed — in which case nothing is written at all: no
+ * the task was never claimed — in which case nothing is written at all: no
  * delete, no event. That `null` arm is what keeps close/cancel/delete
  * byte-identical to today's behaviour on an unclaimed task.
  */
 export function settleClaim(
   store: OpenStore,
-  taskId: string,
+  task: Task,
   actor: string,
   worktree: string,
   now: string,
 ): ClaimInfo | null {
-  const claim = claimFor(store, taskId);
+  const claim = claimFor(store, task.id);
   if (claim === null) return null;
 
-  store.db.prepare("DELETE FROM claims WHERE task_id = ?").run(taskId);
+  store.db.prepare("DELETE FROM claims WHERE task_id = ?").run(task.id);
 
-  // The task, purely to stamp the released event's epicId — read fresh
-  // rather than threaded in, since every caller either has not loaded a
-  // `Task` yet (releaseTask, at the point it now calls this) or, for
-  // `deleteTask`, still can: this always runs before the row is gone.
-  const task = getTask(store, taskId);
   appendEvent(
     store,
     {
       type: "released",
-      entityId: taskId,
-      epicId: task === undefined ? null : epicIdFor(task),
+      entityId: task.id,
+      epicId: epicIdFor(task),
       actor,
       priorActor: worktree === claim.holder ? null : claim.actor,
     },
@@ -389,18 +392,11 @@ export function releaseTask(
       });
     }
 
-    const settled = settleClaim(store, id, actor, worktree, now);
-    if (settled === null) {
-      // Unreachable in practice: `claim` above already proved a claim exists
-      // inside this same transaction, and nothing else could have removed it
-      // in between — matching the impossible-state guard `claimTask` throws
-      // for the mirror case.
-      throw new KatraException({
-        code: "internal",
-        message: "claims row disappeared inside its own transaction — this is a katra bug",
-      });
-    }
+    // `claim` above already proved a claim exists inside this same
+    // transaction, so `settleClaim`'s own return is redundant here — the
+    // already-loaded `claim` is byte-identical to it.
+    settleClaim(store, task, actor, worktree, now);
 
-    return { task, claim: settled };
+    return { task, claim };
   });
 }

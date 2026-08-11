@@ -1,19 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { Identity } from "../../src/core/actor.js";
 import { claimFor, claimTask } from "../../src/core/claims/repo.js";
 import type { EventType } from "../../src/core/enums.js";
 import { TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import { addDependency, isReady } from "../../src/core/graph/deps.js";
-import type { OpenStore } from "../../src/core/store.js";
-import { openStore } from "../../src/core/store.js";
 import { cancelTask, closeTask, reopenTask } from "../../src/core/tasks/lifecycle.js";
 import { getTask } from "../../src/core/tasks/repo.js";
 import { runConcurrent } from "../helpers/concurrent.js";
 import { seedClaim, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
-import { createStoreFixture } from "../helpers/store.js";
+import { createStoreFixture, OTHER_IDENTITY, openAs } from "../helpers/store.js";
 
 /**
  * Lets one test fail the append of a single, named event type — everything
@@ -36,13 +33,6 @@ vi.mock("../../src/core/events/repo.js", async (importOriginal) => {
   };
   return { ...original, appendEvent };
 });
-
-const OTHER_IDENTITY: Identity = { worktree: "/repo/wt-other", branch: () => "feature/other" };
-
-/** A second, independent connection to the same store, as a different worktree. */
-function openAs(repoDir: string, identity: Identity): OpenStore {
-  return openStore(repoDir, { identity: () => identity }).store;
-}
 
 let fixture: StoreFixture;
 beforeEach(() => {
@@ -392,10 +382,16 @@ describe("claim settlement", () => {
   it("lands the lifecycle and released events atomically or not at all", () => {
     // Fails only the second write — the lifecycle event — after `settleClaim`
     // has already issued the claim's delete and its own `released` insert.
-    // If those genuinely share `transition`'s transaction, this throw rolls
-    // both back along with the lane update. If a future change ever split
-    // the release into its own, separately-committed transaction, that
-    // release would survive this throw and this assertion would catch it.
+    // This proves the delete and the released insert share this
+    // transaction's rollback with the lifecycle event. It does NOT catch a
+    // nested `writeTx`: better-sqlite3 turns one into a SAVEPOINT that rolls
+    // back with the outer transaction regardless (`events/repo.ts`'s
+    // `appendEvent`, lines 214-219, documents the same trap). The guard
+    // against `transition` ever reaching for `releaseTask` instead of
+    // `settleClaim` — `releaseTask` opens its own top-level `writeTx`, which
+    // would genuinely commit separately — is the identity-resolves-before-
+    // the-write-lock spy test in `claims.test.ts`, extended to cover
+    // close/cancel/reopen/delete.
     const id = seedTask(fixture.store);
     claimTask(fixture.store, id);
 

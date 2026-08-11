@@ -75,3 +75,17 @@ export function createStoreFixture(options: StoreFixtureOptions = {}): StoreFixt
     },
   };
 }
+
+/**
+ * A worktree distinct from any fixture's default identity — the "someone
+ * else" side of a non-holder/contention test (claims.test.ts, lifecycle.test.ts).
+ */
+export const OTHER_IDENTITY: Identity = {
+  worktree: "/repo/wt-other",
+  branch: () => "feature/other",
+};
+
+/** A second, independent connection to `repoDir`'s store, as a different worktree. */
+export function openAs(repoDir: string, identity: Identity): OpenStore {
+  return openStore(repoDir, { identity: () => identity }).store;
+}
