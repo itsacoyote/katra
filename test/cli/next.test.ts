@@ -109,3 +109,41 @@ describe("katra next", () => {
     expect(json.claimedElsewhere).toBe(1);
   });
 });
+
+describe("katra next and a hostile stored title", () => {
+  // Built by codepoint, per claim.test.ts's convention — an invisible
+  // literal in test source is unreviewable.
+  const ESC = String.fromCharCode(0x1b);
+
+  it("does not let an embedded newline forge an extra waits-on row", async () => {
+    // The scan's scenario: `formatNext` was the one text renderer that never
+    // sanitized a stored title, so an embedded newline in a blocked task's
+    // own title rendered as a second physical line indistinguishable from a
+    // genuine "waits on" row — the exact forgery katra's other renderers
+    // (board.test.ts, brief.test.ts) are already guarded against.
+    const blocker = await add(["the real blocker"]);
+    const hostileTitle =
+      `stuck task${ESC}[31mHACKED\n` +
+      "    waits on kt-fake0000  Planned  a blocker that does not exist";
+    const stuck = await add([hostileTitle, "--lane", "Planned"]);
+    await runCli(["dep", stuck, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).not.toContain(ESC);
+    // The readable remnant survives — sanitizing flattens the field, it does
+    // not blank it.
+    expect(result.stdout).toContain("stuck task");
+    expect(result.stdout).toContain("HACKED");
+
+    // Exactly one real "waits on" row — the genuine blocker's — never a
+    // second one forged out of the hostile title's embedded newline.
+    const waitsOnLines = result.stdout
+      .split("\n")
+      .filter((line) => line.startsWith("    waits on "));
+    expect(waitsOnLines).toHaveLength(1);
+    expect(waitsOnLines[0]).toContain(blocker);
+    expect(waitsOnLines[0]).not.toContain("kt-fake0000");
+  });
+});

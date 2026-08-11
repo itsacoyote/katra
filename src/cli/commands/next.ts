@@ -7,6 +7,7 @@ import { narrowKind, narrowLevel } from "../../core/narrow.js";
 import type { NextFilters, NextResult } from "../../core/tasks/next.js";
 import { NEXT_LANE, nextTask } from "../../core/tasks/next.js";
 import { requireEpicId } from "../../core/tasks/repo.js";
+import { oneLine } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
@@ -14,12 +15,14 @@ import { withStore } from "../with-store.js";
 function formatNext(result: NextResult): string {
   if (result.status === "found") {
     const lines = [
-      `${result.task.id}  P${result.task.priority}  ${result.task.title}`,
+      `${result.task.id}  P${result.task.priority}  ${oneLine(result.task.title)}`,
       `  lane      ${result.task.lane}`,
       `  kind      ${result.task.kind}`,
       "  blockers  none",
     ];
-    if (result.epic !== null) lines.push(`  epic      ${result.epic.id}  ${result.epic.title}`);
+    if (result.epic !== null) {
+      lines.push(`  epic      ${result.epic.id}  ${oneLine(result.epic.title)}`);
+    }
     return lines.join("\n");
   }
 
@@ -44,9 +47,9 @@ function formatNext(result: NextResult): string {
       [
         `no ${scope} task is ready — ${result.blocked.length} blocked:`,
         ...result.blocked.flatMap((task) => [
-          `  ${task.id}  ${task.title}`,
+          `  ${task.id}  ${oneLine(task.title)}`,
           ...task.blockers.map(
-            (blocker) => `    waits on ${blocker.id}  ${blocker.lane}  ${blocker.title}`,
+            (blocker) => `    waits on ${blocker.id}  ${blocker.lane}  ${oneLine(blocker.title)}`,
           ),
         ]),
       ].join("\n"),
