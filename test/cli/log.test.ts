@@ -150,6 +150,7 @@ describe("formatEventLog", () => {
     ref: null,
     reason: null,
     title: null,
+    priorActor: null,
     createdAt: "2026-08-05T16:41:09.123Z",
     entityTitle: null,
     ...overrides,
@@ -381,6 +382,7 @@ describe("column alignment across character widths", () => {
       ref: null,
       reason: null,
       title: "a title",
+      priorActor: null,
       entityTitle: "a title",
       createdAt: stamp,
     });

@@ -77,18 +77,23 @@ export const UNTRIAGED_LANES = ["Defined", "Researching"] as const satisfies rea
 /**
  * What an event records.
  *
- * Seven, where `docs/katra-spec.md` §5 lists nine. `claimed` and `released`
- * belong to F4's claims, `ref-linked` and `ref-status-changed` to F5's external
- * refs — declaring them now would put values into a `CHECK` constraint that
- * nothing can write, under forward-only migrations that make the mistake
- * expensive to take back. `deleted` is the one addition the spec's list does
- * not have, from ADR-008: `delete` appends its own last event.
+ * Nine now that `claimed` and `released` land here — F4's claims (migration
+ * 0003), and the two this comment held back since F2. `ref-linked` and
+ * `ref-status-changed` still wait on F5's external refs: declaring a value
+ * nothing can write would put it in a `CHECK` constraint under forward-only
+ * migrations, which makes the mistake expensive to take back.
+ *
+ * Two of the nine are not in `docs/katra-spec.md` §5's own list at all:
+ * `deleted` (ADR-008 — `delete` appends its own last event) and `cancelled`
+ * (ADR-003 — a terminal lane distinct from `closed`).
  *
  * The order is the rough order a task's life produces them, not alphabetical —
  * it is what a reader of the CHECK constraint sees.
  */
 export const EVENT_TYPES = [
   "created",
+  "claimed",
+  "released",
   "status-changed",
   "note-added",
   "closed",

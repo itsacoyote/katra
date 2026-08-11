@@ -4,8 +4,8 @@
  * `events.test.ts` covers the append primitive; this covers the wiring — which
  * commands emit, which deliberately do not, and what travels on each event.
  * Kept in one file rather than split across the four command tests so
- * "all seven types are emitted by a real path" is a single assertion rather
- * than four partial ones nobody adds up.
+ * "every declared type is emitted by a real path" is a single assertion
+ * rather than four partial ones nobody adds up.
  */
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -294,11 +294,11 @@ describe("delete", () => {
 });
 
 describe("the stream as a whole", () => {
-  it("emits all seven declared event types from a real command path", () => {
-    // Acceptance criterion: every type katra declares must be reachable. A
-    // type in the CHECK constraint that no code path produces is either dead
-    // or a missing feature, and only counting them together tells the two
-    // apart.
+  it("emits every type F1/F2 actually wire up from a real command path", () => {
+    // Acceptance criterion: every type katra declares must eventually be
+    // reachable. A type in the CHECK constraint that no code path produces is
+    // either dead or a missing feature, and only counting them together tells
+    // the two apart.
     const epic = createTask(fixture.store, { title: "an epic", level: "epic" });
     const task = createTask(fixture.store, { title: "a task", parentId: epic.id });
     updateTask(fixture.store, task.id, { lane: "In Progress" });
@@ -308,8 +308,11 @@ describe("the stream as a whole", () => {
     deleteTask(fixture.store, task.id);
 
     const emitted = new Set(types());
-    // note-added is the one type no task path produces — it belongs to notes.
-    expect([...emitted].sort()).toEqual([...EVENT_TYPES].filter((t) => t !== "note-added").sort());
+    // note-added belongs to notes, not a task path. claimed/released are
+    // declared by migration 0003 but not emitted until F4's claim/release
+    // commands land (T4, T9) — this narrows back to EVENT_TYPES once they do.
+    const notYetWired = new Set(["note-added", "claimed", "released"]);
+    expect([...emitted].sort()).toEqual([...EVENT_TYPES].filter((t) => !notYetWired.has(t)).sort());
   });
 
   it("stamps every event with the store's actor", () => {

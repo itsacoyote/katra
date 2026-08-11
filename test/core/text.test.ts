@@ -102,6 +102,7 @@ describe("clamp's boundary, through the log renderer", () => {
       ref: null,
       reason: null,
       title,
+      priorActor: null,
       entityTitle: title,
       createdAt: stamp,
     });

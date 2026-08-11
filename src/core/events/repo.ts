@@ -33,6 +33,7 @@ interface EventRow {
   readonly ref: unknown;
   readonly reason: unknown;
   readonly title: unknown;
+  readonly prior_actor: unknown;
   readonly created_at: unknown;
 }
 
@@ -67,6 +68,7 @@ export function rowToEvent(row: EventRow): StoredEvent {
     ref: narrowNullableText(row.ref, "ref"),
     reason: narrowNullableText(row.reason, "reason"),
     title: narrowNullableText(row.title, "title"),
+    priorActor: narrowNullableText(row.prior_actor, "prior_actor"),
     createdAt: narrowText(row.created_at, "created_at"),
   };
 }
@@ -232,8 +234,8 @@ export function appendEvent(store: OpenStore, event: NewEvent, now: string): num
   const info = store.db
     .prepare(
       `INSERT INTO events
-         (type, entity_id, epic_id, actor, from_lane, to_lane, ref, reason, title, created_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?)`,
+         (type, entity_id, epic_id, actor, from_lane, to_lane, ref, reason, title, prior_actor, created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .run(
       event.type,
@@ -245,6 +247,7 @@ export function appendEvent(store: OpenStore, event: NewEvent, now: string): num
       event.ref ?? null,
       event.reason ?? null,
       event.title ?? null,
+      event.priorActor ?? null,
       now,
     );
 

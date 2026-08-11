@@ -365,7 +365,7 @@ describe("rowToEvent", () => {
     // reaching a renderer that has no case for it.
     const row = {
       id: 1,
-      type: "claimed",
+      type: "ref-linked",
       entity_id: "kt-aaaaaa",
       epic_id: null,
       actor: ACTOR,

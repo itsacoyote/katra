@@ -141,6 +141,9 @@ describe("event types", () => {
         case "cancelled":
         case "reopened":
           return "lifecycle";
+        case "claimed":
+        case "released":
+          return "custody";
         case "deleted":
           return "removal";
         default: {
@@ -152,6 +155,8 @@ describe("event types", () => {
 
     expect(EVENT_TYPES.map(category)).toEqual([
       "additive",
+      "custody",
+      "custody",
       "lifecycle",
       "additive",
       "lifecycle",
@@ -161,14 +166,17 @@ describe("event types", () => {
     ]);
   });
 
-  it("declares the seven types F2 actually emits, and no more", () => {
-    // The spec lists nine. `claimed`/`released` are F4 and `ref-linked`/
-    // `ref-status-changed` are F5, so declaring them here would put values in a
-    // CHECK constraint that nothing can ever write — and a forward-only
-    // migration makes that expensive to take back. `deleted` is the seventh,
-    // added by ADR-008 and absent from the spec's list.
+  it("declares the nine types the schema currently accepts, and no more", () => {
+    // The spec's own list is nine too, but not the same nine: `ref-linked` and
+    // `ref-status-changed` still wait on F5's external refs — declaring a
+    // value nothing can write would put it in a CHECK constraint under
+    // forward-only migrations, expensive to take back. `deleted` (ADR-008)
+    // and `cancelled` (ADR-003) are additions the spec's own list does not
+    // carry.
     expect(EVENT_TYPES).toEqual([
       "created",
+      "claimed",
+      "released",
       "status-changed",
       "note-added",
       "closed",
@@ -176,8 +184,8 @@ describe("event types", () => {
       "reopened",
       "deleted",
     ]);
-    expect(EVENT_TYPES).not.toContain("claimed");
     expect(EVENT_TYPES).not.toContain("ref-linked");
+    expect(EVENT_TYPES).not.toContain("ref-status-changed");
   });
 
   it("returns true from isEventType for every declared type and false otherwise", () => {
@@ -187,7 +195,7 @@ describe("event types", () => {
     }
   });
 
-  it("rejects an event type outside the fixed set, naming all seven", () => {
+  it("rejects an event type outside the fixed set, naming all nine", () => {
     try {
       narrowEventType("updated");
       expect.unreachable("should have thrown");

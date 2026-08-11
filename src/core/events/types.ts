@@ -35,6 +35,15 @@ export interface StoredEvent {
   readonly reason: string | null;
   /** The entity's title at the time, on `created` and `deleted`. */
   readonly title: string | null;
+  /**
+   * The holder a forced release displaces.
+   *
+   * Set only on a `release --force`, where it names the prior holder so the
+   * takeover is legible from the event alone. Null on every other type — a
+   * plain release has no one to displace, and nothing else has a "prior"
+   * anything.
+   */
+  readonly priorActor: string | null;
   readonly createdAt: string;
 }
 
@@ -74,4 +83,6 @@ export interface NewEvent {
   readonly ref?: string | null;
   readonly reason?: string | null;
   readonly title?: string | null;
+  /** See {@link StoredEvent.priorActor}. Omit unless this is a forced release. */
+  readonly priorActor?: string | null;
 }
