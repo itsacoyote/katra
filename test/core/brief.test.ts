@@ -141,11 +141,20 @@ describe("briefEntity on a task", () => {
   it("writes no event and opens no transaction", () => {
     const task = seedTask(fixture.store);
     createNote(fixture.store, { taskId: task, body: "h", kind: "handoff" });
+    // The fixture's own `createStoreFixture` call already bumped presence once
+    // — every `openStore` does (ADR-011) — so a bare zero-row assertion below
+    // would fail on line one and prove nothing about `briefEntity` itself
+    // (plan-review iter-2 advisory 5). Delete that row so the table starts
+    // empty, then call the core function directly: `briefEntity` is
+    // heartbeat-free — the bump lives in `openStore`, not here — so the table
+    // must stay empty through the call.
+    fixture.store.db.prepare("DELETE FROM presence").run();
     const before = events();
 
     briefEntity(fixture.store, task);
 
     expect(events()).toBe(before);
+    expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM presence").get()).toEqual({ c: 0 });
     expect(fixture.store.db.inTransaction).toBe(false);
   });
 });

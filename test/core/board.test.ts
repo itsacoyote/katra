@@ -45,10 +45,10 @@ describe("the counts partition open", () => {
     // takes two lanes, `ready` takes startable Planned work, `blocked` takes
     // what cannot start — and startable Defined/Researching tasks fall through
     // all three. Without the fifth count, 2 + 6 + 3 never equalled 14.
-    seedTask(fixture.store, { lane: "In Progress" });
+    const inProgress = seedTask(fixture.store, { lane: "In Progress" });
     seedTask(fixture.store, { lane: "In Review" });
-    seedTask(fixture.store, { lane: "Planned" });
-    seedTask(fixture.store, { lane: "Defined" });
+    const planned = seedTask(fixture.store, { lane: "Planned" });
+    const defined = seedTask(fixture.store, { lane: "Defined" });
     seedTask(fixture.store, { lane: "Researching" });
     const blocker = seedTask(fixture.store, { lane: "Planned" });
     const stuck = seedTask(fixture.store, { lane: "Planned" });
@@ -56,6 +56,14 @@ describe("the counts partition open", () => {
     // Terminal work is not open at all.
     seedTask(fixture.store, { lane: "Done" });
     seedTask(fixture.store, { lane: "Cancelled" });
+
+    // F4 (spec AC10): a claim moves no task between buckets. One claimed row
+    // in flight, ready, blocked and untriaged each, so a claim that quietly
+    // shifted a task's bucket would break this same equality.
+    seedClaim(fixture.store, { taskId: inProgress, holder: OTHER_WORKTREE });
+    seedClaim(fixture.store, { taskId: planned, holder: OTHER_WORKTREE });
+    seedClaim(fixture.store, { taskId: stuck, holder: OTHER_WORKTREE });
+    seedClaim(fixture.store, { taskId: defined, holder: OTHER_WORKTREE });
 
     const { counts } = readBoard(fixture.store);
 
@@ -404,11 +412,20 @@ describe("the pointer", () => {
 describe("board writes nothing", () => {
   it("leaves the event count unchanged and opens no write transaction", () => {
     seedTask(fixture.store, { lane: "Planned" });
+    // The fixture's own `createStoreFixture` call already bumped presence once
+    // — every `openStore` does (ADR-011) — so a bare zero-row assertion below
+    // would fail on line one and prove nothing about `readBoard` itself
+    // (plan-review iter-2 advisory 5). Delete that row so the table starts
+    // empty, then call the core function directly: `readBoard` is
+    // heartbeat-free — the bump lives in `openStore`, not here — so the table
+    // must stay empty through the call.
+    fixture.store.db.prepare("DELETE FROM presence").run();
     const before = fixture.store.db.prepare("SELECT COUNT(*) c FROM events").get();
 
     readBoard(fixture.store);
 
     expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM events").get()).toEqual(before);
+    expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM presence").get()).toEqual({ c: 0 });
     expect(fixture.store.db.inTransaction).toBe(false);
   });
 });
