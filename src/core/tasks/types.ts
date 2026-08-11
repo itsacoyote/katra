@@ -10,6 +10,7 @@
  * `repo.ts` is the single place that boundary is crossed.
  */
 
+import type { ClaimInfo } from "../claims/types.js";
 import type { Kind, Lane, Level, Priority } from "../enums.js";
 import type { LoggedEvent } from "../events/types.js";
 import type { Note } from "../notes/types.js";
@@ -107,6 +108,22 @@ export interface TaskView extends TaskDetail {
    */
   readonly notesTruncated: boolean;
   readonly activityTruncated: boolean;
+  /**
+   * Who holds this task, or `null` when it is unclaimed.
+   *
+   * On {@link TaskView}, not {@link TaskDetail} (F4 T8): `showTaskWithin` is
+   * what `update` returns from inside its write transaction, and a claim
+   * lookup is exactly the extra query that function's own docs say `update`
+   * must not pay for content it never prints — the same reasoning that keeps
+   * `notes`/`activity` off `TaskDetail`. `viewTask` (`show`) fills this one;
+   * `TaskDetail`'s callers stay untouched.
+   *
+   * Required-nullable rather than optional: an epic can never hold a claim, so
+   * this is genuinely always `null` there, the same way `assignee` is `null`
+   * on an unassigned task — ordinary absent data, not the union-arm ambiguity
+   * {@link BriefResult}'s `claim` avoids by omission (see there).
+   */
+  readonly claim: ClaimInfo | null;
 }
 
 /**

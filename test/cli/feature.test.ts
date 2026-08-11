@@ -371,7 +371,12 @@ describe("katra next", () => {
     // must stay readable at exit 0.
     const empty = await runCli(["next", "--json"], { cwd: repo.dir });
     expect(empty.exitCode).toBe(EXIT.ok);
-    expect(empty.json()).toEqual({ status: "none", blocked: [], untriaged: 0 });
+    expect(empty.json()).toEqual({
+      status: "none",
+      blocked: [],
+      untriaged: 0,
+      claimedElsewhere: 0,
+    });
 
     const blocker = await add(["a blocker"]);
     const blocked = await add(["stuck", "--lane", "Planned"]);

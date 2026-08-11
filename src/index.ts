@@ -37,6 +37,7 @@ export type {
   BriefLane,
   BriefNote,
   BriefResult,
+  ClaimInfo,
   DeleteResult,
   DependencyResult,
   EventLog,

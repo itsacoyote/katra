@@ -20,6 +20,7 @@
  * place.
  */
 
+import { claimFor } from "../claims/repo.js";
 import type { BriefLane, BriefNote, BriefResult } from "../contract.js";
 import { LANES } from "../enums.js";
 import { listEvents } from "../events/repo.js";
@@ -219,5 +220,7 @@ export function briefEntity(
   if (isEpic) {
     return { ...common, level: "epic", children: childrenByLane(store, id, caps) };
   }
-  return { ...common, level: "task" };
+  // Read only on the task arm — an epic can never hold a claim (AC6), and
+  // `BriefResult`'s epic arm carries no `claim` field to fill.
+  return { ...common, level: "task", claim: claimFor(store, id) };
 }

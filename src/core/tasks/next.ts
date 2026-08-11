@@ -193,6 +193,9 @@ export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResul
       blockers: listBlockers(store, row.id),
     })),
     untriaged: countUntriaged(store, filters),
+    // Honest zero: the candidate query above is not yet claim-aware, so there
+    // is nothing true to report here. T6 makes it so and fills this in.
+    claimedElsewhere: 0,
   };
 }
 

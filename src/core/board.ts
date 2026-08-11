@@ -147,6 +147,13 @@ function toBoardTask(row: BoardRow, blockers: readonly BoardTask["blockers"][num
     priority: row.priority as BoardTask["priority"],
     blocked: row.is_ready === 0,
     blockers,
+    // Honest nulls, not yet real answers: the section queries above do not
+    // join `claims`, so this pure formatter has nothing truthful to report.
+    // T7 joins claims into `BoardRow` and wires both fields from it —
+    // `claimedElsewhere` from the same own-vs-other comparison it already
+    // needs for the ready section's ORDER BY.
+    claim: null,
+    claimedElsewhere: false,
   };
 }
 

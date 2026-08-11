@@ -21,6 +21,7 @@
  * they stop here.
  */
 
+import { claimFor } from "../claims/repo.js";
 import { listEvents } from "../events/repo.js";
 import { listNotes } from "../notes/repo.js";
 import type { OpenStore } from "../store.js";
@@ -66,5 +67,9 @@ export function viewTask(store: OpenStore, idInput: string): TaskView {
     notesTruncated: notes.length > SHOW_NOTE_LIMIT,
     activity: activity.events,
     activityTruncated: activity.truncated,
+    // `null` for an epic — `claimFor` finds no row, since `claimTask` refuses
+    // to create one — the same ordinary absent-data reading `TaskView.claim`
+    // documents, not a special case handled here.
+    claim: claimFor(store, id),
   };
 }

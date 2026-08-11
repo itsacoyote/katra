@@ -7,7 +7,7 @@ import {
   BRIEF_HANDOFF_CHARS,
   briefEntity,
 } from "../../src/core/tasks/brief.js";
-import { seedEpic, seedEvent, seedTask } from "../helpers/seed.js";
+import { seedClaim, seedEpic, seedEvent, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -297,6 +297,37 @@ describe("the two shapes are different, not nested", () => {
     expect(brief.children[0]?.total).toBe(2);
     expect(brief.children[0]?.truncated).toBe(false);
   });
+
+  it("carries the claim on the task arm and declares none on the epic arm", () => {
+    // F4 T8: `claim` rides on the task arm only — an epic cannot be claimed
+    // (AC6), so the epic arm has no `claim` field to be null in, the same
+    // absent-vs-unfilled distinction the `children`/`blockers` split already
+    // makes above.
+    const epic = seedEpic(fixture.store);
+    const task = seedTask(fixture.store, { parentId: epic });
+    seedClaim(fixture.store, {
+      taskId: task,
+      holder: "/repo/wt-holder",
+      actor: "feature/holder @ /repo/wt-holder",
+    });
+
+    const taskBrief = briefEntity(fixture.store, task);
+    const epicBrief = briefEntity(fixture.store, epic) as unknown as Record<string, unknown>;
+
+    if (taskBrief.level !== "task") throw new Error("unreachable");
+    expect(taskBrief.claim?.holder).toBe("/repo/wt-holder");
+    expect(taskBrief.claim?.actor).toBe("feature/holder @ /repo/wt-holder");
+    expect(Object.hasOwn(epicBrief, "claim")).toBe(false);
+  });
+
+  it("declares the task arm's claim null when the task is unclaimed", () => {
+    const task = seedTask(fixture.store);
+
+    const brief = briefEntity(fixture.store, task);
+
+    if (brief.level !== "task") throw new Error("unreachable");
+    expect(brief.claim).toBeNull();
+  });
 });
 
 describe("the notes line counts each handoff once", () => {
@@ -381,5 +412,23 @@ describe("activity and untrusted event fields", () => {
 
     expect(out).toContain("flush");
     expect(out).not.toMatch(/^flush/m);
+  });
+});
+
+describe("viewTask's claim (F4)", () => {
+  // Grep-confirmed home of viewTask coverage (iteration-3 addenda) — this is
+  // where `show`'s read is exercised, not a new file for one field.
+  it("fills the claim on a claimed task's view and null otherwise", async () => {
+    const { viewTask } = await import("../../src/core/tasks/view.js");
+    const claimed = seedTask(fixture.store, { title: "claimed" });
+    const unclaimed = seedTask(fixture.store, { title: "unclaimed" });
+    seedClaim(fixture.store, {
+      taskId: claimed,
+      holder: "/repo/wt-holder",
+      actor: "feature/holder @ /repo/wt-holder",
+    });
+
+    expect(viewTask(fixture.store, claimed).claim?.holder).toBe("/repo/wt-holder");
+    expect(viewTask(fixture.store, unclaimed).claim).toBeNull();
   });
 });

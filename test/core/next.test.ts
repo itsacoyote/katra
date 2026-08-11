@@ -119,7 +119,7 @@ describe("nextTask", () => {
     // The whole reason the empty case is a union rather than null: an agent
     // that reads "nothing" as "no work left" stops working.
     const empty = nextTask(fixture.store);
-    expect(empty).toEqual({ status: "none", blocked: [], untriaged: 0 });
+    expect(empty).toEqual({ status: "none", blocked: [], untriaged: 0, claimedElsewhere: 0 });
 
     const blocker = seedTask(fixture.store, { title: "the blocker", lane: "In Progress" });
     const blocked = planned("stuck");
@@ -194,7 +194,7 @@ describe("nextTask", () => {
     planned("a feature", { kind: "feat" });
 
     const result = nextTask(fixture.store, { kind: "docs" });
-    expect(result).toEqual({ status: "none", blocked: [], untriaged: 0 });
+    expect(result).toEqual({ status: "none", blocked: [], untriaged: 0, claimedElsewhere: 0 });
   });
 
   it("becomes available once the blocker is cancelled", () => {
