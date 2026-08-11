@@ -83,6 +83,17 @@ describe("katra release", () => {
     expect(result.exitCode).toBe(EXIT.user);
   });
 
+  it("exits 1 releasing an unclaimed task even with --force", async () => {
+    // `--force` overrides the non-holder guard, not the "does a claim exist
+    // at all" one — releaseTask checks for a claim before it ever looks at
+    // `force`, so there is nothing for the flag to take over.
+    const task = await add("never claimed");
+
+    const result = await runCli(["release", task, "--force"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+  });
+
   it("emits parseable JSON with nothing on stderr", async () => {
     const task = await add("do the thing");
     await runCli(["claim", task], { cwd: repo.dir });

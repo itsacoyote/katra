@@ -168,6 +168,31 @@ describe("claimTask", () => {
       expect(error.message).toContain("never seen");
     }
   });
+
+  it("falls back to 'an unknown time' when both last_seen and claimed_at are unusable", () => {
+    // `describeLiveness`'s deepest fallback: no presence row at all (so
+    // `lastSeen` is null) *and* a `claimed_at` that cannot parse either —
+    // `timeAgoOrNull(claim.claimedAt, now) ?? "an unknown time"` is the one
+    // line standing between this and a `validation` exception escaping mid
+    // conflict-message, same as the `last_seen` case above.
+    const id = seedTask(fixture.store);
+    const ghostActor = "feature/ghost @ /repo/wt-ghost";
+    seedClaim(fixture.store, {
+      taskId: id,
+      holder: "/repo/wt-ghost",
+      actor: ghostActor,
+      claimedAt: "not-a-timestamp",
+    });
+
+    try {
+      claimTask(fixture.store, id);
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("conflict");
+      expect(error.message).toContain("never seen (claimed an unknown time ago)");
+    }
+  });
 });
 
 describe("releaseTask", () => {
