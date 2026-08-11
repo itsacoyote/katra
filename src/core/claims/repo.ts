@@ -24,7 +24,16 @@
  * worktree any other way for the same reason events do: a path survives a
  * branch rename, which is exactly the property claims need most. The remedy
  * is the one the spec already gives every stale claim — `release --force`,
- * informed by the last-seen age every conflict here reports.
+ * informed by the liveness every conflict here reports.
+ *
+ * **A related, smaller hazard**: where there is no work tree for git to
+ * report — a bare repository, or a command run from inside `.git` itself —
+ * `resolveWorktree` (`actor.ts`) falls back to `cwd` verbatim rather than a
+ * resolved root. A holder that claims from one subdirectory of such a
+ * repository and later releases from another is, as far as `holder` is
+ * concerned, a different worktree — its own claim refuses it, and it must
+ * `--force` to take over from itself. Also documented rather than hardened:
+ * `resolveWorktree` already accepts this trade-off, and claims only inherits it.
  */
 
 import { timeAgo } from "../clock.js";
@@ -85,6 +94,56 @@ export function claimFor(store: OpenStore, taskId: string): ClaimInfo | null {
 }
 
 /**
+ * `iso`'s age relative to `now`, or `null` when `iso` cannot be parsed.
+ *
+ * `timeAgo` itself stays strict — refusing an unparseable timestamp is the
+ * right behaviour for every other caller, which hands it a value katra just
+ * wrote. `lastSeen` is different: it is read back out of `presence`, a row
+ * this module does not control and does not fully trust — the same posture
+ * `tasks/repo.ts` takes toward every column, since the store is written by
+ * concurrent processes and, for the migration story, older builds. Letting
+ * `timeAgo`'s exception escape a conflict message would turn a malformed
+ * `last_seen` into a `validation`/exit 1 refusal in the middle of building a
+ * `conflict`/exit 3 one — inverting the exact signal ADR-005 exists to keep
+ * distinct: "your request was malformed" instead of "this claim is genuinely
+ * contended, try something else."
+ */
+function ageOrUnknown(iso: string, now: string): string | null {
+  try {
+    return timeAgo(iso, now);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The liveness half of a conflict message: `last seen <age>` when a usable
+ * observation exists, `never seen (claimed <age> ago)` when it does not.
+ *
+ * **`lastSeen === null` is a real, reachable state, not a theoretical one.**
+ * `bumpPresence` is deliberately non-fatal (`presence.ts`), so a holder whose
+ * very first heartbeat failed — or a session that crashed before finishing
+ * its first `openStore` — has a claim with no presence row behind it.
+ * Rendering "last seen `<claimed-at age>` ago" for that holder would
+ * fabricate an observation katra never made: claiming is not a heartbeat, and
+ * conflating the two is exactly wrong at the one moment it matters most — a
+ * crashed session is precisely the case `release --force` exists to answer,
+ * and it deserves an honest "never seen", not a borrowed timestamp dressed up
+ * as one.
+ *
+ * A presence row that exists but fails to parse ({@link ageOrUnknown})
+ * folds into the same `never seen` arm: an unreadable observation is not a
+ * usable one either.
+ */
+function describeLiveness(claim: ClaimInfo, now: string): string {
+  const lastSeenAge = claim.lastSeen === null ? null : ageOrUnknown(claim.lastSeen, now);
+  if (lastSeenAge !== null) return `last seen ${lastSeenAge}`;
+
+  const claimedAge = ageOrUnknown(claim.claimedAt, now) ?? "an unknown time";
+  return `never seen (claimed ${claimedAge} ago)`;
+}
+
+/**
  * Rejects a task that cannot be claimed: an epic, or a task already in a
  * terminal lane.
  *
@@ -137,9 +196,10 @@ export interface ClaimResult {
  * §11's TOCTOU rule — see the module docs).
  *
  * **Held by another worktree**: refused with `conflict`/exit 3. The message
- * names the holder's actor, its last-seen age (joined live off `presence` via
- * `claimFor`), and the unblock — `release --force to take it over` — because
- * a refusal that only says no forces the reader to guess (spec's
+ * names the holder's actor, its liveness (`describeLiveness` — "last seen
+ * `<age>`" when `presence` backs it, "never seen" when it does not, see
+ * there), and the unblock — `release --force to take it over` — because a
+ * refusal that only says no forces the reader to guess (spec's
  * rich-blocked-feedback principle). That unblock is carried in the message
  * itself, not a `formatErrorHint` case in `cli/output.ts`: `conflict` is
  * thrown by several unrelated sites across the core, and a code-keyed hint
@@ -166,16 +226,10 @@ export function claimTask(store: OpenStore, idInput: string): ClaimResult {
     const existing = claimFor(store, id);
     if (existing !== null) {
       if (existing.holder !== worktree) {
-        // `lastSeen` falls back to `claimedAt` when the holder has no
-        // presence row (see claimFor): every real claim pays for a heartbeat
-        // the moment it is made, since claiming opens a store, but the
-        // message must still be honest in the pathological case where that
-        // heartbeat never landed.
-        const age = timeAgo(existing.lastSeen ?? existing.claimedAt, now);
         throw new KatraException({
           code: "conflict",
           message:
-            `${id} is held by ${existing.actor}, last seen ${age} — ` +
+            `${id} is held by ${existing.actor}, ${describeLiveness(existing, now)} — ` +
             "release --force to take it over",
           reason: `held by ${existing.actor}`,
         });
@@ -192,10 +246,14 @@ export function claimTask(store: OpenStore, idInput: string): ClaimResult {
 
     const claim = claimFor(store, id);
     if (claim === null) {
+      // Unreachable in practice: the insert above and this read share the
+      // same IMMEDIATE transaction, so nothing else could have removed the
+      // row in between. `internal`, not `not_found` — the request was fine,
+      // the machine broke — matching the impossible-state guards
+      // `appendEvent`/`assertNotReadOnly` already throw this way.
       throw new KatraException({
-        code: "not_found",
-        message: `claim on ${id} vanished immediately after being inserted`,
-        id,
+        code: "internal",
+        message: "claims row disappeared inside its own transaction — this is a katra bug",
       });
     }
     return { task, claim };
@@ -225,9 +283,10 @@ export interface ReleaseOptions {
  * `priorActor` — a plain self-release has no one to displace.
  *
  * **Held by another worktree, no `force`**: refused with `conflict`/exit 3,
- * naming the holder — the same message shape `claimTask` throws, and for the
- * same reason (see there): the unblock rides in the message, not a
- * `formatErrorHint` case.
+ * naming the holder and its liveness (`describeLiveness`, the same helper
+ * and the same "never seen" honesty `claimTask`'s conflict uses) — the same
+ * message shape `claimTask` throws, and for the same reason (see there): the
+ * unblock rides in the message, not a `formatErrorHint` case.
  *
  * **Held by another worktree, `force: true`**: released anyway, and the
  * `released` event's `priorActor` (migration 0003) names the displaced
@@ -264,7 +323,9 @@ export function releaseTask(
     if (!isHolder && !force) {
       throw new KatraException({
         code: "conflict",
-        message: `${id} is held by ${claim.actor} — release --force to take it over`,
+        message:
+          `${id} is held by ${claim.actor}, ${describeLiveness(claim, now)} — ` +
+          "release --force to take it over",
         reason: `held by ${claim.actor}`,
       });
     }

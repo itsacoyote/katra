@@ -19,9 +19,14 @@
  *
  * `branch` and `lastSeen` are read live off `presence`, joined on `holder`,
  * so they track the holder's current heartbeat rather than its claim-time
- * state. Both are `null` when the holder has no presence row — a holder that
- * has never had a command bump its heartbeat, which every real claim
- * shouldn't reach but a malformed or seeded row can.
+ * state. Both are `null` when the holder has no presence row — and that is
+ * reachable by a real, non-seeded claim, not just a malformed one:
+ * `bumpPresence` is deliberately non-fatal, so a session whose very first
+ * heartbeat failed, or one that crashed before finishing its first
+ * `openStore`, leaves exactly this shape. `claims/repo.ts` renders that
+ * state as "never seen" in a conflict rather than inventing a last-seen age
+ * from `claimedAt` — the crashed-session case is precisely where a
+ * fabricated liveness observation would be most misleading.
  */
 export interface ClaimInfo {
   readonly holder: string;

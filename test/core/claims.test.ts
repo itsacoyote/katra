@@ -6,7 +6,7 @@ import { listEvents } from "../../src/core/events/repo.js";
 import type { OpenStore } from "../../src/core/store.js";
 import { openStore } from "../../src/core/store.js";
 import { runConcurrent } from "../helpers/concurrent.js";
-import { seedClaim, seedEpic, seedTask } from "../helpers/seed.js";
+import { seedClaim, seedEpic, seedPresence, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -89,6 +89,7 @@ describe("claimTask", () => {
   it("refuses claiming an epic and a Done task with a reason", () => {
     const epic = seedEpic(fixture.store, { title: "an epic" });
     const done = seedTask(fixture.store, { title: "already finished", lane: "Done" });
+    const cancelled = seedTask(fixture.store, { title: "abandoned", lane: "Cancelled" });
 
     try {
       claimTask(fixture.store, epic);
@@ -108,8 +109,68 @@ describe("claimTask", () => {
       expect(error.message).toContain("is already Done");
     }
 
+    // AC6 names both terminal lanes; Done and Cancelled share one code path
+    // (`isTerminal`), but the refusal message must still name this lane.
+    try {
+      claimTask(fixture.store, cancelled);
+      expect.unreachable("claiming a Cancelled task should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("validation");
+      expect(error.message).toContain("is already Cancelled");
+    }
+
     expect(claimFor(fixture.store, epic)).toBeNull();
     expect(claimFor(fixture.store, done)).toBeNull();
+    expect(claimFor(fixture.store, cancelled)).toBeNull();
+  });
+
+  it("names a holder that has never heartbeat as never seen", () => {
+    // `bumpPresence` is non-fatal, so a claim with no presence row behind it
+    // is reachable in real use, not just a seeded fixture — see
+    // claims/repo.ts's `describeLiveness`. Seeded directly, since claiming
+    // through `claimTask` would itself have a presence row by construction
+    // (claiming opens a store, and `createStoreFixture` already bumped one
+    // for `HOLDER_IDENTITY`).
+    const id = seedTask(fixture.store);
+    const ghostActor = "feature/ghost @ /repo/wt-ghost";
+    seedClaim(fixture.store, { taskId: id, holder: "/repo/wt-ghost", actor: ghostActor });
+
+    try {
+      claimTask(fixture.store, id);
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("conflict");
+      expect(error.message).toContain(`held by ${ghostActor}`);
+      expect(error.message).toContain("never seen");
+      expect(error.message).not.toContain("last seen");
+    }
+  });
+
+  it("treats an unparseable last_seen as never seen rather than failing the refusal itself", () => {
+    // A malformed presence.last_seen — an older build, a corrupt row —
+    // reaching `timeAgo` directly would throw `validation`/exit 1 in the
+    // middle of building a `conflict`/exit 3 refusal, inverting the retry
+    // signal a contended claim promises (ADR-005). `describeLiveness` must
+    // fold that failure into the same honest "never seen" arm instead.
+    const id = seedTask(fixture.store);
+    const ghostActor = "feature/ghost @ /repo/wt-ghost";
+    seedClaim(fixture.store, { taskId: id, holder: "/repo/wt-ghost", actor: ghostActor });
+    seedPresence(fixture.store, {
+      worktree: "/repo/wt-ghost",
+      branch: "feature/ghost",
+      lastSeen: "not-a-timestamp",
+    });
+
+    try {
+      claimTask(fixture.store, id);
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("conflict");
+      expect(error.message).toContain("never seen");
+    }
   });
 });
 
