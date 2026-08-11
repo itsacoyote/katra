@@ -7,7 +7,8 @@
  */
 
 import { Command, CommanderError, type Option } from "commander";
-import { createActorResolver } from "../core/actor.js";
+import type { Identity } from "../core/actor.js";
+import { actorFromIdentity, createIdentityResolver } from "../core/actor.js";
 import type { HelpDocument, VersionDocument } from "../core/contract.js";
 import { KatraException } from "../core/errors.js";
 import { VERSION } from "../version.js";
@@ -45,9 +46,22 @@ export interface CliContext {
    * A function, not a value, because resolving it costs two subprocess spawns
    * and only write commands need it — `list` and `show` must not pay for an
    * actor they never stamp. Memoised per context, so a command writing several
-   * events resolves once.
+   * events resolves once. Composed from {@link identity}'s own resolution
+   * rather than resolving independently, so a command that reads both never
+   * spawns git twice for the same worktree-and-branch pair.
    */
   readonly actor: () => string;
+  /**
+   * The worktree (eager) and branch (lazy) this invocation is running as
+   * (F4 T2). Presence's heartbeat keys on `identity().worktree`; `actor`
+   * above is fused from this same resolution.
+   *
+   * Memoised per context, exactly like `actor`: built once per invocation by
+   * {@link createIdentityResolver}, threaded into every `openStore` call site
+   * so the whole command shares one resolution instead of each call site
+   * building its own.
+   */
+  readonly identity: () => Identity;
   /**
    * Requests a non-zero exit without raising an error.
    *
@@ -160,15 +174,20 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   const cwd = options.cwd ?? process.cwd();
   const env = options.env ?? process.env;
 
+  // Built here rather than at module scope: this function runs once per
+  // invocation, and once per test inside a single worker process. A shared
+  // cache would leak one test's identity into the next one's assertions.
+  // `actor` composes from this exact instance rather than resolving on its
+  // own, so a command asking for both never spawns git twice for the pair.
+  const identity = createIdentityResolver({ cwd, env });
+
   const context: CliContext = {
     cwd,
     streams: options.streams ?? processStreams,
     env,
     readStdin: options.readStdin ?? readPipedStdin,
-    // Built here rather than at module scope: this function runs once per
-    // invocation, and once per test inside a single worker process. A shared
-    // cache would leak one test's branch into the next one's assertions.
-    actor: createActorResolver({ cwd, env }),
+    identity,
+    actor: () => actorFromIdentity(identity()),
     setExitCode: options.onExitCode ?? (() => undefined),
   };
 

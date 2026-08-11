@@ -123,10 +123,15 @@ export interface Identity {
  * `identity().branch()` — the claim/release CAS, chiefly, which needs it only
  * to write.
  *
- * Memoised per instance, one per `OpenStore`, never at module scope — the
- * same trap {@link createActorResolver} exists to avoid: `runCli` builds a
- * fresh context per test inside one worker process, so a module-level cache
- * would leak one test's identity into the next one's assertions.
+ * Memoised per instance — one per `CliContext`, one per `OpenStore` that
+ * builds its own — never at module scope: `runCli` builds a fresh context per
+ * test inside one worker process, so a module-level cache would leak one
+ * test's identity into the next one's assertions.
+ *
+ * Neither half caches a failure: `worktree ??=` and `branch ??=` only commit
+ * the assignment once the git call actually returns, so a throw leaves the
+ * slot empty and the next call retries rather than handing back a cached
+ * `undefined`.
  */
 export function createIdentityResolver(options: ActorOptions): () => Identity {
   const env = options.env ?? process.env;
@@ -175,23 +180,4 @@ export function actorFromIdentity(identity: Identity): string {
  */
 export function resolveActor(options: ActorOptions): string {
   return actorFromIdentity(createIdentityResolver(options)());
-}
-
-/**
- * A resolver that runs at most once and only when asked.
- *
- * Lazy because a read-only command must not pay two subprocess spawns to
- * record an actor it never writes. One per `CliContext`; see the module note
- * above for why never at module scope.
- *
- * A failure is deliberately **not** cached: caching it as `undefined` and
- * returning that would put the literal string "undefined" into the actor column
- * of every subsequent write.
- */
-export function createActorResolver(options: ActorOptions): () => string {
-  let resolved: string | undefined;
-  return () => {
-    resolved ??= resolveActor(options);
-    return resolved;
-  };
 }

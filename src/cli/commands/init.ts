@@ -30,6 +30,7 @@ export function registerInit(program: Command, context: CliContext): void {
         createIfMissing: true,
         env: context.env,
         actor: context.actor,
+        identity: context.identity,
       });
 
       try {

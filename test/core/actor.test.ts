@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createActorResolver, createIdentityResolver, resolveActor } from "../../src/core/actor.js";
+import { createIdentityResolver, resolveActor } from "../../src/core/actor.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { findGit } from "../../src/core/git.js";
 import { openStore } from "../../src/core/store.js";
@@ -167,77 +167,19 @@ describe("resolveActor", () => {
   });
 });
 
-describe("createActorResolver", () => {
-  it.runIf(onPosix)("does not shell out until it is called", () => {
-    // Resolved eagerly, every read-only command would pay for two subprocess
-    // spawns to record an actor it never writes.
-    const r = repo();
-    const counting = countingGit();
-
-    const actor = createActorResolver({ cwd: r.dir, env: counting.env });
-    expect(counting.calls()).toEqual([]);
-
-    actor();
-    expect(counting.calls().length).toBeGreaterThan(0);
-  });
-
-  it.runIf(onPosix)("resolves at most once however many times it is called", () => {
-    const r = repo();
-    const counting = countingGit();
-    const actor = createActorResolver({ cwd: r.dir, env: counting.env });
-
-    const results = [actor(), actor(), actor(), actor()];
-
-    expect(new Set(results).size).toBe(1);
-    expect(results[0]).toBe(`main @ ${r.dir}`);
-    // One resolution, not four. The count itself is the assertion: the
-    // returned value is identical either way.
-    expect(counting.calls()).toHaveLength(2);
-  });
-
-  it.runIf(onPosix)("costs one rev-parse and one symbolic-ref on a normal branch", () => {
-    // ADR-007's stated cost. A third call would mean the detached-HEAD
-    // fallback is running when it should not.
-    const r = repo();
-    const counting = countingGit();
-
-    createActorResolver({ cwd: r.dir, env: counting.env })();
-
-    const calls = counting.calls();
-    expect(calls.filter((c) => c.includes("symbolic-ref"))).toHaveLength(1);
-    expect(calls.filter((c) => c.includes("rev-parse"))).toHaveLength(1);
-  });
-
-  it("gives two resolvers independent caches", () => {
-    // The trap this exists to avoid: memoising at module scope. `runCli`
-    // builds a fresh context per test inside one worker process, so a
-    // module-level cache would leak one test's branch into the next one's
-    // assertions — and the failure would look like a flaky test rather than a
-    // cache bug.
-    const r = repo();
-    const other = r.addWorktree("feature/separate");
-
-    const first = createActorResolver({ cwd: r.dir });
-    const second = createActorResolver({ cwd: other });
-
-    expect(second()).toBe(`feature/separate @ ${other}`);
-    expect(first()).toBe(`main @ ${r.dir}`);
-    expect(first()).not.toBe(second());
-  });
-
-  it("reports the failure on every call, not only the first", () => {
-    // Caching a thrown error as `undefined` and then returning it would put a
-    // literal "undefined" into the actor column of every subsequent write.
-    const plain = createNonRepoDir();
-    cleanups.push(() => plain.cleanup());
-    const actor = createActorResolver({ cwd: plain.dir });
-
-    expect(() => actor()).toThrowError(/not (a|inside a) git repository/i);
-    expect(() => actor()).toThrowError(/not (a|inside a) git repository/i);
-  });
-});
-
 describe("createIdentityResolver", () => {
+  it.runIf(onPosix)("does not shell out until identity() is called", () => {
+    // createActorResolver's old guarantee, carried over: resolved eagerly,
+    // every read-only command would pay for two subprocess spawns to record
+    // an identity it never reads.
+    const r = repo();
+    const counting = countingGit();
+
+    createIdentityResolver({ cwd: r.dir, env: counting.env });
+
+    expect(counting.calls()).toEqual([]);
+  });
+
   it.runIf(onPosix)("resolves worktree and branch once each and reuses the pair", () => {
     const r = repo();
     const counting = countingGit();
@@ -273,7 +215,8 @@ describe("createIdentityResolver", () => {
   });
 
   it("keeps two store contexts' identities independent", () => {
-    // The same trap createActorResolver's own test guards against: a
+    // The trap this exists to avoid: memoising at module scope. `runCli`
+    // builds a fresh context per test inside one worker process, so a
     // module-level cache would leak one context's identity into another's
     // assertions. Exercised through openStore, since that is where each
     // context's resolver is actually born.
@@ -293,6 +236,18 @@ describe("createIdentityResolver", () => {
     expect(b.store.identity().branch()).toBe("feature/separate");
     expect(a.store.actor()).toBe(`main @ ${r.dir}`);
     expect(b.store.actor()).toBe(`feature/separate @ ${other}`);
+  });
+
+  it("reports the branch failure on every call, not only the first", () => {
+    // createActorResolver's old guarantee, carried over: caching a thrown
+    // error as `undefined` and then returning it would put a literal
+    // "undefined" into the actor column of every subsequent write.
+    const plain = createNonRepoDir();
+    cleanups.push(() => plain.cleanup());
+    const identity = createIdentityResolver({ cwd: plain.dir });
+
+    expect(() => identity().branch()).toThrowError(/not (a|inside a) git repository/i);
+    expect(() => identity().branch()).toThrowError(/not (a|inside a) git repository/i);
   });
 });
 
@@ -318,12 +273,15 @@ describe("composing the actor string from identity", () => {
   });
 
   it("keeps the actor string identical to the fused resolver's output", () => {
+    // A literal, not a second call to resolveActor: now that both sides fuse
+    // through the same actorFromIdentity, comparing them to each other can no
+    // longer disagree — the independent source of truth is ADR-007's format
+    // itself, spelled out the way describe("resolveActor") pins it above.
     const r = repo();
-    const fused = resolveActor({ cwd: r.dir });
 
     const { store } = openStore(r.dir, { createIfMissing: true });
     cleanups.push(() => store.close());
 
-    expect(store.actor()).toBe(fused);
+    expect(store.actor()).toBe(`main @ ${r.dir}`);
   });
 });

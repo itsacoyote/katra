@@ -19,12 +19,15 @@ export interface StoreOutcome<T> {
 
 /** Runs `fn` against the repository's store. */
 export function withStore<T>(context: CliContext, fn: (store: OpenStore) => T): StoreOutcome<T> {
-  // The context's resolver, not a fresh one: it is memoised per invocation, so
-  // a command that opens the store and writes several events resolves the
-  // actor exactly once.
+  // The context's own resolvers, not fresh ones: both are memoised per
+  // invocation, so a command that opens the store and writes several events
+  // resolves the actor and the identity each exactly once — and `actor`
+  // itself is fused from this same `identity`, so passing both never spawns
+  // git twice for the same worktree-and-branch pair.
   const { store, warnings } = openStore(context.cwd, {
     env: context.env,
     actor: context.actor,
+    identity: context.identity,
   });
   try {
     return { result: fn(store), warnings };
