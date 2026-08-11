@@ -23,33 +23,56 @@ function formatNext(result: NextResult): string {
     return lines.join("\n");
   }
 
-  // Three answers hide behind "nothing to do", and the reply has to say which.
-  // Left as a bare "nothing is in the Planned lane", the middle case is a dead
-  // end: `add` puts work in `Defined`, so a caller who has just filled a store
-  // is told about a lane they have never heard of and given no way forward.
-  if (result.blocked.length === 0) {
-    if (result.untriaged === 0) {
-      return `nothing is in the ${NEXT_LANE} lane, and there is no unfinished work elsewhere`;
-    }
+  // Up to three answers hide behind "nothing to do", and they are not
+  // mutually exclusive — a backlog can be blocked *and* claimed at once, so
+  // each fact that applies gets its own section rather than one branch
+  // winning and silencing the rest (iteration-3 addendum).
+  const sections: string[] = [];
+
+  if (result.blocked.length > 0) {
+    // Naming the blockers turns "nothing to do" into "clear this first".
+    sections.push(
+      [
+        `no ${NEXT_LANE} task is ready — ${result.blocked.length} blocked:`,
+        ...result.blocked.flatMap((task) => [
+          `  ${task.id}  ${task.title}`,
+          ...task.blockers.map(
+            (blocker) => `    waits on ${blocker.id}  ${blocker.lane}  ${blocker.title}`,
+          ),
+        ]),
+      ].join("\n"),
+    );
+  } else if (result.untriaged > 0) {
+    // The middle case used to be a dead end: `add` puts work in `Defined`, so
+    // a caller who has just filled a store was told about a lane they had
+    // never heard of and given no way forward.
     const count =
       result.untriaged === 1 ? "1 unfinished task is" : `${result.untriaged} unfinished tasks are`;
-    return (
+    sections.push(
       `nothing is in the ${NEXT_LANE} lane — ${count} waiting to be planned.\n` +
-      `  see them with \`katra list --ready\`, then plan one with ` +
-      `\`katra update <id> --lane ${NEXT_LANE}\``
+        `  see them with \`katra list --ready\`, then plan one with ` +
+        `\`katra update <id> --lane ${NEXT_LANE}\``,
+    );
+  } else if (result.claimedElsewhere === 0) {
+    // Genuinely nothing: no blocked work, nothing untriaged, nothing claimed.
+    sections.push(`nothing is in the ${NEXT_LANE} lane, and there is no unfinished work elsewhere`);
+  }
+
+  if (result.claimedElsewhere > 0) {
+    // An all-claimed-elsewhere backlog must never read as an empty store
+    // (ADR-012): this line always fires when it applies, so "nothing is in
+    // the Planned lane" never stands alone over work that is merely taken.
+    const count =
+      result.claimedElsewhere === 1
+        ? "1 ready task is"
+        : `${result.claimedElsewhere} ready tasks are`;
+    sections.push(
+      `${count} claimed by another worktree — pick different work, or ` +
+        `\`katra release <id> --force\` to take one over`,
     );
   }
 
-  // Naming the blockers turns "nothing to do" into "clear this first".
-  return [
-    `no ${NEXT_LANE} task is ready — ${result.blocked.length} blocked:`,
-    ...result.blocked.flatMap((task) => [
-      `  ${task.id}  ${task.title}`,
-      ...task.blockers.map(
-        (blocker) => `    waits on ${blocker.id}  ${blocker.lane}  ${blocker.title}`,
-      ),
-    ]),
-  ].join("\n");
+  return sections.join("\n\n");
 }
 
 export function registerNext(program: Command, context: CliContext): void {

@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { addDependency } from "../../src/core/graph/deps.js";
-import { nextTask } from "../../src/core/tasks/next.js";
-import { seedEpic, seedTask, seedTime } from "../helpers/seed.js";
+import { nextTask, readyPredicate } from "../../src/core/tasks/next.js";
+import { listTasks } from "../../src/core/tasks/repo.js";
+import { seedClaim, seedEpic, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/** A worktree distinct from the fixture's own identity, for contended claims. */
+const OTHER_WORKTREE = "/repo/elsewhere";
 
 let fixture: StoreFixture;
 beforeEach(() => {
@@ -257,5 +261,110 @@ describe("epics are not work", () => {
 
     if (result.status !== "none") throw new Error("unreachable");
     expect(result.blocked.map((b) => b.title)).toEqual(["blocked task"]);
+  });
+});
+
+describe("claims steer the candidate query (F4 T6)", () => {
+  it("skips a task claimed by another worktree", () => {
+    const claimed = planned("claimed elsewhere", { priority: 0 });
+    seedClaim(fixture.store, { taskId: claimed, holder: OTHER_WORKTREE });
+    const unclaimed = planned("free to take", { priority: 4 });
+
+    const result = nextTask(fixture.store);
+
+    expect(result.status).toBe("found");
+    if (result.status !== "found") throw new Error("unreachable");
+    expect(result.task.id).toBe(unclaimed);
+  });
+
+  it("ranks the caller's own claim above a higher-priority unclaimed task", () => {
+    // A single-task fixture would prove nothing — priority 0 is the highest
+    // and would win the plain ranking regardless of any claim, so both
+    // candidates have to be seeded for this to be falsifiable.
+    const own = fixture.store.identity().worktree;
+    const resumed = planned("resume this", { priority: 4 });
+    seedClaim(fixture.store, { taskId: resumed, holder: own });
+    planned("higher priority, unclaimed", { priority: 0 });
+
+    const result = nextTask(fixture.store);
+
+    expect(result.status).toBe("found");
+    if (result.status !== "found") throw new Error("unreachable");
+    expect(result.task.id).toBe(resumed);
+  });
+
+  it("does not resurrect an own claim that already left Planned", () => {
+    // ADR-012's boundary: an own claim only resumes within next's Planned
+    // scope. One already moved to In Progress is the board digest's to
+    // surface, not next's — readyPredicate's own lane filter is what keeps
+    // it out, with no special-casing needed here.
+    const own = fixture.store.identity().worktree;
+    const started = seedTask(fixture.store, {
+      title: "already under way",
+      lane: "In Progress",
+      priority: 0,
+    });
+    seedClaim(fixture.store, { taskId: started, holder: own });
+    const stillPlanned = planned("still to start", { priority: 4 });
+
+    const result = nextTask(fixture.store);
+
+    expect(result.status).toBe("found");
+    if (result.status !== "found") throw new Error("unreachable");
+    expect(result.task.id).toBe(stillPlanned);
+  });
+
+  it("reports claimed-elsewhere separately from an empty backlog", () => {
+    const empty = nextTask(fixture.store);
+    expect(empty).toEqual({ status: "none", blocked: [], untriaged: 0, claimedElsewhere: 0 });
+
+    const claimed = planned("taken");
+    seedClaim(fixture.store, { taskId: claimed, holder: OTHER_WORKTREE });
+
+    const result = nextTask(fixture.store);
+
+    expect(result.status).toBe("none");
+    if (result.status !== "none") throw new Error("unreachable");
+    expect(result.blocked).toEqual([]);
+    expect(result.untriaged).toBe(0);
+    expect(result.claimedElsewhere).toBe(1);
+  });
+
+  it("keeps another worktree's blocked task in the blocked list", () => {
+    // The blocked branch and countUntriaged stay untouched by claims — only
+    // the candidate query applies the exclusion.
+    const blocker = seedTask(fixture.store, { title: "the blocker" });
+    const blocked = planned("stuck and claimed");
+    addDependency(fixture.store, blocked, blocker);
+    seedClaim(fixture.store, { taskId: blocked, holder: OTHER_WORKTREE });
+
+    const result = nextTask(fixture.store);
+
+    expect(result.status).toBe("none");
+    if (result.status !== "none") throw new Error("unreachable");
+    expect(result.blocked.map((b) => b.title)).toEqual(["stuck and claimed"]);
+    // Not ready, so it never enters the claimed-elsewhere count either —
+    // that count is scoped to readyPredicate's pool, same as the candidate
+    // query it mirrors.
+    expect(result.claimedElsewhere).toBe(0);
+  });
+
+  it("leaves readyPredicate unchanged from F3", () => {
+    // Byte-identical: claims must never become a filter baked into the
+    // shared predicate (plan-review HIGH-1). Only the candidate query above
+    // layers claim exclusion on top, via `AND NOT (...)`.
+    expect(readyPredicate().sql).toBe("t.lane = ? AND r.is_ready = ? AND t.level = 'task'");
+    expect(readyPredicate().params).toEqual(["Planned", 1]);
+  });
+
+  it("keeps list --ready claim-neutral where next is not", () => {
+    const claimed = planned("taken but ready");
+    seedClaim(fixture.store, { taskId: claimed, holder: OTHER_WORKTREE });
+
+    const listed = listTasks(fixture.store, { ready: true });
+    expect(listed.tasks.map((t) => t.id)).toContain(claimed);
+
+    const result = nextTask(fixture.store);
+    expect(result.status).toBe("none");
   });
 });
