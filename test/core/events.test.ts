@@ -149,6 +149,32 @@ describe("appendEvent", () => {
     expect(readEvent(id)).toMatchObject({ from_lane: "Defined", to_lane: "In Progress" });
   });
 
+  it("records the prior actor a forced release displaces", () => {
+    // Nothing calls appendEvent with a non-null priorActor yet — release
+    // --force lands in T4 — so the `?? null` default at the tail of the bind
+    // list could silently swallow a real value with nothing to catch it.
+    // Round-tripping through listEvents covers the bind position and the
+    // read path in one assertion, not just the write.
+    const task = seedTask(fixture.store);
+
+    writeTx(fixture.store.db, (stamp) =>
+      appendEvent(
+        fixture.store,
+        {
+          type: "released",
+          entityId: task,
+          actor: ACTOR,
+          priorActor: "feature/x @ /repo/wt-x",
+        },
+        stamp,
+      ),
+    );
+
+    expect(listEvents(fixture.store, { entityId: task }).events[0]?.priorActor).toBe(
+      "feature/x @ /repo/wt-x",
+    );
+  });
+
   it("records an event for an entity that no longer exists", () => {
     // ADR-008: `delete` appends its event as its last act, after the row is
     // gone. A foreign key — or a lookup inside appendEvent — would make the

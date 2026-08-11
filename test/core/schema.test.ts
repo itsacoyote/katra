@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { migrate, readSchemaVersion } from "../../src/core/db/migrate.js";
 import { migration0001 } from "../../src/core/db/migrations/0001-init.js";
 import {
+  buildClaimsAndPresenceDdl,
   buildEventsDdl,
   buildInitDdl,
   DEFAULT_EVENT_SETS,
@@ -46,6 +47,28 @@ function baseTask(overrides: Record<string, unknown> = {}): Record<string, unkno
     updated_at: TS,
     ...overrides,
   };
+}
+
+/**
+ * Inserts a row with raw SQL, bypassing application validation like
+ * {@link rawInsert} does for tasks.
+ *
+ * Version-agnostic — the column set is identical before and after 0003's
+ * rebuild bar the CHECK it widens and the nullable `prior_actor` it adds —
+ * so both the 0002 and 0003 describe blocks share this one copy.
+ */
+function event(db: DB, row: Record<string, unknown>): void {
+  const full = {
+    type: "created",
+    entity_id: "kt-aaaaaa",
+    actor: "main @ /repo",
+    created_at: TS,
+    ...row,
+  };
+  const cols = Object.keys(full);
+  db.prepare(
+    `INSERT INTO events (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+  ).run(...Object.values(full));
 }
 
 describe("initial schema", () => {
@@ -438,23 +461,13 @@ describe("migration 0002 — events and notes", () => {
   function freshV2(): DB {
     const db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
-    migrate(db, MIGRATIONS);
+    // Scoped to steps 1-2 deliberately, same trap as the two inline call sites
+    // below: MIGRATIONS now carries migration 0003, and the unscoped call
+    // silently built a v3 store here — every test in this block using
+    // freshV2() was measuring 0003's rebuild, not 0002's own DDL.
+    migrate(db, MIGRATIONS.slice(0, 2));
     return db;
   }
-
-  const event = (db: DB, row: Record<string, unknown>): void => {
-    const full = {
-      type: "created",
-      entity_id: "kt-aaaaaa",
-      actor: "main @ /repo",
-      created_at: TS,
-      ...row,
-    };
-    const cols = Object.keys(full);
-    db.prepare(
-      `INSERT INTO events (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
-    ).run(...Object.values(full));
-  };
 
   const note = (db: DB, row: Record<string, unknown> = {}): void => {
     const full = {
@@ -476,6 +489,17 @@ describe("migration 0002 — events and notes", () => {
     // at import time, and forward-only migration never re-runs a step. A store
     // created before an enum changes keeps its old CHECK forever, so comparing
     // the builder to itself could never catch the drift.
+    //
+    // This fixture was regenerated when 0003 widened EVENT_TYPES with
+    // claimed/released: migration 0002's DEFAULT_EVENT_SETS imports the array
+    // live, so the rendered CHECK moved with it. That is safe here only
+    // because 0003 immediately rebuilds `events` — a fresh install applies
+    // both steps inside one transaction, so nobody ever sees the wider
+    // 0002-only CHECK on its own, and both migration paths (fresh install,
+    // v2-store upgrade) converge on the same final constraint. Widening
+    // EVENT_TYPES again *without* a matching rebuild migration would leave
+    // two stores at the same user_version with different CHECKs — the trap
+    // for whoever adds F5's ref-linked/ref-status-changed next.
     const golden = readFileSync(
       fileURLToPath(new URL("../fixtures/schema-v2.sql", import.meta.url)),
       "utf8",
@@ -710,20 +734,6 @@ describe("migration 0003 — claims and presence", () => {
     return db;
   }
 
-  const event = (db: DB, row: Record<string, unknown>): void => {
-    const full = {
-      type: "created",
-      entity_id: "kt-aaaaaa",
-      actor: "main @ /repo",
-      created_at: TS,
-      ...row,
-    };
-    const cols = Object.keys(full);
-    db.prepare(
-      `INSERT INTO events (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
-    ).run(...Object.values(full));
-  };
-
   it("matches the pinned v3 schema fixture", () => {
     // Same reason as v1 and v2's snapshots — this DDL is rendered from
     // EVENT_TYPES at import time. The warning that matters here more than for
@@ -736,6 +746,24 @@ describe("migration 0003 — claims and presence", () => {
     );
     expect(MIGRATIONS[2]?.sql).toBe(golden);
     expect(MIGRATIONS[2]?.version).toBe(3);
+  });
+
+  it("builds the event-type constraint from the array, not a literal", () => {
+    // Same reasoning as 0002's analogous test: asserting the DDL contains the
+    // rendered enum would pass against a hardcoded list, since the two render
+    // identically. Only a value invented at call time can distinguish them.
+    const ddl = buildClaimsAndPresenceDdl({
+      eventTypes: [...EVENT_TYPES, "sentinel-event"],
+    });
+    expect(ddl).toContain("'sentinel-event'");
+
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, MIGRATIONS.slice(0, 2));
+    db.exec(ddl);
+    rawInsert(db, baseTask());
+    expect(() => event(db, { type: "sentinel-event" })).not.toThrow();
+    db.close();
   });
 
   it("upgrades a v2 store to v3 keeping tasks, events and notes", () => {
@@ -763,6 +791,29 @@ describe("migration 0003 — claims and presence", () => {
     expect(db.prepare("SELECT body FROM notes WHERE id='nt-aaaaaa'").get()).toEqual({
       body: "a note",
     });
+    db.close();
+  });
+
+  it("brings a fresh store straight to version 3", () => {
+    const db = new Database(":memory:");
+    expect(readSchemaVersion(db)).toBe(0);
+    expect(migrate(db, MIGRATIONS)).toBe(3);
+    expect(readSchemaVersion(db)).toBe(3);
+
+    const names = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    expect(names).toEqual([
+      "claims",
+      "deps",
+      "events",
+      "links",
+      "notes",
+      "presence",
+      "tags",
+      "tasks",
+    ]);
     db.close();
   });
 
@@ -834,6 +885,73 @@ describe("migration 0003 — claims and presence", () => {
     expect(rows.map((row) => rowToEvent(row as never).priorActor)).toEqual([
       null,
       "feature/x @ /repo/wt-x",
+    ]);
+    db.close();
+  });
+
+  const claim = (db: DB, row: Record<string, unknown> = {}): void => {
+    const full = {
+      task_id: "kt-aaaaaa",
+      holder: "/repo/wt-a",
+      actor: "main @ /repo/wt-a",
+      claimed_at: TS,
+      ...row,
+    };
+    const cols = Object.keys(full);
+    db.prepare(
+      `INSERT INTO claims (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+    ).run(...Object.values(full));
+  };
+
+  it("refuses a second claim on the same task", () => {
+    // T4's compare-and-set design rests on this: `task_id PRIMARY KEY` is what
+    // makes "at most one claim per task" a schema guarantee rather than an
+    // application check a race could slip past.
+    const db = freshV3();
+    rawInsert(db, baseTask());
+    claim(db);
+
+    expect(() => claim(db, { holder: "/repo/wt-b", actor: "main @ /repo/wt-b" })).toThrowError(
+      /UNIQUE constraint failed/,
+    );
+    db.close();
+  });
+
+  it("releases a claim when its task is deleted", () => {
+    const db = freshV3();
+    rawInsert(db, baseTask());
+    claim(db);
+
+    db.prepare("DELETE FROM tasks WHERE id = 'kt-aaaaaa'").run();
+
+    expect(db.prepare("SELECT COUNT(*) c FROM claims").get()).toEqual({ c: 0 });
+    db.close();
+  });
+
+  it("refuses a claim on a task that does not exist", () => {
+    const db = freshV3();
+
+    expect(() => claim(db, { task_id: "kt-zzzzzz" })).toThrowError(/FOREIGN KEY constraint failed/);
+    db.close();
+  });
+
+  it("keeps one presence row per worktree", () => {
+    // Requirement 2's UPSERT cadence (ADR-011): every command bumps this row
+    // rather than inserting a new one, so `worktree PRIMARY KEY` has to be a
+    // real conflict target, not decoration.
+    const db = freshV3();
+    const upsert = (branch: string, lastSeen: string): void => {
+      db.prepare(
+        `INSERT INTO presence (worktree, branch, last_seen) VALUES (?,?,?)
+         ON CONFLICT(worktree) DO UPDATE SET branch = excluded.branch, last_seen = excluded.last_seen`,
+      ).run("/repo/wt-a", branch, lastSeen);
+    };
+
+    upsert("main", "2026-01-01T00:00:00.000Z");
+    upsert("feature/x", "2026-01-01T00:05:00.000Z");
+
+    expect(db.prepare("SELECT * FROM presence").all()).toEqual([
+      { worktree: "/repo/wt-a", branch: "feature/x", last_seen: "2026-01-01T00:05:00.000Z" },
     ]);
     db.close();
   });
