@@ -23,6 +23,15 @@
  * the right trade, since the alternative is holding the write lock across
  * them on every command that succeeds. If it ever matters, hoist the guards
  * above the resolution rather than pushing the resolution back down.
+ *
+ * F4 splits the same two git calls into their own laziness. Presence's
+ * heartbeat is worktree-keyed and must never pay for the branch's spawn just
+ * to bump `last_seen`, so {@link createIdentityResolver} exposes `Identity` —
+ * the worktree resolved eagerly, the branch behind its own thunk.
+ * {@link resolveActor} and {@link ./store.js OpenStore}'s default `actor` both
+ * fuse the same resolution through {@link actorFromIdentity} rather than
+ * resolving the pair a second time, so nothing here spawns git twice for one
+ * invocation or re-parses the fused string back into its parts.
  */
 
 import { normalize } from "node:path";
@@ -87,18 +96,85 @@ function resolveWorktree(cwd: string, env: NodeJS.ProcessEnv): string {
 }
 
 /**
- * Resolves the actor for `cwd`.
+ * The worktree and the branch as two independently-resolvable parts of one
+ * identity, rather than the single fused string {@link resolveActor} produces.
+ *
+ * `worktree` is a plain, already-resolved string, not a getter — presence
+ * (F4 T3) keys its heartbeat on it directly, and a getter that spawns git
+ * would trip a plain object spread or `JSON.stringify` the moment presence
+ * tried to log or compare one. `branch` stays a thunk, matching the
+ * `actor: () => string` convention already in this file: the heartbeat's
+ * freshness check is worktree-keyed and never touches the branch, so a
+ * command that only bumps presence must not pay for a `symbolic-ref` it never
+ * reads.
+ */
+export interface Identity {
+  readonly worktree: string;
+  branch(): string;
+}
+
+/**
+ * A resolver that splits the same two git calls {@link resolveActor} makes
+ * into their own laziness.
+ *
+ * The worktree resolves the moment `identity()` is called at all — every
+ * consumer needs it, presence chiefly, whether or not it ever needs the
+ * branch. The branch resolves (and memoises) only when a consumer calls
+ * `identity().branch()` — the claim/release CAS, chiefly, which needs it only
+ * to write.
+ *
+ * Memoised per instance, one per `OpenStore`, never at module scope — the
+ * same trap {@link createActorResolver} exists to avoid: `runCli` builds a
+ * fresh context per test inside one worker process, so a module-level cache
+ * would leak one test's identity into the next one's assertions.
+ */
+export function createIdentityResolver(options: ActorOptions): () => Identity {
+  const env = options.env ?? process.env;
+  let worktree: string | undefined;
+  let branch: string | undefined;
+
+  return () => {
+    worktree ??= resolveWorktree(options.cwd, env);
+    return {
+      worktree,
+      branch: () => {
+        branch ??= resolveBranch(options.cwd, env);
+        return branch;
+      },
+    };
+  };
+}
+
+/**
+ * Fuses an already-resolved {@link Identity} into ADR-007's actor string.
+ *
+ * Takes the resolved parts rather than an `ActorOptions`/`cwd`, so a caller
+ * that already has an identity — {@link ./store.js OpenStore}'s default
+ * `actor`, chiefly — never spawns git a second time for the same pair and
+ * never re-parses the fused string back into the parts it started from.
+ */
+export function actorFromIdentity(identity: Identity): string {
+  return `${identity.branch()}${ACTOR_SEPARATOR}${identity.worktree}`;
+}
+
+/**
+ * Resolves the actor for `cwd` in one call.
  *
  * Costs one `rev-parse` plus one `symbolic-ref` — and a second `rev-parse` only
  * when HEAD is detached. Throws katra's own "not a git repository" error
  * outside a repo rather than inventing an identity.
+ *
+ * Composed from {@link createIdentityResolver} rather than calling
+ * `resolveBranch`/`resolveWorktree` directly, so this and every other caller
+ * of an `Identity` are one code path. The consequence: the worktree resolves
+ * first now, the branch second — the reverse of the order before the F4
+ * split. It no longer matters which one fails first outside a repository,
+ * because `resolveWorktree` swallows its own failure and falls back to `cwd`;
+ * only the branch's own fallback (`rev-parse --short HEAD`) can throw, and it
+ * still does, wherever in the sequence it runs.
  */
 export function resolveActor(options: ActorOptions): string {
-  const env = options.env ?? process.env;
-  // The branch first: outside a repository it is the call that fails, and
-  // failing before asking for a path keeps the error the one about the repo.
-  const branch = resolveBranch(options.cwd, env);
-  return `${branch}${ACTOR_SEPARATOR}${resolveWorktree(options.cwd, env)}`;
+  return actorFromIdentity(createIdentityResolver(options)());
 }
 
 /**

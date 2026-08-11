@@ -8,7 +8,8 @@
  */
 
 import { existsSync, mkdirSync } from "node:fs";
-import { createActorResolver } from "./actor.js";
+import type { Identity } from "./actor.js";
+import { actorFromIdentity, createIdentityResolver } from "./actor.js";
 import type { DatabaseHandle } from "./db/connection.js";
 import { openDatabase } from "./db/connection.js";
 import type { StoreWarning } from "./db/locate.js";
@@ -60,9 +61,24 @@ export interface OpenStore extends Store {
    * A function, not a value, so it stays lazy — resolving it costs two
    * subprocess spawns, and `list`, `show` and `next` must not pay for an actor
    * they never stamp. Memoised, so a command writing several events resolves
-   * once.
+   * once. Composed from {@link identity}'s own resolution rather than
+   * resolving independently, so asking for both never spawns git twice for
+   * the same worktree-and-branch pair.
    */
   readonly actor: () => string;
+  /**
+   * The worktree and branch this invocation is running as, split into their
+   * own laziness (F4 T2): the worktree resolves the moment `identity()` is
+   * called at all — presence (F4 T3) keys its heartbeat on it — while the
+   * branch stays behind `identity().branch()` for consumers that need it only
+   * to write, the claim/release CAS chiefly.
+   *
+   * Memoised per store context, exactly like {@link actor}: never at module
+   * scope, because `runCli` builds a fresh context per test inside one worker
+   * process, and a module-level cache would hand one test's identity to the
+   * next.
+   */
+  readonly identity: () => Identity;
 }
 
 export interface OpenStoreResult {
@@ -94,13 +110,23 @@ export interface OpenStoreOptions {
    */
   readonly createIfMissing?: boolean;
   /**
-   * Who to record as the writer. Defaults to resolving it from `cwd`.
+   * Who to record as the writer. Defaults to composing it from `identity`.
    *
    * The CLI passes its own per-invocation resolver so one command resolves
    * once however many stores or events it touches; a test passes a fixed
    * string when the actor is the thing being asserted.
    */
   readonly actor?: () => string;
+  /**
+   * The worktree (eager) and branch (lazy) this invocation is running as.
+   * Defaults to resolving both from `cwd`, exactly like `actor`.
+   *
+   * Threaded independently from `actor` rather than always deriving one from
+   * the other, so a test can pin a fixed actor string without also faking out
+   * git for `identity`, and a future caller can pin `identity` — for the race
+   * tests across two linked worktrees — without also faking `actor`.
+   */
+  readonly identity?: () => Identity;
 }
 
 /**
@@ -135,14 +161,17 @@ export function openStore(cwd: string, options: OpenStoreOptions = {}): OpenStor
     throw error;
   }
 
+  const identity =
+    options.identity ??
+    createIdentityResolver(options.env === undefined ? { cwd } : { cwd, env: options.env });
+
   return {
     store: {
       dbPath: location.dbPath,
       commonDir: location.commonDir,
       db,
-      actor:
-        options.actor ??
-        createActorResolver(options.env === undefined ? { cwd } : { cwd, env: options.env }),
+      identity,
+      actor: options.actor ?? (() => actorFromIdentity(identity())),
       close: () => db.close(),
     },
     created: applied > 0,

@@ -1,9 +1,10 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createActorResolver, resolveActor } from "../../src/core/actor.js";
+import { createActorResolver, createIdentityResolver, resolveActor } from "../../src/core/actor.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { findGit } from "../../src/core/git.js";
+import { openStore } from "../../src/core/store.js";
 import { createGitRepo, createNonRepoDir, git } from "../helpers/fixture.js";
 
 const cleanups: Array<() => void> = [];
@@ -233,5 +234,96 @@ describe("createActorResolver", () => {
 
     expect(() => actor()).toThrowError(/not (a|inside a) git repository/i);
     expect(() => actor()).toThrowError(/not (a|inside a) git repository/i);
+  });
+});
+
+describe("createIdentityResolver", () => {
+  it.runIf(onPosix)("resolves worktree and branch once each and reuses the pair", () => {
+    const r = repo();
+    const counting = countingGit();
+    const identity = createIdentityResolver({ cwd: r.dir, env: counting.env });
+
+    const first = identity();
+    const second = identity();
+
+    expect(first.worktree).toBe(r.dir);
+    expect(second.worktree).toBe(r.dir);
+    expect(first.branch()).toBe("main");
+    expect(second.branch()).toBe("main");
+    // One rev-parse for the worktree, one symbolic-ref for the branch — not
+    // four, however many times identity() and branch() are each called.
+    expect(counting.calls()).toHaveLength(2);
+  });
+
+  it.runIf(onPosix)("does not spawn for the branch until something reads it", () => {
+    // The split this task exists for: asking for the worktree alone — the
+    // presence key — must not cost the branch's spawn too.
+    const r = repo();
+    const counting = countingGit();
+    const identity = createIdentityResolver({ cwd: r.dir, env: counting.env });
+
+    const resolved = identity();
+    expect(resolved.worktree).toBe(r.dir);
+    expect(counting.calls()).toHaveLength(1);
+    expect(counting.calls()[0]).toContain("rev-parse");
+
+    expect(resolved.branch()).toBe("main");
+    expect(counting.calls()).toHaveLength(2);
+    expect(counting.calls().some((call) => call.includes("symbolic-ref"))).toBe(true);
+  });
+
+  it("keeps two store contexts' identities independent", () => {
+    // The same trap createActorResolver's own test guards against: a
+    // module-level cache would leak one context's identity into another's
+    // assertions. Exercised through openStore, since that is where each
+    // context's resolver is actually born.
+    const r = repo();
+    const other = r.addWorktree("feature/separate");
+
+    const a = openStore(r.dir, { createIfMissing: true });
+    const b = openStore(other);
+    cleanups.push(() => {
+      a.store.close();
+      b.store.close();
+    });
+
+    expect(a.store.identity().worktree).toBe(r.dir);
+    expect(b.store.identity().worktree).toBe(other);
+    expect(a.store.identity().branch()).toBe("main");
+    expect(b.store.identity().branch()).toBe("feature/separate");
+    expect(a.store.actor()).toBe(`main @ ${r.dir}`);
+    expect(b.store.actor()).toBe(`feature/separate @ ${other}`);
+  });
+});
+
+describe("composing the actor string from identity", () => {
+  it.runIf(onPosix)("composes the actor string from the same resolution", () => {
+    const r = repo();
+    const counting = countingGit();
+    const { store } = openStore(r.dir, { createIfMissing: true, env: counting.env });
+    cleanups.push(() => store.close());
+    // openStore already spent one spawn locating the store itself; the
+    // baseline isolates identity's own two from that unrelated cost.
+    const baseline = counting.calls().length;
+
+    const actorString = store.actor();
+    expect(counting.calls()).toHaveLength(baseline + 2);
+
+    const identity = store.identity();
+    // identity() shares actor()'s own resolution — asking again must not
+    // spawn again.
+    expect(counting.calls()).toHaveLength(baseline + 2);
+    expect(actorString).toBe(`${identity.branch()} @ ${identity.worktree}`);
+    expect(counting.calls()).toHaveLength(baseline + 2);
+  });
+
+  it("keeps the actor string identical to the fused resolver's output", () => {
+    const r = repo();
+    const fused = resolveActor({ cwd: r.dir });
+
+    const { store } = openStore(r.dir, { createIfMissing: true });
+    cleanups.push(() => store.close());
+
+    expect(store.actor()).toBe(fused);
   });
 });
