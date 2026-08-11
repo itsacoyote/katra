@@ -11,6 +11,13 @@ export default defineConfig({
     // on a two-core CI runner. The whole suite is a few seconds, so the
     // determinism is close to free.
     fileParallelism: false,
+    // The default 5s assumes in-process tests. The CLI suite runs the real
+    // binary — a single test can spawn a dozen OS processes, each opening
+    // SQLite and resolving git — and a loaded Windows CI runner spends 3-4s
+    // on what Linux does in under one. Two F2/F3-era tests timed out on
+    // exactly that runner with the suite otherwise green. A hang still
+    // fails; it just takes 30s to say so, in a suite that runs serially.
+    testTimeout: 30_000,
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],
