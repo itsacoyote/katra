@@ -4,9 +4,19 @@ import { addDependency, ID_CHUNK } from "../../src/core/graph/deps.js";
 import { createNote } from "../../src/core/notes/repo.js";
 import { BRIEF_HANDOFF_CHARS } from "../../src/core/tasks/brief.js";
 import { nextTask } from "../../src/core/tasks/next.js";
-import { seedDep, seedEpic, seedEvent, seedTask } from "../helpers/seed.js";
+import {
+  seedClaim,
+  seedDep,
+  seedEpic,
+  seedEvent,
+  seedPresence,
+  seedTask,
+} from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/** A worktree distinct from the fixture's own identity, for contended claims. */
+const OTHER_WORKTREE = "/repo/elsewhere";
 
 /**
  * A pass-through count of `readTx` calls, for the snapshot test below. The
@@ -216,6 +226,148 @@ describe("sections", () => {
     expect(board.digest).toBeNull();
     expect(board.pointer).toBeNull();
     expect(board.counts.open).toBe(0);
+  });
+});
+
+describe("claims annotate and order the ready section (F4 T7, ADR-012)", () => {
+  it("orders other-claimed ready rows after unclaimed ones", () => {
+    // The claimed row outranks both on raw priority — a single-claimed-task
+    // fixture would pass by luck (iter-2 advisory 10); this seeds two
+    // unclaimed rows so their *relative* order (unchanged) is also provable.
+    const claimedTop = seedTask(fixture.store, {
+      lane: "Planned",
+      priority: 0,
+      title: "claimed, highest priority",
+    });
+    seedClaim(fixture.store, { taskId: claimedTop, holder: OTHER_WORKTREE });
+    const firstUnclaimed = seedTask(fixture.store, {
+      lane: "Planned",
+      priority: 1,
+      title: "unclaimed, first",
+    });
+    const secondUnclaimed = seedTask(fixture.store, {
+      lane: "Planned",
+      priority: 2,
+      title: "unclaimed, second",
+    });
+
+    const board = readBoard(fixture.store);
+
+    expect(board.ready.tasks.map((t) => t.id)).toEqual([
+      firstUnclaimed,
+      secondUnclaimed,
+      claimedTop,
+    ]);
+    expect(board.ready.tasks[2]?.claimedElsewhere).toBe(true);
+    expect(board.ready.tasks[2]?.claim?.holder).toBe(OTHER_WORKTREE);
+    expect(board.ready.tasks[0]?.claimedElsewhere).toBe(false);
+    expect(board.ready.tasks[0]?.claim).toBeNull();
+  });
+
+  it("keeps every count identical when claims exist", () => {
+    // The same fixture "makes the five counts sum to open" uses, so a claim
+    // moving a task between buckets would be caught the same way.
+    const inProgress = seedTask(fixture.store, { lane: "In Progress" });
+    seedTask(fixture.store, { lane: "In Review" });
+    const planned = seedTask(fixture.store, { lane: "Planned" });
+    seedTask(fixture.store, { lane: "Defined" });
+    seedTask(fixture.store, { lane: "Researching" });
+    const blocker = seedTask(fixture.store, { lane: "Planned" });
+    const stuck = seedTask(fixture.store, { lane: "Planned" });
+    seedDep(fixture.store, stuck, blocker);
+    seedTask(fixture.store, { lane: "Done" });
+    seedTask(fixture.store, { lane: "Cancelled" });
+
+    const before = readBoard(fixture.store).counts;
+
+    seedClaim(fixture.store, { taskId: inProgress, holder: OTHER_WORKTREE });
+    seedClaim(fixture.store, { taskId: planned, holder: OTHER_WORKTREE });
+    seedClaim(fixture.store, { taskId: stuck, holder: OTHER_WORKTREE });
+
+    const after = readBoard(fixture.store).counts;
+
+    expect(after).toEqual(before);
+    expect(after.inFlight + after.ready + after.blocked + after.untriaged).toBe(after.open);
+  });
+
+  it("leads ready with next's answer past a higher-ranked claimed task", () => {
+    // The unqualified half of the agreement invariant (ADR-012): a task
+    // claimed by *another* worktree is excluded from next's candidates
+    // outright, so the two commands still agree on the first row even when
+    // the claimed task outranks everything else on priority.
+    const claimedTop = seedTask(fixture.store, {
+      lane: "Planned",
+      priority: 0,
+      title: "claimed elsewhere, top priority",
+    });
+    seedClaim(fixture.store, { taskId: claimedTop, holder: OTHER_WORKTREE });
+    seedTask(fixture.store, { lane: "Planned", priority: 1, title: "free to take" });
+
+    const board = readBoard(fixture.store);
+    const next = nextTask(fixture.store);
+
+    if (next.status !== "found") throw new Error("unreachable");
+    expect(board.ready.tasks[0]?.id).toBe(next.task.id);
+    expect(board.ready.tasks[0]?.id).not.toBe(claimedTop);
+  });
+
+  it("resumes an own claim next offers but the board does not lead with", () => {
+    // The pinned, deliberate divergence ADR-012 carves out: next ranks an
+    // own Planned claim first among candidates so a session that loses
+    // context resumes it; the board applies no such promotion, so it leads
+    // with the top-priority unclaimed row instead. A single command
+    // asserting agreement would never catch the two silently disagreeing —
+    // this test calls both to prove they intentionally do not.
+    const own = fixture.store.identity().worktree;
+    const resumed = seedTask(fixture.store, {
+      lane: "Planned",
+      priority: 4,
+      title: "resume this",
+    });
+    seedClaim(fixture.store, { taskId: resumed, holder: own });
+    const topOfBacklog = seedTask(fixture.store, {
+      lane: "Planned",
+      priority: 0,
+      title: "top of the backlog, unclaimed",
+    });
+
+    const next = nextTask(fixture.store);
+    const board = readBoard(fixture.store);
+
+    if (next.status !== "found") throw new Error("unreachable");
+    expect(next.task.id).toBe(resumed);
+    expect(board.ready.tasks[0]?.id).toBe(topOfBacklog);
+    expect(board.ready.tasks[0]?.id).not.toBe(next.task.id);
+    // Not excluded, and not tiered with "elsewhere" claims either — an own
+    // claim is unclaimed as far as the board's ordering is concerned, simply
+    // out-ranked here on plain priority within that tier.
+    const resumedRow = board.ready.tasks.find((t) => t.id === resumed);
+    expect(resumedRow?.claimedElsewhere).toBe(false);
+    expect(resumedRow?.claim?.holder).toBe(own);
+  });
+
+  it("carries claim data on in-flight and blocked rows too", () => {
+    // Display is uniform: only the ready section orders by claim data, but
+    // every section carries it (ADR-012).
+    const started = seedTask(fixture.store, { lane: "In Progress", title: "underway" });
+    seedClaim(fixture.store, { taskId: started, holder: OTHER_WORKTREE });
+    seedPresence(fixture.store, { worktree: OTHER_WORKTREE, branch: "feature/other" });
+
+    const blocker = seedTask(fixture.store, { lane: "Planned", title: "the blocker" });
+    const stuck = seedTask(fixture.store, { lane: "Planned", title: "stuck" });
+    addDependency(fixture.store, stuck, blocker);
+    seedClaim(fixture.store, { taskId: stuck, holder: OTHER_WORKTREE });
+
+    const board = readBoard(fixture.store);
+
+    const inFlightRow = board.inFlight.tasks.find((t) => t.id === started);
+    expect(inFlightRow?.claim?.holder).toBe(OTHER_WORKTREE);
+    expect(inFlightRow?.claim?.branch).toBe("feature/other");
+    expect(inFlightRow?.claimedElsewhere).toBe(true);
+
+    const blockedRow = board.blocked.tasks.find((t) => t.id === stuck);
+    expect(blockedRow?.claim?.holder).toBe(OTHER_WORKTREE);
+    expect(blockedRow?.claimedElsewhere).toBe(true);
   });
 });
 

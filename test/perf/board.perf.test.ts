@@ -29,9 +29,17 @@ import { latestHandoff } from "../../src/core/notes/repo.js";
 import type { OpenStore } from "../../src/core/store.js";
 import { openStore } from "../../src/core/store.js";
 import { createGitRepo } from "../helpers/fixture.js";
+import { seedClaim, seedPresence } from "../helpers/seed.js";
 
 const TASKS = 10_000;
 const NOTES = 5_000;
+
+/**
+ * Other worktrees a claimed task might be held by, for the claims join T7
+ * adds to every section query. Several distinct paths, not one, so the
+ * `presence` LEFT JOIN resolves against more than a single cached row.
+ */
+const OTHER_WORKTREES = ["/perf/wt-a", "/perf/wt-b", "/perf/wt-c", "/perf/wt-d", "/perf/wt-e"];
 
 /** What `board` must stay under on the seeded store. */
 const BUDGET_MS = 250;
@@ -69,6 +77,11 @@ function seedLargeStore(): OpenStore {
   const note = store.db.prepare(
     "INSERT INTO notes (id,task_id,kind,body,actor,created_at) VALUES (?,?,?,?,?,?)",
   );
+  // The caller's own worktree already has a presence row from this
+  // `openStore` call's own heartbeat — reused here rather than resolved a
+  // second time, exactly what `readBoard` itself does (`identity()` is
+  // memoised).
+  const own = store.identity().worktree;
 
   store.db.transaction(() => {
     for (let i = 0; i < TASKS; i++) {
@@ -99,6 +112,20 @@ function seedLargeStore(): OpenStore {
         "perf @ /perf",
         stamp,
       );
+    }
+    // Claims + presence (F4 T7): board joins both into every section query
+    // now, so a perf seed with an empty `claims` table would measure a query
+    // shape the real one never runs. One in eight tasks is claimed, split
+    // between the caller's own worktree (the ready section's own-vs-other
+    // comparison) and several distinct others (the presence join resolving
+    // more than one cached row).
+    for (let i = 0; i < TASKS; i += 8) {
+      const holder =
+        i % 40 === 0 ? own : (OTHER_WORKTREES[(i / 8) % OTHER_WORKTREES.length] as string);
+      seedClaim(store, { taskId: taskId(i), holder, claimedAt: stamp });
+    }
+    for (const worktree of OTHER_WORKTREES) {
+      seedPresence(store, { worktree, branch: "feature/perf", lastSeen: stamp });
     }
   })();
 
