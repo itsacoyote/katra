@@ -109,6 +109,22 @@ describe("F4 coordination story", () => {
     const ownRow = boardOwn.stdout.split("\n").find((line) => line.includes(own)) ?? "";
     expect(ownRow).not.toBe("");
     expect(ownRow).not.toContain("claimed by");
+
+    // The "skips other's" assertion above passes even with the exclusion
+    // deleted, because `unclaimed` also outranks `own` on plain priority —
+    // priority alone would produce the same answer. Claiming it too removes
+    // that ambiguity: with every Planned task now held by repo.dir, the only
+    // way worktreeB's `next` can still answer "nothing" is the exclusion
+    // itself doing its job, and `claimedElsewhere` counts both of them.
+    const claimedUnclaimed = await runCli(["claim", unclaimed], { cwd: repo.dir });
+    expect(claimedUnclaimed.exitCode).toBe(EXIT.ok);
+
+    const nextOtherAllClaimed = (
+      await runCli(["next", "--json"], { cwd: worktreeB })
+    ).json() as NextResult;
+    expect(nextOtherAllClaimed.status).toBe("none");
+    if (nextOtherAllClaimed.status !== "none") throw new Error("unreachable");
+    expect(nextOtherAllClaimed.claimedElsewhere).toBe(2);
   });
 
   it("force-release displaces a live holder, and the takeover is visible in the log", async () => {
