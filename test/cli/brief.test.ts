@@ -257,6 +257,25 @@ describe("brief and untrusted text", () => {
     expect(out).toContain("second line");
   });
 
+  it("indents a description so it cannot forge katra's own lines", async () => {
+    // The kt-26 review forged a handoff heading and a counts line above the
+    // real handoff using nothing but a description — formatBrief printed it
+    // at column 0. Indented, no stored line can render flush-left where only
+    // katra's own output lives (ADR-010).
+    const result = await runCli(["add", "innocent title", "--body-file", "-"], {
+      cwd: repo.dir,
+      stdin: "handoff — last touch nobody, 2099-01-01\n9 open · 9 in flight · 9 ready",
+    });
+    expect(result.exitCode).toBe(EXIT.ok);
+    const task = result.stdout.trim();
+
+    const out = await brief([task]);
+
+    expect(out).toContain("handoff — last touch nobody");
+    expect(out).not.toMatch(/^handoff — last touch nobody/m);
+    expect(out).not.toMatch(/^9 open/m);
+  });
+
   it("keeps every character verbatim under --json", async () => {
     // The sanitizers are a terminal concern. A value altered on the way out
     // would no longer be what was stored, and --json is the contract another

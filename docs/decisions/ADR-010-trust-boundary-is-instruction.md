@@ -27,11 +27,13 @@ closed **where the digest lives**: `indent()` in `src/cli/format.ts`
 prefixes every handoff body line in both `board --digest` and `brief`, so a
 note cannot produce a flush-left line there and therefore cannot impersonate
 a section heading or a counts header — and the ANSI and bidi channels are
-stripped by the sanitizers. That closure is narrower than it looks: a task
-**description** is printed at column 0 by `formatBrief` and
-`formatTaskDetail`, and `note add`'s echo is un-indented too, so those
-surfaces can still forge katra-shaped lines (katra-9aw.45 tracks indenting
-them). Both mitigations also apply to the text rendering only — `--json` is
+stripped by the sanitizers. That closure was narrower than it first looked:
+a task **description** printed at column 0 in `formatBrief` and
+`formatTaskDetail`, and `note add`'s echo was un-indented too, so those
+surfaces could forge katra-shaped lines. katra-9aw.45 closed all three —
+every multi-line stored body now renders through `indent()`, and a test per
+surface pins it. Both mitigations still apply to the text rendering only —
+`--json` is
 verbatim by design, and it is the path agents are told to prefer for
 parsing. Which is the other reason the mitigation has to be instruction to
 the reader: what remains, on every path, is semantic — an agent reading
