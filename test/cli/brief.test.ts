@@ -7,7 +7,7 @@ import { BRIEF_HANDOFF_CHARS } from "../../src/core/tasks/brief.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
 import { createGitRepo } from "../helpers/fixture.js";
-import { seedTask } from "../helpers/seed.js";
+import { seedClaim, seedTask } from "../helpers/seed.js";
 
 let repo: GitFixture;
 beforeEach(async () => {
@@ -218,6 +218,47 @@ describe("katra brief", () => {
     const document = result.json() as BriefResult;
     expect(document.level).toBe("task");
     expect(document.handoff?.note.body).toBe("a handoff");
+  });
+});
+
+describe("brief and claims", () => {
+  it("renders claimed by with last seen on a claimed task", async () => {
+    const task = await add(["do the thing"]);
+    const claimed = (await runCli(["claim", task, "--json"], { cwd: repo.dir })).json() as {
+      claim: { actor: string };
+    };
+
+    const out = await brief([task]);
+
+    expect(out).toContain("claimed");
+    expect(out).toContain(claimed.claim.actor);
+    expect(out).toContain("last seen");
+    // T4's security scan: last_seen is worktree liveness bumped by any
+    // command, not evidence of work on this task — the wording must never
+    // imply the latter.
+    expect(out).not.toContain("active on");
+  });
+
+  it("renders a claim whose holder never heartbeat, with no crash and no null", async () => {
+    // `bumpPresence` is deliberately non-fatal, so a holder with a claim and
+    // no presence row is real, not just a malformed seed.
+    const task = await add(["contested"]);
+    const { store } = openStore(repo.dir, {});
+    try {
+      seedClaim(store, {
+        taskId: task,
+        holder: "/elsewhere/worktree",
+        actor: "feature/other @ /elsewhere/worktree",
+      });
+    } finally {
+      store.close();
+    }
+
+    const out = await brief([task]);
+
+    expect(out).toContain("feature/other @ /elsewhere/worktree");
+    expect(out).toContain("never seen");
+    expect(out).not.toContain("null");
   });
 });
 
