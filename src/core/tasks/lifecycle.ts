@@ -13,6 +13,7 @@
  * from whoever was about to start it.
  */
 
+import { settleClaim } from "../claims/repo.js";
 import type { LifecycleResult } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import type { EventType, Lane } from "../enums.js";
@@ -52,6 +53,19 @@ interface Move {
    * it happened to return the task to.
    */
   readonly event: EventType;
+  /**
+   * Whether this move settles a live claim as a side effect.
+   *
+   * `close` and `cancel` carry `true` — both are terminal, and a claim on a
+   * task no one can work on anymore is stale by construction (spec req 5).
+   * `reopen` carries `false`: reviving a task is not a takeover, and a claim
+   * that happened to survive onto a terminal task (unreachable through
+   * `claimTask`'s own guard, but not through direct seeding — see
+   * `claims/repo.ts`) is left exactly as it was. Named on `Move` rather than
+   * inferred from `event`, so the coupling to `releasesClaim` is stated once
+   * here instead of re-derived at each of the three call sites.
+   */
+  readonly releasesClaim: boolean;
 }
 
 /**
@@ -67,6 +81,13 @@ interface Move {
  * The before-and-after readiness comparison shares that transaction too, so the
  * reported sets are exactly what this change caused rather than what a
  * concurrent writer happened to change alongside it.
+ *
+ * **A claimed task's release rides the same transaction** (`settleClaim`,
+ * `claims/repo.ts`) rather than a call out to `releaseTask`: that function
+ * opens its own `writeTx`, and calling it from in here would either resolve
+ * identity under the write lock or split one logical change across two
+ * transactions — exactly the atomicity spec req 5 forbids. `settleClaim`
+ * exists precisely to be the shared core without either hazard.
  */
 function transition(
   store: OpenStore,
@@ -74,13 +95,19 @@ function transition(
   plan: (task: Task) => Move,
 ): LifecycleResult {
   const id = requireId(store, idInput);
-  // Before the transaction: resolving the actor spawns two git subprocesses,
-  // and doing that under `BEGIN IMMEDIATE` holds the write lock across both.
+  // Before the transaction: resolving identity spawns git subprocesses, and
+  // doing that under `BEGIN IMMEDIATE` holds the write lock across them. Both
+  // halves are resolved unconditionally — including on `reopen`, which never
+  // uses `worktree` — because `store.identity()` is memoised per store
+  // (`actor.ts`) and `store.actor()` already forces the same resolution, so
+  // this costs no extra spawn; keeping every path uniform beats a conditional
+  // that only some callers exercise.
   const actor = store.actor();
+  const worktree = store.identity().worktree;
 
   return writeTx(store.db, (now) => {
     const task = loadOrThrow(store, id, idInput);
-    const { lane, markClosed, reason, event } = plan(task);
+    const { lane, markClosed, reason, event, releasesClaim } = plan(task);
 
     const { result, unblocked, reblocked } = reportReadinessChange(store, id, () => {
       store.db
@@ -90,6 +117,10 @@ function transition(
         .run(lane, markClosed ? now : null, reason, now, id);
       return loadOrThrow(store, id, idInput);
     });
+
+    if (releasesClaim) {
+      settleClaim(store, id, actor, worktree, now);
+    }
 
     // Both lanes travel on the event as well as the verb. `closed` already
     // implies the destination, but not where the task came from — and "what
@@ -127,7 +158,13 @@ function refuseIfTerminal(task: Task, verb: string): void {
 export function closeTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
   return transition(store, idInput, (task) => {
     refuseIfTerminal(task, "close");
-    return { lane: "Done", markClosed: true, reason: reason ?? null, event: "closed" };
+    return {
+      lane: "Done",
+      markClosed: true,
+      reason: reason ?? null,
+      event: "closed",
+      releasesClaim: true,
+    };
   });
 }
 
@@ -141,7 +178,13 @@ export function closeTask(store: OpenStore, idInput: string, reason?: string): L
 export function cancelTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
   return transition(store, idInput, (task) => {
     refuseIfTerminal(task, "cancel");
-    return { lane: "Cancelled", markClosed: true, reason: reason ?? null, event: "cancelled" };
+    return {
+      lane: "Cancelled",
+      markClosed: true,
+      reason: reason ?? null,
+      event: "cancelled",
+      releasesClaim: true,
+    };
   });
 }
 
@@ -181,6 +224,13 @@ export function reopenTask(store: OpenStore, idInput: string, lane?: Lane): Life
     // No reason: `reopenTask` has no reason parameter and never had one —
     // reopening is not a judgement that needs explaining. Adding one here
     // would be scope this feature does not have.
-    return { lane: target, markClosed: false, reason: null, event: "reopened" };
+    return {
+      lane: target,
+      markClosed: false,
+      reason: null,
+      event: "reopened",
+      // Reviving a task is not a takeover — see `Move.releasesClaim`.
+      releasesClaim: false,
+    };
   });
 }

@@ -8,6 +8,7 @@
  * In F1 this is **irreversible**: there is no restore until snapshots arrive.
  */
 
+import { settleClaim } from "../claims/repo.js";
 import type { DeleteResult } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import { KatraException } from "../errors.js";
@@ -39,12 +40,21 @@ function countChildren(store: OpenStore, id: string): number {
  * concurrent `add --parent` could slip a child in between the count and the
  * delete; the database would still refuse, but as a raw constraint error
  * instead of the message that names how many children are in the way.
+ *
+ * **A live claim is settled before the cascade fires** (`settleClaim`,
+ * `claims/repo.ts`), inside this same transaction — the row still exists to
+ * stamp `epicId` onto the `released` event, and the deletion that follows
+ * would otherwise take the claim row with it via `ON DELETE CASCADE`
+ * (migration 0003) with no event ever recording it (ADR-008 symmetry: a
+ * released claim should read the same whether a lifecycle transition or a
+ * delete caused it).
  */
 export function deleteTask(store: OpenStore, idInput: string): DeleteResult {
   const id = requireId(store, idInput);
-  // Before the transaction: see `actor.ts` — resolving it spawns two git
+  // Before the transaction: see `actor.ts` — resolving identity spawns git
   // subprocesses, which must not happen with the write lock held.
   const actor = store.actor();
+  const worktree = store.identity().worktree;
 
   return writeTx(store.db, (now) => {
     const task = getTask(store, id);
@@ -62,6 +72,8 @@ export function deleteTask(store: OpenStore, idInput: string): DeleteResult {
         reason: `${children} children`,
       });
     }
+
+    settleClaim(store, id, actor, worktree, now);
 
     const { unblocked } = reportUnblocked(store, id, () => {
       store.db.prepare("DELETE FROM tasks WHERE id = ?").run(id);

@@ -260,6 +260,65 @@ export function claimTask(store: OpenStore, idInput: string): ClaimResult {
   });
 }
 
+/**
+ * Releases `taskId`'s claim if one exists, and appends `released` — the
+ * shared core of `releaseTask` and every lifecycle path that settles a claim
+ * as a side effect (`transition`'s close/cancel move, `deleteTask`).
+ *
+ * **Must run inside the caller's own open `writeTx`, never its own.**
+ * `releaseTask` proves why: it resolves `actor`/`worktree` before opening its
+ * transaction (the module docs' rule), so a second, independent `writeTx`
+ * here would either fail to nest cleanly or, worse, commit its own claim
+ * deletion and `released` event as a transaction separate from whatever
+ * caused the release — the exact atomicity the F4 spec requires close/cancel
+ * to have with their lifecycle event (spec req 5). `now`/`actor`/`worktree`
+ * therefore arrive as parameters, the same shape `appendEvent` already takes
+ * `now` in, rather than being resolved here.
+ *
+ * **`priorActor`** follows `releaseTask`'s own rule, restated once so no
+ * caller re-derives it: `null` when `worktree` is the claim's own holder (a
+ * plain release, nothing displaced), the holder's frozen actor string
+ * otherwise — which covers both an explicit force-release and a non-holder
+ * settling the claim as a side effect of closing the task (a takeover in
+ * every way that matters to the event stream).
+ *
+ * Returns the claim as it stood immediately before release, or `null` when
+ * `taskId` was never claimed — in which case nothing is written at all: no
+ * delete, no event. That `null` arm is what keeps close/cancel/delete
+ * byte-identical to today's behaviour on an unclaimed task.
+ */
+export function settleClaim(
+  store: OpenStore,
+  taskId: string,
+  actor: string,
+  worktree: string,
+  now: string,
+): ClaimInfo | null {
+  const claim = claimFor(store, taskId);
+  if (claim === null) return null;
+
+  store.db.prepare("DELETE FROM claims WHERE task_id = ?").run(taskId);
+
+  // The task, purely to stamp the released event's epicId — read fresh
+  // rather than threaded in, since every caller either has not loaded a
+  // `Task` yet (releaseTask, at the point it now calls this) or, for
+  // `deleteTask`, still can: this always runs before the row is gone.
+  const task = getTask(store, taskId);
+  appendEvent(
+    store,
+    {
+      type: "released",
+      entityId: taskId,
+      epicId: task === undefined ? null : epicIdFor(task),
+      actor,
+      priorActor: worktree === claim.holder ? null : claim.actor,
+    },
+    now,
+  );
+
+  return claim;
+}
+
 /** What releasing a claim hands back. */
 export interface ReleaseResult {
   readonly task: Task;
@@ -330,22 +389,18 @@ export function releaseTask(
       });
     }
 
-    store.db.prepare("DELETE FROM claims WHERE task_id = ?").run(id);
+    const settled = settleClaim(store, id, actor, worktree, now);
+    if (settled === null) {
+      // Unreachable in practice: `claim` above already proved a claim exists
+      // inside this same transaction, and nothing else could have removed it
+      // in between — matching the impossible-state guard `claimTask` throws
+      // for the mirror case.
+      throw new KatraException({
+        code: "internal",
+        message: "claims row disappeared inside its own transaction — this is a katra bug",
+      });
+    }
 
-    appendEvent(
-      store,
-      {
-        type: "released",
-        entityId: id,
-        epicId: epicIdFor(task),
-        actor,
-        // Only set when this release displaces someone else's claim: a plain
-        // self-release has no prior holder to name (migration 0003).
-        priorActor: isHolder ? null : claim.actor,
-      },
-      now,
-    );
-
-    return { task, claim };
+    return { task, claim: settled };
   });
 }

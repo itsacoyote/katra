@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { claimFor, claimTask } from "../../src/core/claims/repo.js";
 import { isKatraException } from "../../src/core/errors.js";
+import { listEvents } from "../../src/core/events/repo.js";
 import { addDependency, isReady } from "../../src/core/graph/deps.js";
 import { addLink } from "../../src/core/graph/links.js";
 import { deleteTask } from "../../src/core/tasks/delete.js";
@@ -143,5 +145,35 @@ describe("deleteTask", () => {
 
   it("reports an unknown id as not found", () => {
     expect(() => deleteTask(fixture.store, "zzzz")).toThrowError(/no task matches/);
+  });
+});
+
+describe("claim settlement", () => {
+  it("logs released before the cascade when a claimed task is deleted", () => {
+    const id = seedTask(fixture.store, { title: "claimed then removed" });
+    const { claim } = claimTask(fixture.store, id);
+
+    deleteTask(fixture.store, id);
+
+    // The cascade (ON DELETE CASCADE off the task row) leaves nothing behind
+    // to find — the row is gone either way — but `released` proves it was
+    // recorded before that happened, not merely that the claim vanished.
+    expect(claimFor(fixture.store, id)).toBeNull();
+    const events = listEvents(fixture.store, { entityId: id }).events;
+    // Newest first: deleted is appended after the cascade, released before it.
+    expect(events.map((e) => e.type)).toEqual(["deleted", "released", "claimed"]);
+    const released = events.find((e) => e.type === "released");
+    expect(released?.priorActor).toBeNull();
+    expect(released?.actor).toBe(claim.actor);
+  });
+
+  it("appends no released event when the deleted task was never claimed", () => {
+    const id = seedTask(fixture.store);
+
+    deleteTask(fixture.store, id);
+
+    expect(listEvents(fixture.store, { entityId: id }).events.map((e) => e.type)).toEqual([
+      "deleted",
+    ]);
   });
 });

@@ -1,17 +1,53 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { Identity } from "../../src/core/actor.js";
+import { claimFor, claimTask } from "../../src/core/claims/repo.js";
+import type { EventType } from "../../src/core/enums.js";
 import { TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
+import { listEvents } from "../../src/core/events/repo.js";
 import { addDependency, isReady } from "../../src/core/graph/deps.js";
+import type { OpenStore } from "../../src/core/store.js";
+import { openStore } from "../../src/core/store.js";
 import { cancelTask, closeTask, reopenTask } from "../../src/core/tasks/lifecycle.js";
 import { getTask } from "../../src/core/tasks/repo.js";
 import { runConcurrent } from "../helpers/concurrent.js";
-import { seedTask } from "../helpers/seed.js";
+import { seedClaim, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/**
+ * Lets one test fail the append of a single, named event type — everything
+ * else passes through to the real `appendEvent` untouched. Both
+ * `claims/repo.ts`'s `settleClaim` and this module's own `transition` share
+ * `events/repo.js`, so gating on `event.type` (rather than call order) is
+ * what lets the atomicity test fail *specifically* the lifecycle event
+ * (`closed`) while leaving `settleClaim`'s own `released` append to succeed
+ * on its own — the shape of failure that actually distinguishes "one shared
+ * transaction" from "two separate ones" (see that test).
+ */
+const appendEventHook = vi.hoisted(() => ({ throwOnType: null as EventType | null }));
+vi.mock("../../src/core/events/repo.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../src/core/events/repo.js")>();
+  const appendEvent: typeof original.appendEvent = (store, event, now) => {
+    if (event.type === appendEventHook.throwOnType) {
+      throw new Error(`forced failure appending "${event.type}", to prove atomicity`);
+    }
+    return original.appendEvent(store, event, now);
+  };
+  return { ...original, appendEvent };
+});
+
+const OTHER_IDENTITY: Identity = { worktree: "/repo/wt-other", branch: () => "feature/other" };
+
+/** A second, independent connection to the same store, as a different worktree. */
+function openAs(repoDir: string, identity: Identity): OpenStore {
+  return openStore(repoDir, { identity: () => identity }).store;
+}
 
 let fixture: StoreFixture;
 beforeEach(() => {
   fixture = createStoreFixture();
+  appendEventHook.throwOnType = null;
 });
 afterEach(() => fixture.cleanup());
 
@@ -270,5 +306,113 @@ describe("reopen reports what it took away", () => {
     expect(closeTask(fixture.store, blocker).reblocked).toEqual([]);
     expect(reopenTask(fixture.store, blocker).unblocked).toEqual([]);
     expect(cancelTask(fixture.store, blocker, "dropped").reblocked).toEqual([]);
+  });
+});
+
+describe("claim settlement", () => {
+  it("releases a claim and logs released when a claimed task closes", () => {
+    const id = seedTask(fixture.store);
+    const { claim } = claimTask(fixture.store, id);
+
+    closeTask(fixture.store, id);
+
+    expect(claimFor(fixture.store, id)).toBeNull();
+    const events = listEvents(fixture.store, { entityId: id }).events;
+    // Newest first: the lifecycle event lands after settleClaim's release.
+    expect(events.map((e) => e.type)).toEqual(["closed", "released", "claimed"]);
+    const released = events.find((e) => e.type === "released");
+    expect(released?.priorActor).toBeNull();
+    expect(released?.actor).toBe(claim.actor);
+  });
+
+  it("releases a claim and logs released when a claimed task is cancelled", () => {
+    const id = seedTask(fixture.store);
+    claimTask(fixture.store, id);
+
+    cancelTask(fixture.store, id, "dropped");
+
+    expect(claimFor(fixture.store, id)).toBeNull();
+    const events = listEvents(fixture.store, { entityId: id }).events;
+    expect(events.map((e) => e.type)).toEqual(["cancelled", "released", "claimed"]);
+  });
+
+  it("appends no released event on reopen", () => {
+    // Claiming a terminal task is refused by `claimTask`'s own guard, so
+    // "terminal and still claimed" is reached the way claims.test.ts reaches
+    // its edge states — seeded directly, bypassing the guard — to prove
+    // `reopen` leaves any claim it finds untouched, not merely one it cannot
+    // reach through the normal claim path.
+    const id = seedTask(fixture.store, { lane: "Done" });
+    seedClaim(fixture.store, {
+      taskId: id,
+      holder: "/repo/wt-ghost",
+      actor: "feature/ghost @ /repo/wt-ghost",
+    });
+
+    reopenTask(fixture.store, id);
+
+    expect(claimFor(fixture.store, id)).not.toBeNull();
+    expect(listEvents(fixture.store, { entityId: id }).events.map((e) => e.type)).toEqual([
+      "reopened",
+    ]);
+  });
+
+  it("records the displaced holder when a non-holder closes a claimed task", () => {
+    const id = seedTask(fixture.store);
+    const { claim } = claimTask(fixture.store, id);
+
+    const other = openAs(fixture.repo.dir, OTHER_IDENTITY);
+    try {
+      closeTask(other, id);
+    } finally {
+      other.close();
+    }
+
+    expect(claimFor(fixture.store, id)).toBeNull();
+    const events = listEvents(fixture.store, { entityId: id }).events;
+    expect(events.map((e) => e.type)).toEqual(["closed", "released", "claimed"]);
+    const released = events.find((e) => e.type === "released");
+    // A non-holder settling the claim as a side effect of closing is a
+    // takeover in every way that matters to the event stream, so it carries
+    // the displaced holder exactly the way a forced release does.
+    expect(released?.priorActor).toBe(claim.actor);
+    expect(released?.actor).toBe(`${OTHER_IDENTITY.branch()} @ ${OTHER_IDENTITY.worktree}`);
+  });
+
+  it("appends no released event when the task was never claimed", () => {
+    const id = seedTask(fixture.store);
+
+    closeTask(fixture.store, id);
+
+    expect(listEvents(fixture.store, { entityId: id }).events.map((e) => e.type)).toEqual([
+      "closed",
+    ]);
+  });
+
+  it("lands the lifecycle and released events atomically or not at all", () => {
+    // Fails only the second write — the lifecycle event — after `settleClaim`
+    // has already issued the claim's delete and its own `released` insert.
+    // If those genuinely share `transition`'s transaction, this throw rolls
+    // both back along with the lane update. If a future change ever split
+    // the release into its own, separately-committed transaction, that
+    // release would survive this throw and this assertion would catch it.
+    const id = seedTask(fixture.store);
+    claimTask(fixture.store, id);
+
+    appendEventHook.throwOnType = "closed";
+    try {
+      expect(() => closeTask(fixture.store, id)).toThrowError(/forced failure appending "closed"/);
+    } finally {
+      appendEventHook.throwOnType = null;
+    }
+
+    // Nothing committed: the lane never moved, the claim is still held, and
+    // neither the released nor the closed event exists — the transaction that
+    // wraps both rolled back as one.
+    expect(getTask(fixture.store, id)?.lane).not.toBe("Done");
+    expect(claimFor(fixture.store, id)).not.toBeNull();
+    expect(listEvents(fixture.store, { entityId: id }).events.map((e) => e.type)).toEqual([
+      "claimed",
+    ]);
   });
 });
