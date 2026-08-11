@@ -57,10 +57,11 @@ export type TerminalLane = (typeof TERMINAL_LANES)[number];
 /**
  * Lanes that mean somebody is working on it right now.
  *
- * `board`'s in-flight section, and the reason it is defined by lane rather than
- * by a claim: claims do not exist yet, and lanes are what the store actually
- * records. When claims land this can be refined without the board changing
- * shape.
+ * `board`'s in-flight section, and the reason it is defined by lane rather
+ * than by a claim: lanes are what the store actually records, and F4's
+ * claims deliberately do not redefine this set. ADR-012 settled the question
+ * this comment used to leave open — a claimed task moves no bucket, ever; a
+ * claim only orders and annotates the rows a lane already put here.
  */
 export const IN_FLIGHT_LANES = ["In Progress", "In Review"] as const satisfies readonly Lane[];
 

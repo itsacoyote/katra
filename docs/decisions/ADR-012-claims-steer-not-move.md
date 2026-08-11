@@ -67,6 +67,15 @@ differently: the task leaves every bucket and the counts stop summing.
 - Own-claim resumption makes `claim` idempotent from the holder's side by
   design, which is also what makes the crash-restart story work with no
   reclaim machinery.
+- The same path-identity that makes resumption free accepts a hazard on the
+  other side: a worktree deleted and later recreated at the same filesystem
+  path inherits whatever claim that path held, because nothing distinguishes
+  "the same worktree, still working" from "a new worktree that happens to
+  reuse an old path" (ADR-007's worktree-as-identity choice, carried through
+  here rather than reopened). This ADR does not solve it — the remedy is the
+  same `release --force` every stale claim already has, informed by the
+  holder and liveness a conflict already reports, not a special case for
+  recycled paths.
 
 ## Alternatives considered
 
