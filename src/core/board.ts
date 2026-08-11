@@ -17,13 +17,13 @@
  * different snapshot from the sections beneath them.
  */
 
+import { assembleClaimInfo } from "./claims/repo.js";
 import type { ClaimInfo } from "./claims/types.js";
 import type { BoardCounts, BoardResult, BoardSection, BoardTask } from "./contract.js";
 import { readTx } from "./db/connection.js";
 import { IN_FLIGHT_LANES, sqlEnum, TERMINAL_LANES, UNTRIAGED_LANES } from "./enums.js";
 import { listEvents } from "./events/repo.js";
 import { listBlockersFor, READINESS_VIEW } from "./graph/deps.js";
-import { narrowNullableText, narrowText } from "./narrow.js";
 import { latestHandoff } from "./notes/repo.js";
 import type { OpenStore } from "./store.js";
 import { BRIEF_HANDOFF_CHARS } from "./tasks/brief.js";
@@ -126,21 +126,23 @@ interface BoardRow {
 /**
  * Builds `BoardTask.claim` from one row's joined claim columns.
  *
- * Mirrors `claims/repo.ts`'s `rowToClaimInfo`, narrowed against a
- * differently-shaped row: that module reads one claim by task id and has
- * unprefixed columns to itself, while a board row already carries `id`,
- * `title`, `lane` — so the section query's `SELECT` prefixes every claim
- * column (`claim_holder`, `claim_branch`, …) to keep the two apart.
+ * Narrowing itself lives in `claims/repo.ts`'s exported `assembleClaimInfo`
+ * — the one spelling of "raw columns become a `ClaimInfo`", shared with
+ * `claimFor`. A board row cannot reuse `claimFor`'s own `ClaimRow` shape: it
+ * already carries `id`, `title`, `lane`, so the section query's `SELECT`
+ * prefixes every claim column (`claim_holder`, `claim_branch`, …) to keep
+ * the two apart, and `assembleClaimInfo` takes the five values positionally
+ * rather than a named row shape for exactly that reason.
  */
 function claimFromRow(row: BoardRow): ClaimInfo | null {
   if (row.claim_holder === null) return null;
-  return {
-    holder: narrowText(row.claim_holder, "claim_holder"),
-    actor: narrowText(row.claim_actor, "claim_actor"),
-    claimedAt: narrowText(row.claim_claimed_at, "claim_claimed_at"),
-    branch: narrowNullableText(row.claim_branch, "claim_branch"),
-    lastSeen: narrowNullableText(row.claim_last_seen, "claim_last_seen"),
-  };
+  return assembleClaimInfo(
+    row.claim_holder,
+    row.claim_actor,
+    row.claim_claimed_at,
+    row.claim_branch,
+    row.claim_last_seen,
+  );
 }
 
 function countWhere(store: OpenStore, where: string, params: readonly unknown[] = []): number {

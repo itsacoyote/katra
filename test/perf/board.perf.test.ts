@@ -115,13 +115,15 @@ function seedLargeStore(): OpenStore {
     }
     // Claims + presence (F4 T7): board joins both into every section query
     // now, so a perf seed with an empty `claims` table would measure a query
-    // shape the real one never runs. One in eight tasks is claimed, split
-    // between the caller's own worktree (the ready section's own-vs-other
-    // comparison) and several distinct others (the presence join resolving
-    // more than one cached row).
-    for (let i = 0; i < TASKS; i += 8) {
+    // shape the real one never runs. Roughly one in seven tasks is claimed —
+    // coprime with the six-lane cycle so every lane gets claimed tasks,
+    // rather than landing only on the lanes a stride sharing a factor with 6
+    // would keep hitting — split between the caller's own worktree (the
+    // ready section's own-vs-other comparison) and several distinct others
+    // (the presence join resolving more than one cached row).
+    for (let i = 0; i < TASKS; i += 7) {
       const holder =
-        i % 40 === 0 ? own : (OTHER_WORKTREES[(i / 8) % OTHER_WORKTREES.length] as string);
+        i % 35 === 0 ? own : (OTHER_WORKTREES[(i / 7) % OTHER_WORKTREES.length] as string);
       seedClaim(store, { taskId: taskId(i), holder, claimedAt: stamp });
     }
     for (const worktree of OTHER_WORKTREES) {

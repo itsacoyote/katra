@@ -57,15 +57,39 @@ interface ClaimRow {
   readonly last_seen: unknown;
 }
 
+/**
+ * Assembles a `ClaimInfo` from five raw column values, narrowing each one.
+ *
+ * The one spelling of "raw claim-plus-presence columns become a `ClaimInfo`"
+ * (efficiency review): `rowToClaimInfo` below and `board.ts`'s own
+ * claim-carrying section rows both call this rather than each narrowing the
+ * same five fields under their own column names — `board.ts` prefixes its
+ * columns (`claim_holder`, …) to keep them apart from a task's own `id` and
+ * `title`, so it cannot share `ClaimRow`'s shape, only this assembly.
+ *
+ * Exported here, not moved onto `claims/types.ts`: that module is published
+ * onto the compile-time graph `test/index.test.ts` walks and must stay free
+ * of imports (including `narrow.ts`) — see its own module docs.
+ */
+export function assembleClaimInfo(
+  holder: unknown,
+  actor: unknown,
+  claimedAt: unknown,
+  branch: unknown,
+  lastSeen: unknown,
+): ClaimInfo {
+  return {
+    holder: narrowText(holder, "holder"),
+    actor: narrowText(actor, "actor"),
+    claimedAt: narrowText(claimedAt, "claimedAt"),
+    branch: narrowNullableText(branch, "branch"),
+    lastSeen: narrowNullableText(lastSeen, "lastSeen"),
+  };
+}
+
 /** Maps one row into a domain object, narrowing every column. */
 function rowToClaimInfo(row: ClaimRow): ClaimInfo {
-  return {
-    holder: narrowText(row.holder, "holder"),
-    actor: narrowText(row.actor, "actor"),
-    claimedAt: narrowText(row.claimed_at, "claimed_at"),
-    branch: narrowNullableText(row.branch, "branch"),
-    lastSeen: narrowNullableText(row.last_seen, "last_seen"),
-  };
+  return assembleClaimInfo(row.holder, row.actor, row.claimed_at, row.branch, row.last_seen);
 }
 
 const SELECT_CLAIM = `
