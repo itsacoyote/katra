@@ -38,10 +38,16 @@ differently: the task leaves every bucket and the counts stop summing.
 - The ready section orders unclaimed rows first (their relative order is
   `next`'s ordering, unchanged), then other-worktree-claimed rows last,
   each marked `claimed by <branch> · last seen <ago>`.
-- `next` never offers a task claimed by **another** worktree — and still
-  offers the calling worktree's **own** claims, so a session that loses its
-  context (`/clear`, crash, restart) runs `next` and resumes its task
-  instead of orphaning it.
+- `next` never offers a task claimed by **another** worktree — and ranks
+  the calling worktree's **own** claim first among candidates, so a session
+  that loses its context (`/clear`, crash, restart) runs `next` and resumes
+  its task instead of orphaning it. The resumption stays within `next`'s
+  settled scope: `next` offers **startable** work, so an own claim already
+  moved to `In Progress` is not `next`'s to return — it is the first thing
+  the session-start `board --digest` shows under in flight, and `brief`
+  resumes it from there. One command answers "what do I start", another
+  answers "where was I"; blurring them would put started work back in the
+  startable queue.
 - The agreement invariant evolves with it: the board's first **unclaimed**
   ready row is `next`'s answer, asserted by calling both.
 
