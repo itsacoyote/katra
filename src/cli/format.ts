@@ -6,7 +6,7 @@
  * drift. Every function here is pure: value in, string out.
  */
 
-import { nowIso, timeAgo } from "../core/clock.js";
+import { nowIso, timeAgoOrNull } from "../core/clock.js";
 import type { BoardResult, BoardTask, BriefResult, ClaimInfo } from "../core/contract.js";
 import type { LoggedEvent } from "../core/events/types.js";
 import type { Note } from "../core/notes/types.js";
@@ -46,9 +46,18 @@ const text = (value: string): string => oneLine(value);
  * `claimedAt` is a `--json`-only fact here (spec req 8, amended), so a text
  * reader sees exactly the two facts a claim renders anywhere: holder and
  * liveness.
+ *
+ * `timeAgoOrNull`, not `timeAgo`: `lastSeen` is read back out of `presence`,
+ * a row this renderer does not control and does not fully trust — the same
+ * reason `claims/repo.ts`'s own `describeLiveness` uses the lenient form
+ * rather than the strict one. Before this, a malformed stored timestamp made
+ * `timeAgo` throw *inside a render*, turning `board`/`brief`/`show` into an
+ * exit 1 on the exact claim `release --force` still handled fine — a display
+ * bug reported as a bigger failure than the one it was displaying.
  */
 function claimLiveness(claim: ClaimInfo, now: string): string {
-  return claim.lastSeen === null ? "never seen" : `last seen ${timeAgo(claim.lastSeen, now)}`;
+  const age = claim.lastSeen === null ? null : timeAgoOrNull(claim.lastSeen, now);
+  return age === null ? "never seen" : `last seen ${age}`;
 }
 
 /**

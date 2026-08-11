@@ -36,7 +36,7 @@
  * `resolveWorktree` already accepts this trade-off, and claims only inherits it.
  */
 
-import { timeAgo } from "../clock.js";
+import { timeAgoOrNull } from "../clock.js";
 import { writeTx } from "../db/connection.js";
 import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
@@ -118,31 +118,21 @@ export function claimFor(store: OpenStore, taskId: string): ClaimInfo | null {
 }
 
 /**
- * `iso`'s age relative to `now`, or `null` when `iso` cannot be parsed.
- *
- * `timeAgo` itself stays strict — refusing an unparseable timestamp is the
- * right behaviour for every other caller, which hands it a value katra just
- * wrote. `lastSeen` is different: it is read back out of `presence`, a row
- * this module does not control and does not fully trust — the same posture
- * `tasks/repo.ts` takes toward every column, since the store is written by
- * concurrent processes and, for the migration story, older builds. Letting
- * `timeAgo`'s exception escape a conflict message would turn a malformed
- * `last_seen` into a `validation`/exit 1 refusal in the middle of building a
- * `conflict`/exit 3 one — inverting the exact signal ADR-005 exists to keep
- * distinct: "your request was malformed" instead of "this claim is genuinely
- * contended, try something else."
- */
-function ageOrUnknown(iso: string, now: string): string | null {
-  try {
-    return timeAgo(iso, now);
-  } catch {
-    return null;
-  }
-}
-
-/**
  * The liveness half of a conflict message: `last seen <age>` when a usable
  * observation exists, `never seen (claimed <age> ago)` when it does not.
+ *
+ * Built on `timeAgoOrNull` (`clock.ts`), not `timeAgo` directly. `timeAgo`
+ * itself stays strict — refusing an unparseable timestamp is the right
+ * behaviour for every other caller, which hands it a value katra just wrote.
+ * `lastSeen` and `claimedAt` are different: they are read back out of
+ * `presence`/`claims`, rows this module does not control and does not fully
+ * trust — the same posture `tasks/repo.ts` takes toward every column, since
+ * the store is written by concurrent processes and, for the migration story,
+ * older builds. Letting `timeAgo`'s exception escape a conflict message
+ * would turn a malformed `last_seen` into a `validation`/exit 1 refusal in
+ * the middle of building a `conflict`/exit 3 one — inverting the exact
+ * signal ADR-005 exists to keep distinct: "your request was malformed"
+ * instead of "this claim is genuinely contended, try something else."
  *
  * **`lastSeen === null` is a real, reachable state, not a theoretical one.**
  * `bumpPresence` is deliberately non-fatal (`presence.ts`), so a holder whose
@@ -155,15 +145,15 @@ function ageOrUnknown(iso: string, now: string): string | null {
  * and it deserves an honest "never seen", not a borrowed timestamp dressed up
  * as one.
  *
- * A presence row that exists but fails to parse ({@link ageOrUnknown})
+ * A presence row that exists but fails to parse ({@link timeAgoOrNull})
  * folds into the same `never seen` arm: an unreadable observation is not a
  * usable one either.
  */
 function describeLiveness(claim: ClaimInfo, now: string): string {
-  const lastSeenAge = claim.lastSeen === null ? null : ageOrUnknown(claim.lastSeen, now);
+  const lastSeenAge = claim.lastSeen === null ? null : timeAgoOrNull(claim.lastSeen, now);
   if (lastSeenAge !== null) return `last seen ${lastSeenAge}`;
 
-  const claimedAge = ageOrUnknown(claim.claimedAt, now) ?? "an unknown time";
+  const claimedAge = timeAgoOrNull(claim.claimedAt, now) ?? "an unknown time";
   return `never seen (claimed ${claimedAge} ago)`;
 }
 

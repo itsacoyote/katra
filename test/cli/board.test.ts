@@ -262,6 +262,38 @@ describe("board and claims", () => {
     expect(row).not.toContain("null");
   });
 
+  it("treats an unparseable last_seen as never seen rather than failing the render", async () => {
+    // Mirrors claims.test.ts's "treats an unparseable last_seen as never
+    // seen rather than failing the refusal itself" — a malformed
+    // presence.last_seen (an older build, a corrupt row) reaching `timeAgo`
+    // directly used to throw `validation` mid-render, turning a display
+    // problem on a *different* claim into an exit 1 on the whole board.
+    const task = await add(["contested"]);
+    await lane(task, "Planned");
+    const { store } = openStore(repo.dir, {});
+    try {
+      seedClaim(store, {
+        taskId: task,
+        holder: "/elsewhere/worktree",
+        actor: "feature/other @ /elsewhere/worktree",
+      });
+      seedPresence(store, {
+        worktree: "/elsewhere/worktree",
+        branch: "feature/other",
+        lastSeen: "not-a-timestamp",
+      });
+    } finally {
+      store.close();
+    }
+
+    // `board()` already asserts exit 0.
+    const out = await board();
+
+    const row = out.split("\n").find((line) => line.includes(task)) ?? "";
+    expect(row).toContain("claimed by feature/other");
+    expect(row).toContain("never seen");
+  });
+
   it("carries no marker on a row this worktree claimed itself", async () => {
     // ADR-012: claimed-by-me is deliberately not a marker.
     const task = await add(["mine"]);

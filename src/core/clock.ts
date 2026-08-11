@@ -89,3 +89,25 @@ export function timeAgo(iso: string, now: string): string {
   if (diffMs < MS_PER_DAY) return `${String(Math.floor(diffMs / MS_PER_HOUR))}h ago`;
   return `${String(Math.floor(diffMs / MS_PER_DAY))}d ago`;
 }
+
+/**
+ * {@link timeAgo}, but `null` instead of a thrown exception when `iso`
+ * cannot be parsed — for stored values katra reads back, not ones it just
+ * wrote.
+ *
+ * `timeAgo` stays strict for its ordinary callers, who hand it a timestamp
+ * this process produced moments ago. A value read back out of the store —
+ * `presence.last_seen`, a claim's `claimed_at` — comes from a row this
+ * process does not fully control and should not fully trust: written by
+ * another process, possibly an older build, possibly corrupted. Letting
+ * `timeAgo`'s exception propagate from a rendering path would turn a
+ * malformed stored timestamp into an unrelated command failure; this gives
+ * the caller an honest "I don't know" to fall back on instead.
+ */
+export function timeAgoOrNull(iso: string, now: string): string | null {
+  try {
+    return timeAgo(iso, now);
+  } catch {
+    return null;
+  }
+}
