@@ -21,10 +21,13 @@
  * - **Its own short busy budget.** The presence UPSERT still goes through
  *   {@link writeTx} — every write does — but the connection's `busy_timeout`
  *   is lowered to {@link PRESENCE_BUSY_TIMEOUT_MS} for exactly that one
- *   transaction and restored immediately after, win or lose. `board` and
- *   `brief` are the commands agents poll in a loop; queuing one of them behind
- *   another session's full `BUSY_TIMEOUT_MS` would make the heartbeat cost more
- *   than the read it rides on.
+ *   transaction and restored immediately after, win or lose. The restore reads
+ *   the previous value back from the connection rather than assuming it —
+ *   the connection's normal budget is `BUSY_TIMEOUT_MS`, but asserting that
+ *   here would be a second, driftable copy of a fact the connection already
+ *   knows. `board` and `brief` are the commands agents poll in a loop; queuing
+ *   one of them behind another session's full busy timeout would make the
+ *   heartbeat cost more than the read it rides on.
  * - **Non-fatal, end to end.** Identity resolution and the write itself are
  *   one `try`: a failure of either warns and returns, and the store this was
  *   called from is already built and about to be handed back regardless. A
@@ -41,7 +44,7 @@
  * the same warning on every single command.
  */
 
-import { BUSY_TIMEOUT_MS, writeTx } from "./db/connection.js";
+import { writeTx } from "./db/connection.js";
 import type { OpenStore } from "./store.js";
 
 /**
@@ -54,7 +57,8 @@ import type { OpenStore } from "./store.js";
 export const PRESENCE_FRESH_MS = 30_000;
 
 /**
- * The presence UPSERT's own busy budget — never {@link BUSY_TIMEOUT_MS}.
+ * The presence UPSERT's own busy budget — never the connection's normal
+ * `busy_timeout` ({@link ./db/connection.js!BUSY_TIMEOUT_MS}).
  *
  * Short on purpose: a writer that cannot get the lock inside this window backs
  * off and lets the command it is riding on proceed with no heartbeat this
@@ -126,13 +130,19 @@ export function bumpPresence(store: OpenStore): void {
 
     const branch = store.identity().branch();
 
+    // Read the connection's current budget back rather than assuming
+    // BUSY_TIMEOUT_MS: restoring a hardcoded constant would silently drift
+    // from reality the moment anything ever opened this connection with a
+    // different one, quietly widening or narrowing every write after this
+    // one for the rest of the command.
+    const previousBusyTimeoutMs = db.pragma("busy_timeout", { simple: true }) as number;
     db.pragma(`busy_timeout = ${PRESENCE_BUSY_TIMEOUT_MS}`);
     try {
       writeTx(db, (now) => {
         db.prepare(UPSERT_PRESENCE_SQL).run(worktree, branch, now);
       });
     } finally {
-      db.pragma(`busy_timeout = ${BUSY_TIMEOUT_MS}`);
+      db.pragma(`busy_timeout = ${previousBusyTimeoutMs}`);
     }
   } catch (error) {
     warnOnce(error);

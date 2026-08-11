@@ -259,11 +259,16 @@ describe("composing the actor string from identity", () => {
     cleanups.push(() => store.close());
     // openStore's own presence bump (F4 T3, ADR-011) already resolves both
     // halves of the identity for a freshly created store: the row is absent,
-    // so the bump writes, and writing needs the branch too. The baseline
-    // below already carries that cost — one spawn for openStore's own
-    // store-location lookup, plus the identity pair's rev-parse and
-    // symbolic-ref.
+    // so the bump writes, and writing needs the branch too. Pinned to an
+    // absolute count, not just a relative one: one spawn for openStore's own
+    // store-location lookup, one rev-parse for the worktree, one
+    // symbolic-ref for the branch. That total is the same whether the bump
+    // writes (resolving both itself, as here) or skips (resolving only the
+    // worktree and leaving `actor()` below to resolve the branch lazily) —
+    // memoisation means the count converges to three either way, once
+    // something has asked for the branch once.
     const baseline = counting.calls().length;
+    expect(baseline).toBe(3);
 
     const actorString = store.actor();
     // actor() and identity() reuse that same resolution with no further

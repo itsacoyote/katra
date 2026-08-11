@@ -63,12 +63,15 @@ export interface OpenStore extends Store {
    * invocation, exactly like the store handle does, and four extra parameters
    * carrying one unchanging value is noise at every call site.
    *
-   * A function, not a value, so it stays lazy — resolving it costs two
-   * subprocess spawns, and `list`, `show` and `next` must not pay for an actor
-   * they never stamp. Memoised, so a command writing several events resolves
-   * once. Composed from {@link identity}'s own resolution rather than
-   * resolving independently, so asking for both never spawns git twice for
-   * the same worktree-and-branch pair.
+   * A function, not a value, so it stays as lazy as presence's own heartbeat
+   * (F4 T3, ADR-011) allows: `openStore` already resolves the worktree on
+   * every open for the freshness check, and the branch too whenever the bump
+   * actually writes — so `actor()` costs a fresh spawn only for the branch,
+   * and only on a command whose presence row was fresh enough to skip the
+   * write. Memoised, so a command writing several events resolves once, and
+   * composed from {@link identity}'s own resolution rather than resolving
+   * independently, so asking for both never spawns git twice for the same
+   * worktree-and-branch pair — nor twice against what the bump already paid.
    */
   readonly actor: () => string;
   /**

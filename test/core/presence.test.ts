@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Identity } from "../../src/core/actor.js";
+import { openDatabase } from "../../src/core/db/connection.js";
 import { bumpPresence, readPresence } from "../../src/core/presence.js";
 import { openStore } from "../../src/core/store.js";
 import { runCli } from "../helpers/cli.js";
@@ -7,6 +8,11 @@ import { runConcurrent } from "../helpers/concurrent.js";
 import { createGitRepo } from "../helpers/fixture.js";
 import { seedPresence, seedTime } from "../helpers/seed.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/** Waits `ms` without blocking the event loop — a spawn is still in flight. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 describe("bumpPresence", () => {
   it("bumps last_seen when the row is absent or stale", () => {
@@ -81,6 +87,11 @@ describe("bumpPresence", () => {
     fixture.cleanup();
 
     expect(emitWarning).toHaveBeenCalledTimes(1);
+    // The type string is load-bearing: events.test.ts's contention test
+    // filters its stderr assertion on exactly this string.
+    expect(emitWarning).toHaveBeenCalledWith(expect.stringContaining("could not update presence"), {
+      type: "KatraPresenceWarning",
+    });
 
     repo.cleanup();
     emitWarning.mockRestore();
@@ -97,10 +108,34 @@ describe("bumpPresence", () => {
       createIfMissing: true,
       identity: () => ({ worktree: "/repo/wt-setup", branch: () => "main" }),
     });
+    const dbPath = setup.store.dbPath;
     setup.store.close();
 
+    // Forced, deterministic contention rather than hoping six real
+    // processes collide by chance: a 7th connection takes the write lock
+    // and sits on it for ~800ms — above PRESENCE_BUSY_TIMEOUT_MS (200) and
+    // far below the connection's own BUSY_TIMEOUT_MS (7500) — before the
+    // six openers below even start racing for it.
+    const HOLD_MS = 800;
+    const holder = openDatabase(dbPath);
+    holder.exec("BEGIN IMMEDIATE");
+    const holdStartedAt = Date.now();
+
+    // `runConcurrent`'s own barrier releases every worker at (call time +
+    // 300 + count*40) — 540ms for six — to give six processes room to
+    // spawn and import before they race. Waiting here before calling it
+    // lands the six openers' arrival about 220ms before the holder
+    // releases (measured: t0 ≈ 760ms after holdStartedAt against an
+    // 800ms hold), so they find the lock genuinely taken — proving the
+    // short budget is exercised, not skipped — with enough margin left in
+    // their own 200ms budget to also absorb the six openers then briefly
+    // queuing behind *each other* once the lock frees (measured up to
+    // ~100ms of that on this machine) — proving the budget is sufficient,
+    // not merely non-blocking.
+    await sleep(220);
+
     const started = performance.now();
-    const outcomes = await runConcurrent<{ elapsedMs: number }>({
+    const outcomesPromise = runConcurrent<{ elapsedMs: number }>({
       count: 6,
       source: `
           const { openStore } = await import(${JSON.stringify(
@@ -116,6 +151,17 @@ describe("bumpPresence", () => {
           report({ elapsedMs });
         `,
     });
+
+    // Hold for exactly HOLD_MS regardless of how long the setup above
+    // (the sleep, runConcurrent's own synchronous spawn bookkeeping) took —
+    // measuring the remainder rather than sleeping a second fixed amount
+    // keeps the total hold precise.
+    const remainingMs = HOLD_MS - (Date.now() - holdStartedAt);
+    if (remainingMs > 0) await sleep(remainingMs);
+    holder.exec("COMMIT");
+    holder.close();
+
+    const outcomes = await outcomesPromise;
     const totalElapsedMs = performance.now() - started;
 
     const failures = outcomes.filter((o) => !o.ok);
@@ -124,12 +170,74 @@ describe("bumpPresence", () => {
     const values = outcomes.map((o) => o.value).filter((v) => v !== undefined);
     expect(values).toHaveLength(6);
 
-    // Six openers serialised behind the connection's full 7500ms busy
-    // timeout would take upward of 45 seconds combined. Presence's own
-    // short budget keeps every individual open, and the whole race, well
-    // under that.
-    for (const { elapsedMs } of values) expect(elapsedMs).toBeLessThan(2000);
-    expect(totalElapsedMs).toBeLessThan(5000);
+    // Racing into a lock held for ~800ms while serialised behind the
+    // connection's full 7500ms busy timeout would take seconds per opener.
+    // Presence's own short budget keeps every individual open close to
+    // that budget, not the old 2000ms bound.
+    for (const { elapsedMs } of values) expect(elapsedMs).toBeLessThan(500);
+    expect(totalElapsedMs).toBeLessThan(3000);
+
+    // Post-race row verification: the short budget was sufficient, not
+    // merely non-blocking — every opener actually got its row written,
+    // despite racing into a genuinely held lock.
+    const verify = openDatabase(dbPath);
+    const rows = verify.prepare("SELECT worktree FROM presence ORDER BY worktree").all() as Array<{
+      worktree: string;
+    }>;
+    verify.close();
+
+    const expectedWorktrees = [
+      "/repo/wt-setup",
+      ...Array.from({ length: 6 }, (_unused, i) => `/repo/wt-${i}`),
+    ].sort();
+    expect(rows.map((r) => r.worktree)).toEqual(expectedWorktrees);
+
+    // The six openers above prove the short budget is *sufficient*, not
+    // that it is short: they were deliberately timed to need less than
+    // PRESENCE_BUSY_TIMEOUT_MS, so they would still all succeed even
+    // riding on the connection's full 7500ms budget — that comparison
+    // alone cannot tell the two apart. This probe can: a second holder is
+    // released only once the probe's own process has exited, so from the
+    // probe's side the lock is held indefinitely — nothing frees it until
+    // the probe itself gives up. A lone opener, in its own process (a
+    // synchronous `openStore` in *this* process would deadlock against a
+    // lock only this same single thread could release), races that hold
+    // with nothing but its own busy_timeout to say when to stop. On
+    // PRESENCE_BUSY_TIMEOUT_MS it must give up near 200ms, never writing;
+    // on the connection's full budget it would sit for seconds instead —
+    // which is exactly the distinction the six openers above cannot make.
+    const secondHold = openDatabase(dbPath);
+    secondHold.exec("BEGIN IMMEDIATE");
+
+    const probeOutcomes = await runConcurrent<{ elapsedMs: number }>({
+      count: 1,
+      source: `
+          const { openStore } = await import(${JSON.stringify(
+            new URL("../../src/core/store.ts", import.meta.url).href,
+          )});
+          barrier();
+          const startedAt = performance.now();
+          const { store } = openStore(${JSON.stringify(repo.dir)}, {
+            identity: () => ({ worktree: "/repo/wt-probe", branch: () => "main" }),
+          });
+          const elapsedMs = performance.now() - startedAt;
+          store.close();
+          report({ elapsedMs });
+        `,
+    });
+    secondHold.exec("COMMIT");
+    secondHold.close();
+
+    expect(probeOutcomes[0]?.ok).toBe(true);
+    const probeElapsedMs = probeOutcomes[0]?.value?.elapsedMs;
+    expect(probeElapsedMs).toBeLessThan(500);
+
+    const probeVerify = openDatabase(dbPath);
+    const probeRow = probeVerify
+      .prepare("SELECT worktree FROM presence WHERE worktree = ?")
+      .get("/repo/wt-probe");
+    probeVerify.close();
+    expect(probeRow).toBeUndefined();
 
     repo.cleanup();
   });
@@ -149,6 +257,17 @@ describe("bumpPresence", () => {
     // something that actually blocks a read, e.g. falling back to the
     // connection's full busy timeout instead of its own short one.
     expect(elapsedMs).toBeLessThan(3000);
+
+    // AC1: the row exists after any command, board included — a read, not
+    // just a write. `repo.dir` is already the resolved worktree path
+    // (`createGitRepo` resolves it the same way `resolveWorktree` reports
+    // it), so it is the exact key both `init` and `board` bumped.
+    const verify = openStore(repo.dir);
+    const row = readPresence(verify.store, repo.dir);
+    verify.store.close();
+
+    expect(row).not.toBeNull();
+    expect(Date.now() - Date.parse(row?.lastSeen ?? "")).toBeLessThan(10_000);
 
     repo.cleanup();
   });
