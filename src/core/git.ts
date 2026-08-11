@@ -127,7 +127,7 @@ function explainGitFailure(failure: GitFailure): KatraException {
       code: "validation",
       message:
         `this git is too old: katra needs git ${MINIMUM_GIT_VERSION} or newer for ` +
-        `\`rev-parse --path-format\`\n${stderr.trim()}`,
+        `\`rev-parse --path-format\` — ${stderr.trim()}`,
       field: "git",
       value: "path-format",
     });
@@ -141,7 +141,7 @@ function explainGitFailure(failure: GitFailure): KatraException {
       code: "validation",
       message:
         "this worktree's main repository is missing or has moved, so git cannot " +
-        `resolve it\n${stderr.trim()}`,
+        `resolve it — ${stderr.trim()}`,
       field: "worktree",
       value: stderr.trim(),
     });
