@@ -49,8 +49,12 @@ Three properties keep the bump honest:
 - The F3 read-purity tests are amended deliberately: they now assert "no
   event appended" and additionally that `last_seen` moved — the narrowed
   contract is pinned as tightly as the old one was.
-- Every katra invocation costs one single-row UPSERT. Measured against the
-  same budget discipline as F3: the perf criterion covers it.
+- Every katra invocation costs at most one single-row UPSERT, and most
+  cost none: the bump skips while the row is fresher than
+  `PRESENCE_FRESH_MS` (30s), keyed on the worktree alone. A branch change
+  inside that window is therefore picked up by the next write — at most
+  30s stale, in a display that reports minutes. Measured against the same
+  budget discipline as F3: the perf criterion covers it.
 - `--json` output is unaffected; the bump changes no document.
 - A scripted probe that must not register presence does not exist as a use
   case today; if one appears, an opt-out flag is additive.

@@ -48,8 +48,12 @@ differently: the task leaves every bucket and the counts stop summing.
   resumes it from there. One command answers "what do I start", another
   answers "where was I"; blurring them would put started work back in the
   startable queue.
-- The agreement invariant evolves with it: the board's first **unclaimed**
-  ready row is `next`'s answer, asserted by calling both.
+- The agreement invariant evolves with it: **when the caller holds no
+  Planned claim of its own**, the board's first unclaimed ready row is
+  `next`'s answer, asserted by calling both. An own Planned claim is the
+  one sanctioned divergence — `next` resumes it while the board leads with
+  the top-priority unclaimed row — and a test pins the divergence
+  deliberately rather than letting it read as drift.
 
 ## Consequences
 
