@@ -315,9 +315,9 @@ describe("claims steer the candidate query (F4 T6)", () => {
   });
 
   it("reports claimed-elsewhere separately from an empty backlog", () => {
-    const empty = nextTask(fixture.store);
-    expect(empty).toEqual({ status: "none", blocked: [], untriaged: 0, claimedElsewhere: 0 });
-
+    // The empty-store baseline (claimedElsewhere: 0) is already pinned by
+    // "distinguishes an empty backlog from a fully blocked one" above; this
+    // test's job is the claimed case itself.
     const claimed = planned("taken");
     seedClaim(fixture.store, { taskId: claimed, holder: OTHER_WORKTREE });
 

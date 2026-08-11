@@ -73,15 +73,30 @@ describe("katra next", () => {
     expect(result.stdout).toContain("blocked");
     expect(result.stdout).toContain("cannot start");
     expect(result.stdout).toContain("claimed by another worktree");
+    // The blocked lead has to become claim-aware too: "no Planned task is
+    // ready" reads as if none exists at all, when one does and is merely
+    // held elsewhere.
+    expect(result.stdout).not.toMatch(/no Planned task is ready/);
+    expect(result.stdout).toContain("no unclaimed Planned task is ready");
   });
 
-  it("reports claimedElsewhere on the none arm's --json, distinct from empty", async () => {
-    const empty = await runCli(["next", "--json"], { cwd: repo.dir });
-    const emptyJson = empty.json() as NextResult;
-    expect(emptyJson.status).toBe("none");
-    if (emptyJson.status !== "none") throw new Error("unreachable");
-    expect(emptyJson.claimedElsewhere).toBe(0);
+  it("drops the empty-lane claim when untriaged work coexists with a claim", async () => {
+    // The same self-contradiction, on the untriaged lead: "nothing is in the
+    // Planned lane" over a backlog that has a Planned task, merely claimed.
+    await add(["never triaged"]); // stays Defined — untriaged, not blocked
+    const claimed = await add(["ready but taken"]);
+    await lane(claimed, "Planned");
+    claimElsewhere(claimed);
 
+    const result = await runCli(["next"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).not.toContain("nothing is in the Planned lane");
+    expect(result.stdout).toContain("waiting to be planned");
+    expect(result.stdout).toContain("claimed by another worktree");
+  });
+
+  it("surfaces claimedElsewhere on the none arm's --json payload", async () => {
     const task = await add(["ready but taken"]);
     await lane(task, "Planned");
     claimElsewhere(task);

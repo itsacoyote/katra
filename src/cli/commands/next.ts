@@ -27,13 +27,22 @@ function formatNext(result: NextResult): string {
   // mutually exclusive — a backlog can be blocked *and* claimed at once, so
   // each fact that applies gets its own section rather than one branch
   // winning and silencing the rest (iteration-3 addendum).
+  //
+  // `contended` reshapes the blocked/untriaged leads themselves — not just
+  // whether a claimed section is appended — because both of their unqualified
+  // forms assert something false the moment a claim is in play: "no Planned
+  // task is ready" reads as if none exists, when one does and is merely held
+  // elsewhere, and "nothing is in the Planned lane" is the literal ADR-012
+  // violation this exists to prevent.
+  const contended = result.claimedElsewhere > 0;
   const sections: string[] = [];
 
   if (result.blocked.length > 0) {
     // Naming the blockers turns "nothing to do" into "clear this first".
+    const scope = contended ? `unclaimed ${NEXT_LANE}` : NEXT_LANE;
     sections.push(
       [
-        `no ${NEXT_LANE} task is ready — ${result.blocked.length} blocked:`,
+        `no ${scope} task is ready — ${result.blocked.length} blocked:`,
         ...result.blocked.flatMap((task) => [
           `  ${task.id}  ${task.title}`,
           ...task.blockers.map(
@@ -48,20 +57,17 @@ function formatNext(result: NextResult): string {
     // never heard of and given no way forward.
     const count =
       result.untriaged === 1 ? "1 unfinished task is" : `${result.untriaged} unfinished tasks are`;
+    const lead = contended
+      ? `${count} waiting to be planned.`
+      : `nothing is in the ${NEXT_LANE} lane — ${count} waiting to be planned.`;
     sections.push(
-      `nothing is in the ${NEXT_LANE} lane — ${count} waiting to be planned.\n` +
+      `${lead}\n` +
         `  see them with \`katra list --ready\`, then plan one with ` +
         `\`katra update <id> --lane ${NEXT_LANE}\``,
     );
-  } else if (result.claimedElsewhere === 0) {
-    // Genuinely nothing: no blocked work, nothing untriaged, nothing claimed.
-    sections.push(`nothing is in the ${NEXT_LANE} lane, and there is no unfinished work elsewhere`);
   }
 
-  if (result.claimedElsewhere > 0) {
-    // An all-claimed-elsewhere backlog must never read as an empty store
-    // (ADR-012): this line always fires when it applies, so "nothing is in
-    // the Planned lane" never stands alone over work that is merely taken.
+  if (contended) {
     const count =
       result.claimedElsewhere === 1
         ? "1 ready task is"
@@ -70,6 +76,13 @@ function formatNext(result: NextResult): string {
       `${count} claimed by another worktree — pick different work, or ` +
         `\`katra release <id> --force\` to take one over`,
     );
+  }
+
+  // Genuinely nothing: no blocked work, nothing untriaged, nothing claimed.
+  // A length check rather than a third condition mirroring the two above —
+  // this is the one case none of them fired, not a fourth fact of its own.
+  if (sections.length === 0) {
+    sections.push(`nothing is in the ${NEXT_LANE} lane, and there is no unfinished work elsewhere`);
   }
 
   return sections.join("\n\n");

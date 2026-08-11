@@ -24,20 +24,23 @@ export type { BlockedTask, NextResult };
 export const NEXT_LANE = "Planned";
 
 /**
+ * The tail every ranking in this module ends with: priority, then oldest
+ * first, then `rowid` — the last because two tasks written in the same
+ * millisecond are routine and would otherwise come back in an arbitrary
+ * order between runs. The `t.` prefix is part of it: every consumer aliases
+ * `tasks` to `t`.
+ */
+const RANKING_TAIL = "t.priority, t.created_at, t.rowid";
+
+/**
  * How katra ranks tasks against each other, everywhere.
- *
- * Priority, then oldest first, then `rowid` — the last because two tasks
- * written in the same millisecond are routine and would otherwise come back in
- * an arbitrary order between runs.
  *
  * Exported because `board` ranks three sections by it and this fragment is
  * already hand-written at seven call sites. An eighth and ninth typed by hand
  * is how two commands quietly start disagreeing about what comes first — and
  * `board`'s contract is that its top ready row *is* what `next` returns.
- *
- * The `t.` prefix is part of it: every consumer aliases `tasks` to `t`.
  */
-export const TASK_RANKING = "ORDER BY t.priority, t.created_at, t.rowid";
+export const TASK_RANKING = `ORDER BY ${RANKING_TAIL}`;
 
 /**
  * {@link TASK_RANKING} with an extra sort key spliced in ahead of priority.
@@ -45,12 +48,11 @@ export const TASK_RANKING = "ORDER BY t.priority, t.created_at, t.rowid";
  * The composition point plan-review MEDIUM-6 asked for: `next` leads with
  * "claimed by me first" ({@link OWN_CLAIM_FIRST} below), and T7's board ready
  * section leads with "unclaimed first, other-claimed last" (ADR-012). Both
- * want the same "priority, then oldest, then rowid" tail, and a ninth
- * hand-typed copy of it is exactly the drift {@link TASK_RANKING}'s own docs
- * warn about.
+ * want {@link RANKING_TAIL}, and a ninth hand-typed copy of it is exactly the
+ * drift {@link TASK_RANKING}'s own docs warn about.
  */
 export function rankingWith(prefix: string): string {
-  return `ORDER BY ${prefix}, t.priority, t.created_at, t.rowid`;
+  return `ORDER BY ${prefix}, ${RANKING_TAIL}`;
 }
 
 /**
@@ -255,13 +257,13 @@ function countClaimedElsewhere(store: OpenStore, filters: NextFilters, worktree:
   const ready = readyPredicate(filters);
   const row = store.db
     .prepare(
-      `SELECT COUNT(*) AS c FROM tasks t
+      `SELECT COUNT(*) AS claimed FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
          ${CLAIMS_JOIN}
         WHERE ${ready.sql} AND ${CLAIMED_ELSEWHERE}`,
     )
-    .get(...ready.params, worktree) as { c: number };
-  return row.c;
+    .get(...ready.params, worktree) as { claimed: number };
+  return row.claimed;
 }
 
 /**
