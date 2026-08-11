@@ -10,6 +10,7 @@
 import type { StoreWarning } from "../core/db/locate.js";
 import type { KatraErrorCode, KatraErrorDetail } from "../core/errors.js";
 import { isKatraException } from "../core/errors.js";
+import { oneLine } from "./format.js";
 
 /** Process exit codes, per requirement 49. */
 export const EXIT = {
@@ -137,7 +138,12 @@ export function emitError(error: unknown, options: EmitOptions): number {
   if (options.json) {
     streams.out(`${JSON.stringify({ error: detail }, null, 2)}\n`);
   } else {
-    streams.err(`katra: ${detail.message}\n`);
+    // `oneLine`: a KatraException's message is no longer built only from
+    // literal strings and ids — F4's claim conflicts interpolate a stored
+    // actor string, which nothing upstream sanitizes. Left raw, an ESC
+    // sequence or an embedded newline in that string would execute on, or
+    // reflow, whatever terminal renders the refusal.
+    streams.err(`katra: ${oneLine(detail.message)}\n`);
     streams.err(formatErrorHint(detail));
   }
   // `internal` is a member of the detail union because the envelope above can

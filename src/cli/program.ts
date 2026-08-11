@@ -16,6 +16,7 @@ import { readPipedStdin } from "./body.js";
 import { registerAdd } from "./commands/add.js";
 import { registerBoard } from "./commands/board.js";
 import { registerBrief } from "./commands/brief.js";
+import { registerClaim } from "./commands/claim.js";
 import { registerDelete } from "./commands/delete.js";
 import { registerDep } from "./commands/dep.js";
 import { registerInit } from "./commands/init.js";
@@ -25,6 +26,7 @@ import { registerList } from "./commands/list.js";
 import { registerLog } from "./commands/log.js";
 import { registerNext } from "./commands/next.js";
 import { registerNote } from "./commands/note.js";
+import { registerRelease } from "./commands/release.js";
 import { registerShow } from "./commands/show.js";
 import { registerUpdate } from "./commands/update.js";
 import type { OutputStreams } from "./output.js";
@@ -234,6 +236,8 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerNext(program, context);
   registerBrief(program, context);
   registerBoard(program, context);
+  registerClaim(program, context);
+  registerRelease(program, context);
 
   return program;
 }

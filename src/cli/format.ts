@@ -142,8 +142,15 @@ export function formatUpdatedTasks(tasks: readonly TaskDetail[]): string {
  * get pasted, and a raw ANSI escape executes on whatever renders it.
  *
  * Note *bodies* are the deliberately-multiline case and are not rendered here.
+ *
+ * Exported for `cli/output.ts`: `emitError`'s text-mode message is built from
+ * `KatraErrorDetail.message`, which F4's claim conflicts populate with a
+ * stored actor string — the first core message to carry free-form stored
+ * text straight to stderr. Wrapping it here, rather than duplicating this
+ * function, keeps every untrusted-text rendering in katra going through one
+ * definition.
  */
-function oneLine(value: string): string {
+export function oneLine(value: string): string {
   return value.replaceAll(CONTROLS, " ").replaceAll(BIDI, "").trim();
 }
 
