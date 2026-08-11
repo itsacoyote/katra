@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ISO_TIMESTAMP_LENGTH, nowIso, toIso } from "../../src/core/clock.js";
+import { ISO_TIMESTAMP_LENGTH, nowIso, timeAgo, toIso } from "../../src/core/clock.js";
 
 describe("clock", () => {
   it("produces a fixed-width ISO-8601 timestamp ending in Z", () => {
@@ -52,5 +52,27 @@ describe("clock", () => {
 
   it("rejects an invalid date rather than emitting 'Invalid Date'", () => {
     expect(() => toIso(new Date("not a date"))).toThrow();
+  });
+});
+
+describe("timeAgo", () => {
+  const now = "2026-08-11T12:00:00.000Z";
+
+  it("describes ages in minutes, hours and days", () => {
+    expect(timeAgo("2026-08-11T11:59:30.000Z", now)).toBe("just now");
+    expect(timeAgo("2026-08-11T11:55:00.000Z", now)).toBe("5m ago");
+    expect(timeAgo("2026-08-11T11:00:01.000Z", now)).toBe("59m ago");
+    expect(timeAgo("2026-08-11T10:00:00.000Z", now)).toBe("2h ago");
+    expect(timeAgo("2026-08-10T13:00:00.000Z", now)).toBe("23h ago");
+    expect(timeAgo("2026-08-09T12:00:00.000Z", now)).toBe("2d ago");
+    expect(timeAgo("2026-07-01T12:00:00.000Z", now)).toBe("41d ago");
+  });
+
+  it("treats a future last-seen as just now", () => {
+    // Clock skew between the reader and the writer, or a presence row bumped
+    // after `now` was captured, can put `iso` at or after `now`. A negative
+    // duration would read as a bug rather than jitter.
+    expect(timeAgo("2026-08-11T12:00:00.000Z", now)).toBe("just now");
+    expect(timeAgo("2026-08-11T13:00:00.000Z", now)).toBe("just now");
   });
 });
