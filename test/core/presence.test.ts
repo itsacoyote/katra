@@ -36,6 +36,31 @@ describe("bumpPresence", () => {
     fixture.cleanup();
   });
 
+  it("picks up a branch change on the next write after the window", () => {
+    // ADR-011's stated consequence, pinned directly rather than left to
+    // follow from the skip test's inverse: "a branch change inside the
+    // window is picked up by the next write" — proven through `openStore`
+    // itself, the same door every real command passes through, not by
+    // calling `bumpPresence` a second time by hand.
+    const worktree = "/repo/presence-branch-pickup";
+    const identity: Identity = { worktree, branch: () => "feature/current" };
+    const fixture = createStoreFixture({ identity });
+
+    // A stale row recorded under a different branch — as if this worktree's
+    // last heartbeat predated a rename.
+    const stale = seedTime();
+    seedPresence(fixture.store, { worktree, branch: "old-branch", lastSeen: stale });
+
+    const reopened = openStore(fixture.repo.dir, { identity: () => identity });
+    reopened.store.close();
+
+    const after = readPresence(fixture.store, worktree);
+    expect(after?.branch).toBe("feature/current");
+    expect(Date.parse(after?.lastSeen ?? "")).toBeGreaterThan(Date.parse(stale));
+
+    fixture.cleanup();
+  });
+
   it("skips the write and the branch spawn when the row is fresh", () => {
     const worktree = "/repo/presence-fresh";
     const branch = vi.fn(() => "main");
