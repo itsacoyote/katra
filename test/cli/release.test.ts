@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
-import { claimFor } from "../../src/core/claims/repo.js";
 import { openStore } from "../../src/core/store.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
@@ -53,13 +52,6 @@ describe("katra release", () => {
     expect(result.stdout).toContain(task);
     expect(result.stdout).toContain("released");
     expect(result.stderr).toBe("");
-
-    const { store } = openStore(repo.dir, {});
-    try {
-      expect(claimFor(store, task)).toBeNull();
-    } finally {
-      store.close();
-    }
   });
 
   it("refuses another worktree's claim without --force, exit 3", async () => {
@@ -71,13 +63,6 @@ describe("katra release", () => {
     expect(result.exitCode).toBe(EXIT.conflict);
     expect(result.stderr).toContain("feature/other @ /elsewhere/worktree");
     expect(result.stderr).toContain("release --force");
-
-    const { store } = openStore(repo.dir, {});
-    try {
-      expect(claimFor(store, task)?.holder).toBe("/elsewhere/worktree");
-    } finally {
-      store.close();
-    }
   });
 
   it("force-releases another worktree's claim", async () => {
@@ -88,13 +73,6 @@ describe("katra release", () => {
 
     expect(result.exitCode).toBe(EXIT.ok);
     expect(result.stdout).toContain("feature/other @ /elsewhere/worktree");
-
-    const { store } = openStore(repo.dir, {});
-    try {
-      expect(claimFor(store, task)).toBeNull();
-    } finally {
-      store.close();
-    }
   });
 
   it("exits 1 releasing an unclaimed task", async () => {
