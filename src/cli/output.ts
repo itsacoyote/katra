@@ -138,11 +138,19 @@ export function emitError(error: unknown, options: EmitOptions): number {
   if (options.json) {
     streams.out(`${JSON.stringify({ error: detail }, null, 2)}\n`);
   } else {
-    // `oneLine`: a KatraException's message is no longer built only from
-    // literal strings and ids — F4's claim conflicts interpolate a stored
-    // actor string, which nothing upstream sanitizes. Left raw, an ESC
+    // `oneLine`: applies to every message here, not only the ones built from
+    // untrusted input — one-line-per-error is the contract this stream keeps,
+    // full stop, so a caller parsing stderr by line never has to special-case
+    // which errors might wrap. It also happens to be load-bearing for the
+    // messages that need it: a KatraException's message is no longer built
+    // only from literal strings and ids — F4's claim conflicts interpolate a
+    // stored actor string, which nothing upstream sanitizes. Left raw, an ESC
     // sequence or an embedded newline in that string would execute on, or
-    // reflow, whatever terminal renders the refusal.
+    // reflow, whatever terminal renders the refusal. A message authored with
+    // its own newline (`git.ts`'s failure text, for one) collapses the same
+    // way — write it as one line to begin with (`" — "`, not `"\n"`, joins a
+    // lead-in to appended detail) rather than relying on this to make it read
+    // correctly after the fact.
     streams.err(`katra: ${oneLine(detail.message)}\n`);
     streams.err(formatErrorHint(detail));
   }
