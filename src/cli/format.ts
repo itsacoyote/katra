@@ -474,9 +474,9 @@ const PREVIEW_WIDTH = 56;
  * A task with no notes and no activity gets neither heading: an empty section
  * is a line that says nothing happened, which the absence already says.
  *
- * `now` defaults to the real instant — see {@link formatTaskDetail} — and is
- * threaded through so the claim line and every activity row it renders
- * alongside describe one consistent "now", not a resolved-per-field one.
+ * `now` defaults to the real instant — see {@link formatTaskDetail} — and
+ * feeds the claim line's age alone. Notes and activity rows below render
+ * absolute timestamps and do not depend on it.
  */
 export function formatTaskView(view: TaskView, now: string = nowIso()): string {
   const lines = [formatTaskDetail(view, view.claim, now)];
