@@ -214,6 +214,27 @@ export function seedPresence(store: OpenStore, input: SeedPresenceInput): void {
     .run(input.worktree, input.branch ?? "main", input.lastSeen ?? seedTime());
 }
 
+export interface SeedClaimInput {
+  readonly taskId: string;
+  /** The absolute worktree path holding the claim. */
+  readonly holder: string;
+  readonly actor?: string;
+  readonly claimedAt?: string;
+}
+
+/**
+ * Writes one claim row directly, bypassing `claimTask`'s CAS and guards.
+ *
+ * For tests that need a task already claimed by a *specific* worktree —
+ * commonly one other than the store's own default identity, to set up a
+ * contended-claim scenario — without exercising the claim path under test.
+ */
+export function seedClaim(store: OpenStore, input: SeedClaimInput): void {
+  store.db
+    .prepare("INSERT INTO claims (task_id, holder, actor, claimed_at) VALUES (?,?,?,?)")
+    .run(input.taskId, input.holder, input.actor ?? SEED_ACTOR, input.claimedAt ?? seedTime());
+}
+
 /** Inserts one note and returns its id. */
 export function seedNote(store: OpenStore, input: SeedNoteInput): string {
   const id = input.id ?? seedNoteId();
