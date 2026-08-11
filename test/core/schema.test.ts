@@ -12,6 +12,7 @@ import {
   MIGRATIONS,
 } from "../../src/core/db/migrations/index.js";
 import { EVENT_TYPES, LANES, NOTE_KINDS } from "../../src/core/enums.js";
+import { rowToEvent } from "../../src/core/events/repo.js";
 import { generateId, NOTE_ID_PREFIX } from "../../src/core/id-format.js";
 
 type DB = Database.Database;
@@ -73,7 +74,7 @@ describe("initial schema", () => {
     expect(MIGRATIONS[0]?.name).toBe("init");
     // Ordered, and every version distinct: `migrate` filters and sorts by
     // version, so a duplicate or a gap would silently skip a step.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3]);
   });
 
   it("matches the committed schema byte for byte", () => {
@@ -498,7 +499,10 @@ describe("migration 0002 — events and notes", () => {
     rawInsert(db, baseTask({ title: "survives the migration" }));
 
     expect(readSchemaVersion(db)).toBe(1);
-    expect(migrate(db, MIGRATIONS)).toBe(1);
+    // Scoped to steps 1-2 deliberately: migration 0003's own v2->v3 path has
+    // its own describe block below, and running the full MIGRATIONS list here
+    // would carry this store past v2 without this test saying so.
+    expect(migrate(db, MIGRATIONS.slice(0, 2))).toBe(1);
     expect(readSchemaVersion(db)).toBe(2);
 
     expect(db.prepare("SELECT title FROM tasks WHERE id='kt-aaaaaa'").get()).toEqual({
@@ -510,7 +514,7 @@ describe("migration 0002 — events and notes", () => {
   it("brings a fresh store straight to version 2", () => {
     const db = new Database(":memory:");
     expect(readSchemaVersion(db)).toBe(0);
-    expect(migrate(db, MIGRATIONS)).toBe(2);
+    expect(migrate(db, MIGRATIONS.slice(0, 2))).toBe(2);
     expect(readSchemaVersion(db)).toBe(2);
 
     const names = db
@@ -687,5 +691,150 @@ describe("buildEventsDdl's own inputs", () => {
         /noteIdPrefix must be/,
       );
     }
+  });
+});
+
+describe("migration 0003 — claims and presence", () => {
+  /** A store at exactly v2, as an installation before this feature would have. */
+  function v2Store(): DB {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, MIGRATIONS.slice(0, 2));
+    return db;
+  }
+
+  function freshV3(): DB {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, MIGRATIONS);
+    return db;
+  }
+
+  const event = (db: DB, row: Record<string, unknown>): void => {
+    const full = {
+      type: "created",
+      entity_id: "kt-aaaaaa",
+      actor: "main @ /repo",
+      created_at: TS,
+      ...row,
+    };
+    const cols = Object.keys(full);
+    db.prepare(
+      `INSERT INTO events (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+    ).run(...Object.values(full));
+  };
+
+  it("matches the pinned v3 schema fixture", () => {
+    // Same reason as v1 and v2's snapshots — this DDL is rendered from
+    // EVENT_TYPES at import time. The warning that matters here more than for
+    // either earlier snapshot: this proves the DDL *text*, nothing about
+    // whether the rebuild it describes actually preserves a store's data —
+    // that is what the next three tests are for.
+    const golden = readFileSync(
+      fileURLToPath(new URL("../fixtures/schema-v3.sql", import.meta.url)),
+      "utf8",
+    );
+    expect(MIGRATIONS[2]?.sql).toBe(golden);
+    expect(MIGRATIONS[2]?.version).toBe(3);
+  });
+
+  it("upgrades a v2 store to v3 keeping tasks, events and notes", () => {
+    const db = v2Store();
+    rawInsert(db, baseTask({ title: "survives the rebuild" }));
+    event(db, { entity_id: "kt-aaaaaa", title: "survives the rebuild" });
+    db.prepare("INSERT INTO notes (id, task_id, body, actor, created_at) VALUES (?,?,?,?,?)").run(
+      "nt-aaaaaa",
+      "kt-aaaaaa",
+      "a note",
+      "main @ /repo",
+      TS,
+    );
+
+    expect(readSchemaVersion(db)).toBe(2);
+    expect(migrate(db, MIGRATIONS)).toBe(1);
+    expect(readSchemaVersion(db)).toBe(3);
+
+    expect(db.prepare("SELECT title FROM tasks WHERE id='kt-aaaaaa'").get()).toEqual({
+      title: "survives the rebuild",
+    });
+    expect(db.prepare("SELECT COUNT(*) c FROM events WHERE entity_id='kt-aaaaaa'").get()).toEqual({
+      c: 1,
+    });
+    expect(db.prepare("SELECT body FROM notes WHERE id='nt-aaaaaa'").get()).toEqual({
+      body: "a note",
+    });
+    db.close();
+  });
+
+  it("recreates both events indexes after the rebuild", () => {
+    // Dropping `events` drops everything built on it. Same assertion 0002's
+    // analogous test makes, pinned again here because the rebuild is a second
+    // place either index could quietly fail to come back.
+    const db = freshV3();
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%event%'")
+      .all()
+      .map((row) => (row as { name: string }).name);
+
+    expect(indexes.sort()).toEqual(["events_entity", "events_epic"]);
+
+    for (const [column, index] of [
+      ["entity_id", "events_entity"],
+      ["epic_id", "events_epic"],
+    ] as const) {
+      const plan = db
+        .prepare(`EXPLAIN QUERY PLAN SELECT * FROM events WHERE ${column} = ?`)
+        .all("kt-aaaaaa") as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join(" ")).toContain(index);
+    }
+    db.close();
+  });
+
+  it("preserves event ids and order across the rebuild", () => {
+    // A gap in the ids is what actually distinguishes a rebuild that carries
+    // literal ids from one that silently renumbers the copy: an
+    // INSERT...SELECT that omitted the id column would close this gap, and
+    // `listEvents`' ordering depends on the id staying a total order.
+    const db = v2Store();
+    rawInsert(db, baseTask());
+    event(db, { entity_id: "kt-aaaaaa", type: "created" });
+    event(db, { entity_id: "kt-aaaaaa", type: "status-changed" });
+    event(db, { entity_id: "kt-aaaaaa", type: "closed" });
+    db.prepare("DELETE FROM events WHERE id = 2").run();
+
+    const idsOf = (): number[] =>
+      (db.prepare("SELECT id FROM events ORDER BY id").all() as Array<{ id: number }>).map(
+        (row) => row.id,
+      );
+    expect(idsOf()).toEqual([1, 3]);
+
+    migrate(db, MIGRATIONS);
+
+    expect(idsOf()).toEqual([1, 3]);
+    db.close();
+  });
+
+  it("accepts claimed and released and still refuses an unknown type", () => {
+    const db = freshV3();
+    rawInsert(db, baseTask());
+
+    expect(() => event(db, { type: "claimed" })).not.toThrow();
+    expect(() => event(db, { type: "released" })).not.toThrow();
+    expect(() => event(db, { type: "updated" })).toThrowError(/CHECK constraint failed/);
+    db.close();
+  });
+
+  it("carries prior_actor through a round trip and defaults it null", () => {
+    const db = freshV3();
+    rawInsert(db, baseTask());
+    event(db, { type: "released" });
+    event(db, { type: "released", prior_actor: "feature/x @ /repo/wt-x" });
+
+    const rows = db.prepare("SELECT * FROM events ORDER BY id").all();
+    expect(rows.map((row) => rowToEvent(row as never).priorActor)).toEqual([
+      null,
+      "feature/x @ /repo/wt-x",
+    ]);
+    db.close();
   });
 });

@@ -112,10 +112,13 @@ describe("migrating a v1 store under contention", () => {
     const setup = await runCli(["init"], { cwd: repo.dir });
     expect(setup.exitCode).toBe(EXIT.ok);
 
-    // Rewind to v1: drop what 0002 added and reset the version, so the store
-    // is exactly what an installation from before this feature has.
+    // Rewind to v1: drop what 0002 and 0003 added and reset the version, so
+    // the store is exactly what an installation from before this feature has.
     const rewind = openDatabase(dbPath);
-    rewind.exec("DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS events;");
+    rewind.exec(
+      "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS claims; " +
+        "DROP TABLE IF EXISTS presence; DROP TABLE IF EXISTS events;",
+    );
     rewind.pragma("user_version = 1");
     expect(readSchemaVersion(rewind)).toBe(1);
     rewind.exec(
@@ -177,6 +180,6 @@ describe("migrating a v1 store under contention", () => {
     // again, so editing it would leave two stores with different schemas at
     // the same version number.
     expect(MIGRATIONS[0]?.sql).toBe(migration0001.sql);
-    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2]);
+    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3]);
   });
 });

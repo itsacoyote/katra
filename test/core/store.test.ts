@@ -49,7 +49,16 @@ describe("openStore", () => {
       .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
       .all()
       .map((row) => (row as { name: string }).name);
-    expect(tables).toEqual(["deps", "events", "links", "notes", "tags", "tasks"]);
+    expect(tables).toEqual([
+      "claims",
+      "deps",
+      "events",
+      "links",
+      "notes",
+      "presence",
+      "tags",
+      "tasks",
+    ]);
   });
 
   it("reports an existing store as not newly created", () => {
