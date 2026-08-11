@@ -257,19 +257,23 @@ describe("composing the actor string from identity", () => {
     const counting = countingGit();
     const { store } = openStore(r.dir, { createIfMissing: true, env: counting.env });
     cleanups.push(() => store.close());
-    // openStore already spent one spawn locating the store itself; the
-    // baseline isolates identity's own two from that unrelated cost.
+    // openStore's own presence bump (F4 T3, ADR-011) already resolves both
+    // halves of the identity for a freshly created store: the row is absent,
+    // so the bump writes, and writing needs the branch too. The baseline
+    // below already carries that cost — one spawn for openStore's own
+    // store-location lookup, plus the identity pair's rev-parse and
+    // symbolic-ref.
     const baseline = counting.calls().length;
 
     const actorString = store.actor();
-    expect(counting.calls()).toHaveLength(baseline + 2);
+    // actor() and identity() reuse that same resolution with no further
+    // spawns — the "no spawn doubling" presence's own docs promise.
+    expect(counting.calls()).toHaveLength(baseline);
 
     const identity = store.identity();
-    // identity() shares actor()'s own resolution — asking again must not
-    // spawn again.
-    expect(counting.calls()).toHaveLength(baseline + 2);
+    expect(counting.calls()).toHaveLength(baseline);
     expect(actorString).toBe(`${identity.branch()} @ ${identity.worktree}`);
-    expect(counting.calls()).toHaveLength(baseline + 2);
+    expect(counting.calls()).toHaveLength(baseline);
   });
 
   it("keeps the actor string identical to the fused resolver's output", () => {

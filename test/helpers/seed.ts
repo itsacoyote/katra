@@ -190,6 +190,30 @@ export function seedNoteId(): string {
   return `nt-s${String(noteCounter).padStart(5, "0")}`;
 }
 
+export interface SeedPresenceInput {
+  readonly worktree: string;
+  readonly branch?: string;
+  readonly lastSeen?: string;
+}
+
+/**
+ * Writes (or overwrites) one presence row directly.
+ *
+ * The stale-row lever: `lastSeen` defaults to the fixed seed epoch, which sits
+ * far enough in the past that a freshness test never has to compute its own
+ * threshold — it just wants a row older than `PRESENCE_FRESH_MS` and this
+ * already is one. A caller asserting the fresh-skip path passes a recent
+ * `lastSeen` explicitly.
+ */
+export function seedPresence(store: OpenStore, input: SeedPresenceInput): void {
+  store.db
+    .prepare(
+      `INSERT INTO presence (worktree, branch, last_seen) VALUES (?,?,?)
+       ON CONFLICT(worktree) DO UPDATE SET branch = excluded.branch, last_seen = excluded.last_seen`,
+    )
+    .run(input.worktree, input.branch ?? "main", input.lastSeen ?? seedTime());
+}
+
 /** Inserts one note and returns its id. */
 export function seedNote(store: OpenStore, input: SeedNoteInput): string {
   const id = input.id ?? seedNoteId();

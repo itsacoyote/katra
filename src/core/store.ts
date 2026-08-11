@@ -1,10 +1,14 @@
 /**
  * The one way to obtain a katra store.
  *
- * Locate, open, migrate — in that order, behind a single function. Nothing
- * else in the codebase constructs a database handle, because the pragmas that
- * make a connection safe are per-connection: a handle obtained elsewhere would
- * silently lose foreign-key enforcement and its busy timeout.
+ * Locate, open, migrate, heartbeat — in that order, behind a single function.
+ * Nothing else in the codebase constructs a database handle, because the
+ * pragmas that make a connection safe are per-connection: a handle obtained
+ * elsewhere would silently lose foreign-key enforcement and its busy timeout.
+ * The heartbeat (F4 T3, ADR-011) rides here rather than at each command's own
+ * entry point for the same reason: this is the one function every command
+ * passes through, `init` included, and it runs after migrations so the
+ * presence table always exists by the time it is touched.
  */
 
 import { existsSync, mkdirSync } from "node:fs";
@@ -17,6 +21,7 @@ import { resolveStoreLocation } from "./db/locate.js";
 import { migrate } from "./db/migrate.js";
 import { MIGRATIONS } from "./db/migrations/index.js";
 import { KatraException } from "./errors.js";
+import { bumpPresence } from "./presence.js";
 
 /**
  * A store, as the outside world sees it.
@@ -165,15 +170,22 @@ export function openStore(cwd: string, options: OpenStoreOptions = {}): OpenStor
     options.identity ??
     createIdentityResolver(options.env === undefined ? { cwd } : { cwd, env: options.env });
 
+  const store: OpenStore = {
+    dbPath: location.dbPath,
+    commonDir: location.commonDir,
+    db,
+    identity,
+    actor: options.actor ?? (() => actorFromIdentity(identity())),
+    close: () => db.close(),
+  };
+
+  // ADR-011: every command bumps presence, reads included. Non-fatal — see
+  // `presence.ts` — so a failure here never stops the store from being handed
+  // back.
+  bumpPresence(store);
+
   return {
-    store: {
-      dbPath: location.dbPath,
-      commonDir: location.commonDir,
-      db,
-      identity,
-      actor: options.actor ?? (() => actorFromIdentity(identity())),
-      close: () => db.close(),
-    },
+    store,
     created: applied > 0,
     warnings: location.warnings,
   };

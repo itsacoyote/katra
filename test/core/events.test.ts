@@ -236,7 +236,18 @@ describe("event ids as a total order", () => {
       `,
     });
 
-    expect(outcomes.map((o) => o.stderr).join("")).toBe("");
+    // Every process opens the same worktree, so presence's own heartbeat
+    // (F4 T3, ADR-011) races on that one row alongside the appendEvent
+    // contention this test is deliberately manufacturing. Its own short busy
+    // budget can lose that race and warn once — expected, and distinct from
+    // an actual failure in the write path this test exists to pin.
+    const unexpectedStderr = outcomes
+      .map((o) => o.stderr)
+      .join("")
+      .split("\n")
+      .filter((line) => line !== "" && !/KatraPresenceWarning|--trace-warnings/.test(line))
+      .join("\n");
+    expect(unexpectedStderr).toBe("");
     expect(outcomes.map((o) => o.value?.ok)).toEqual([20, 20, 20, 20, 20, 20]);
 
     const verify = openDatabase(dbPath);
