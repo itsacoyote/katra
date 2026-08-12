@@ -1,14 +1,19 @@
 /**
  * The one way to obtain a katra store.
  *
- * Locate, open, migrate — in that order, behind a single function. Nothing
- * else in the codebase constructs a database handle, because the pragmas that
- * make a connection safe are per-connection: a handle obtained elsewhere would
- * silently lose foreign-key enforcement and its busy timeout.
+ * Locate, open, migrate, heartbeat — in that order, behind a single function.
+ * Nothing else in the codebase constructs a database handle, because the
+ * pragmas that make a connection safe are per-connection: a handle obtained
+ * elsewhere would silently lose foreign-key enforcement and its busy timeout.
+ * The heartbeat (F4 T3, ADR-011) rides here rather than at each command's own
+ * entry point for the same reason: this is the one function every command
+ * passes through, `init` included, and it runs after migrations so the
+ * presence table always exists by the time it is touched.
  */
 
 import { existsSync, mkdirSync } from "node:fs";
-import { createActorResolver } from "./actor.js";
+import type { Identity } from "./actor.js";
+import { actorFromIdentity, createIdentityResolver } from "./actor.js";
 import type { DatabaseHandle } from "./db/connection.js";
 import { openDatabase } from "./db/connection.js";
 import type { StoreWarning } from "./db/locate.js";
@@ -16,6 +21,7 @@ import { resolveStoreLocation } from "./db/locate.js";
 import { migrate } from "./db/migrate.js";
 import { MIGRATIONS } from "./db/migrations/index.js";
 import { KatraException } from "./errors.js";
+import { bumpPresence } from "./presence.js";
 
 /**
  * A store, as the outside world sees it.
@@ -57,12 +63,30 @@ export interface OpenStore extends Store {
    * invocation, exactly like the store handle does, and four extra parameters
    * carrying one unchanging value is noise at every call site.
    *
-   * A function, not a value, so it stays lazy — resolving it costs two
-   * subprocess spawns, and `list`, `show` and `next` must not pay for an actor
-   * they never stamp. Memoised, so a command writing several events resolves
-   * once.
+   * A function, not a value, so it stays as lazy as presence's own heartbeat
+   * (F4 T3, ADR-011) allows: `openStore` already resolves the worktree on
+   * every open for the freshness check, and the branch too whenever the bump
+   * actually writes — so `actor()` costs a fresh spawn only for the branch,
+   * and only on a command whose presence row was fresh enough to skip the
+   * write. Memoised, so a command writing several events resolves once, and
+   * composed from {@link identity}'s own resolution rather than resolving
+   * independently, so asking for both never spawns git twice for the same
+   * worktree-and-branch pair — nor twice against what the bump already paid.
    */
   readonly actor: () => string;
+  /**
+   * The worktree and branch this invocation is running as, split into their
+   * own laziness (F4 T2): the worktree resolves the moment `identity()` is
+   * called at all — presence (F4 T3) keys its heartbeat on it — while the
+   * branch stays behind `identity().branch()` for consumers that need it only
+   * to write, the claim/release CAS chiefly.
+   *
+   * Memoised per store context, exactly like {@link actor}: never at module
+   * scope, because `runCli` builds a fresh context per test inside one worker
+   * process, and a module-level cache would hand one test's identity to the
+   * next.
+   */
+  readonly identity: () => Identity;
 }
 
 export interface OpenStoreResult {
@@ -94,13 +118,23 @@ export interface OpenStoreOptions {
    */
   readonly createIfMissing?: boolean;
   /**
-   * Who to record as the writer. Defaults to resolving it from `cwd`.
+   * Who to record as the writer. Defaults to composing it from `identity`.
    *
    * The CLI passes its own per-invocation resolver so one command resolves
    * once however many stores or events it touches; a test passes a fixed
    * string when the actor is the thing being asserted.
    */
   readonly actor?: () => string;
+  /**
+   * The worktree (eager) and branch (lazy) this invocation is running as.
+   * Defaults to resolving both from `cwd`, exactly like `actor`.
+   *
+   * Threaded independently from `actor` rather than always deriving one from
+   * the other, so a test can pin a fixed actor string without also faking out
+   * git for `identity`, and a future caller can pin `identity` — for the race
+   * tests across two linked worktrees — without also faking `actor`.
+   */
+  readonly identity?: () => Identity;
 }
 
 /**
@@ -135,16 +169,26 @@ export function openStore(cwd: string, options: OpenStoreOptions = {}): OpenStor
     throw error;
   }
 
+  const identity =
+    options.identity ??
+    createIdentityResolver(options.env === undefined ? { cwd } : { cwd, env: options.env });
+
+  const store: OpenStore = {
+    dbPath: location.dbPath,
+    commonDir: location.commonDir,
+    db,
+    identity,
+    actor: options.actor ?? (() => actorFromIdentity(identity())),
+    close: () => db.close(),
+  };
+
+  // ADR-011: every command bumps presence, reads included. Non-fatal — see
+  // `presence.ts` — so a failure here never stops the store from being handed
+  // back.
+  bumpPresence(store);
+
   return {
-    store: {
-      dbPath: location.dbPath,
-      commonDir: location.commonDir,
-      db,
-      actor:
-        options.actor ??
-        createActorResolver(options.env === undefined ? { cwd } : { cwd, env: options.env }),
-      close: () => db.close(),
-    },
+    store,
     created: applied > 0,
     warnings: location.warnings,
   };

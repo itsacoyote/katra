@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, and sixteen commands over them, including `brief` and `board` for restoring context at the start of a session. Coordination, search, and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, and eighteen commands over them, including `brief` and `board` for restoring context at the start of a session. Search and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -131,6 +131,7 @@ which is what a session opening in a fresh worktree wants to read first.
 | `delete` | Remove a task that should never have existed |
 | `dep` · `link` | Blocking dependencies, and associations that don't block |
 | `next` | The one task that can be started right now |
+| `claim` · `release` | Hold a task for this worktree while you work it, and hand it back when you're done |
 | `log` | What has happened — to one task, to an epic and its children, or across the store |
 | `note add` · `note list` | Typed prose on a task: `general`, `handoff`, `decision`, `acceptance` |
 | `brief` | Everything needed to resume one task or epic, in one call — handoff body included |
@@ -144,9 +145,23 @@ Every write records an event in the same transaction as the change itself, so hi
 
 Each event and note records who wrote it as `<branch> @ <worktree path>`, so two agents in two worktrees are always distinguishable in the record ([ADR-007](docs/decisions/ADR-007-actor-is-branch-and-worktree.md)).
 
+### Claiming work across worktrees
+
+`katra claim <id>` records that this worktree is working a task. A second worktree attempting the same claim is refused and told who holds it and how recently they were seen:
+
+```console
+$ katra claim kt-s3l2m4
+kt-s3l2m4 claimed by main @ /path/to/repo
+
+$ katra claim kt-s3l2m4   # from a second worktree of the same repo
+katra: kt-s3l2m4 is held by main @ /path/to/repo, last seen just now — release --force to take it over
+```
+
+`next` and `board` steer around a claim without ever moving it between the board's counts ([ADR-012](docs/decisions/ADR-012-claims-steer-not-move.md)): `next` never offers a task another worktree holds, and hands your own still-`Planned` claim back first if you have one; the board marks another worktree's claimed rows and lists them last. `katra release <id>` gives a claim back, and `close`/`cancel` release it for you automatically. A claim left behind by a session that will not return is taken over with `katra release <id> --force`, informed by exactly the holder and liveness a refusal already showed. Presence — the "last seen" behind that liveness — is a heartbeat only: every command bumps it for its own worktree, no hooks required ([ADR-011](docs/decisions/ADR-011-every-call-heartbeats.md)), and claims are scoped to a worktree rather than a session, so two agent sessions sharing one worktree share one claim too.
+
 ## Still to come
 
-FTS5 search, claims and presence for cross-worktree coordination, external refs with pluggable providers, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
+FTS5 search, external refs with pluggable providers, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
 
 Until `snapshot` lands, the store lives only in your `.git` directory: it is not shareable, not reviewable in a pull request, and does not survive a fresh clone.
 
@@ -175,7 +190,7 @@ pnpm test       # vitest
 pnpm check      # lint + typecheck + test — what CI runs
 ```
 
-The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. The traceability docs map every acceptance criterion to the test that covers it, and record where coverage is genuinely limited rather than claiming a tick: [`f1`](docs/f1-traceability.md), [`f2`](docs/f2-traceability.md), [`f3`](docs/f3-traceability.md).
+The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. The traceability docs map every acceptance criterion to the test that covers it, and record where coverage is genuinely limited rather than claiming a tick: [`f1`](docs/f1-traceability.md), [`f2`](docs/f2-traceability.md), [`f3`](docs/f3-traceability.md), [`f4`](docs/f4-traceability.md).
 
 ## Migrating from beads
 

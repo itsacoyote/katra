@@ -76,6 +76,11 @@ describe("the public barrel", () => {
       katra.HelpDocument,
       katra.VersionDocument,
       katra.JsonDocument<katra.TaskView>,
+      // F4: the claim shape carried by TaskView, the brief task arm and
+      // BoardTask. Listed on its own, not only inside those three, so the
+      // barrel losing the standalone export — as opposed to just a field
+      // referencing it — is still this same compile error.
+      katra.ClaimInfo,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -84,8 +89,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 17;
-    expect(count).toBe(17);
+    const count: PublishedDocuments["length"] = 18;
+    expect(count).toBe(18);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {
@@ -166,6 +171,7 @@ describe("the public barrel", () => {
     // so a POSIX-looking expectation would fail there for no real reason.
     const seen = [...visited].map((file) => relative(root, file).replaceAll("\\", "/")).sort();
     expect(seen).toEqual([
+      "core/claims/types.ts",
       "core/contract.ts",
       "core/enums.ts",
       "core/errors.ts",

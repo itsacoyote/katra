@@ -213,4 +213,16 @@ describe("katra list", () => {
     const names = createProgram({ cwd: repo.dir }).commands.map((command) => command.name());
     expect(names).toContain("list");
   });
+
+  it("names list --ready as claim-neutral in help", async () => {
+    // F4: `next` steers away from another worktree's claim, but `--ready` is
+    // a query, not an offer, and stays silent about who holds what. Asserted
+    // at CLI level so the divergence from `next` is documented where a reader
+    // would look for it.
+    const result = await runCli(["list", "--help"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).toMatch(/--ready/);
+    expect(result.stdout).toMatch(/claim-neutral/i);
+  });
 });

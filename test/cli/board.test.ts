@@ -2,10 +2,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram } from "../../src/cli/program.js";
 import type { BoardResult } from "../../src/core/contract.js";
+import { openStore } from "../../src/core/store.js";
 import { BRIEF_HANDOFF_CHARS } from "../../src/core/tasks/brief.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
 import { createGitRepo } from "../helpers/fixture.js";
+import { seedClaim, seedPresence } from "../helpers/seed.js";
 
 let repo: GitFixture;
 beforeEach(async () => {
@@ -196,6 +198,114 @@ describe("katra board", () => {
     const document = result.json() as BoardResult;
     expect(document.digest).toBeNull();
     expect(document.inFlight.tasks).toEqual([]);
+  });
+});
+
+describe("board and claims", () => {
+  /**
+   * Claims `id` for a worktree other than this repo's own, directly — the
+   * same bypass `test/cli/claim.test.ts` and `test/cli/next.test.ts` use,
+   * since seeding through the real `katra claim` would just claim it for the
+   * fixture's own identity.
+   */
+  function claimElsewhere(id: string, branch: string): void {
+    const { store } = openStore(repo.dir, {});
+    try {
+      seedClaim(store, {
+        taskId: id,
+        holder: "/elsewhere/worktree",
+        actor: `${branch} @ /elsewhere/worktree`,
+      });
+      seedPresence(store, { worktree: "/elsewhere/worktree", branch });
+    } finally {
+      store.close();
+    }
+  }
+
+  it("marks a claimed row with claimed by and last seen", async () => {
+    const task = await add(["contested"]);
+    await lane(task, "Planned");
+    claimElsewhere(task, "feature/other");
+
+    const out = await board();
+
+    const row = out.split("\n").find((line) => line.includes(task)) ?? "";
+    expect(row).toContain("claimed by feature/other");
+    expect(row).toContain("last seen");
+    // T4's security scan: the wording must never imply work on this task.
+    expect(row).not.toContain("active on");
+  });
+
+  it("renders a claim whose holder never heartbeat", async () => {
+    // No presence row at all — `bumpPresence` is deliberately non-fatal, so
+    // this is a real, reachable state, not just a malformed seed.
+    const task = await add(["contested"]);
+    await lane(task, "Planned");
+    const { store } = openStore(repo.dir, {});
+    try {
+      seedClaim(store, {
+        taskId: task,
+        holder: "/elsewhere/worktree",
+        actor: "feature/other @ /elsewhere/worktree",
+      });
+    } finally {
+      store.close();
+    }
+
+    const out = await board();
+
+    const row = out.split("\n").find((line) => line.includes(task)) ?? "";
+    // No presence row means no branch either, so the marker falls back to the
+    // full frozen actor string rather than parsing it.
+    expect(row).toContain("claimed by feature/other @ /elsewhere/worktree");
+    expect(row).toContain("never seen");
+    expect(row).not.toContain("null");
+  });
+
+  it("treats an unparseable last_seen as never seen rather than failing the render", async () => {
+    // Mirrors claims.test.ts's "treats an unparseable last_seen as never
+    // seen rather than failing the refusal itself" — a malformed
+    // presence.last_seen (an older build, a corrupt row) reaching `timeAgo`
+    // directly used to throw `validation` mid-render, turning a display
+    // problem on a *different* claim into an exit 1 on the whole board.
+    const task = await add(["contested"]);
+    await lane(task, "Planned");
+    const { store } = openStore(repo.dir, {});
+    try {
+      seedClaim(store, {
+        taskId: task,
+        holder: "/elsewhere/worktree",
+        actor: "feature/other @ /elsewhere/worktree",
+      });
+      seedPresence(store, {
+        worktree: "/elsewhere/worktree",
+        branch: "feature/other",
+        lastSeen: "not-a-timestamp",
+      });
+    } finally {
+      store.close();
+    }
+
+    // `board()` already asserts exit 0.
+    const out = await board();
+
+    const row = out.split("\n").find((line) => line.includes(task)) ?? "";
+    expect(row).toContain("claimed by feature/other");
+    expect(row).toContain("never seen");
+  });
+
+  it("carries no marker on a row this worktree claimed itself", async () => {
+    // ADR-012: claimed-by-me is deliberately not a marker.
+    const task = await add(["mine"]);
+    await lane(task, "Planned");
+    const claimResult = await runCli(["claim", task], { cwd: repo.dir });
+    expect(claimResult.exitCode).toBe(EXIT.ok);
+
+    const out = await board();
+
+    const row = out.split("\n").find((line) => line.includes(task)) ?? "";
+    expect(row).not.toBe("");
+    expect(row).not.toContain("claimed by");
   });
 });
 

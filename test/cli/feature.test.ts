@@ -41,6 +41,8 @@ const EXPECTED_COMMANDS = [
   "note",
   "brief",
   "board",
+  "claim",
+  "release",
 ] as const;
 
 let repo: GitFixture;
@@ -55,7 +57,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all sixteen commands on the program", () => {
+  it("registers all eighteen commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -64,7 +66,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(16);
+    expect(registered).toHaveLength(18);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -100,6 +102,8 @@ describe("--json across every command", () => {
       ["init"],
       ["add", "another task"],
       ["show", blocker],
+      ["claim", blocker],
+      ["release", blocker],
       ["list"],
       ["update", blocker, "--priority", "1"],
       ["dep", dependent, "--blocked-by", blocker],
@@ -371,7 +375,12 @@ describe("katra next", () => {
     // must stay readable at exit 0.
     const empty = await runCli(["next", "--json"], { cwd: repo.dir });
     expect(empty.exitCode).toBe(EXIT.ok);
-    expect(empty.json()).toEqual({ status: "none", blocked: [], untriaged: 0 });
+    expect(empty.json()).toEqual({
+      status: "none",
+      blocked: [],
+      untriaged: 0,
+      claimedElsewhere: 0,
+    });
 
     const blocker = await add(["a blocker"]);
     const blocked = await add(["stuck", "--lane", "Planned"]);

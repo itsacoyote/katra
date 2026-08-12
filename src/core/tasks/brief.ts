@@ -20,6 +20,7 @@
  * place.
  */
 
+import { claimFor } from "../claims/repo.js";
 import type { BriefLane, BriefNote, BriefResult } from "../contract.js";
 import { LANES } from "../enums.js";
 import { listEvents } from "../events/repo.js";
@@ -153,8 +154,13 @@ function childrenByLane(store: OpenStore, epicId: string, caps: Caps): BriefLane
  * not a thing, and accepting one here would resolve an id whose task then reads
  * back as `undefined` — a second not-found branch that should not exist.
  *
- * Resolves no actor: nothing here writes, and the actor costs two subprocess
- * spawns.
+ * Resolves no actor and touches no identity of its own: nothing here writes,
+ * and `claimFor` reads a claim's holder straight off the row — it has no
+ * caller identity to compare against, unlike `board`'s own-vs-other ordering
+ * (T7). Calling `actor()` here would no longer cost two subprocess spawns
+ * post-identity (F4 T2/T3): `identity().worktree` is already memoised by the
+ * time this runs — `openStore`'s heartbeat resolves it before ever handing
+ * the store back — so only the branch remains a fresh one.
  *
  * **Deliberately not wrapped in `readTx`, unlike `board`.** The rule this
  * branch added to `AGENTS.md` — multi-statement reads that must agree with each
@@ -219,5 +225,7 @@ export function briefEntity(
   if (isEpic) {
     return { ...common, level: "epic", children: childrenByLane(store, id, caps) };
   }
-  return { ...common, level: "task" };
+  // Read only on the task arm — an epic can never hold a claim (AC6), and
+  // `BriefResult`'s epic arm carries no `claim` field to fill.
+  return { ...common, level: "task", claim: claimFor(store, id) };
 }

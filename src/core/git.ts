@@ -127,7 +127,7 @@ function explainGitFailure(failure: GitFailure): KatraException {
       code: "validation",
       message:
         `this git is too old: katra needs git ${MINIMUM_GIT_VERSION} or newer for ` +
-        `\`rev-parse --path-format\`\n${stderr.trim()}`,
+        `\`rev-parse --path-format\` — ${stderr.trim()}`,
       field: "git",
       value: "path-format",
     });
@@ -141,7 +141,7 @@ function explainGitFailure(failure: GitFailure): KatraException {
       code: "validation",
       message:
         "this worktree's main repository is missing or has moved, so git cannot " +
-        `resolve it\n${stderr.trim()}`,
+        `resolve it — ${stderr.trim()}`,
       field: "worktree",
       value: stderr.trim(),
     });
@@ -150,7 +150,7 @@ function explainGitFailure(failure: GitFailure): KatraException {
   if (/not a git repository/i.test(stderr)) {
     return new KatraException({
       code: "validation",
-      message: `not inside a git repository\n${stderr.trim()}`,
+      message: `not inside a git repository — ${stderr.trim()}`,
       field: "cwd",
       value: stderr.trim(),
     });
@@ -161,7 +161,7 @@ function explainGitFailure(failure: GitFailure): KatraException {
   // either one would be wrong half the time.
   return new KatraException({
     code: "validation",
-    message: `\`git ${args.join(" ")}\` failed\n${stderr.trim()}`,
+    message: `\`git ${args.join(" ")}\` failed — ${stderr.trim()}`,
     field: "git",
     value: stderr.trim(),
   });

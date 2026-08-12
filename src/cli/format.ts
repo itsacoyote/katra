@@ -6,7 +6,8 @@
  * drift. Every function here is pure: value in, string out.
  */
 
-import type { BoardResult, BriefResult } from "../core/contract.js";
+import { nowIso, timeAgoOrNull } from "../core/clock.js";
+import type { BoardResult, BoardTask, BriefResult, ClaimInfo } from "../core/contract.js";
 import type { LoggedEvent } from "../core/events/types.js";
 import type { Note } from "../core/notes/types.js";
 import type { Task, TaskDetail, TaskView } from "../core/tasks/types.js";
@@ -28,8 +29,61 @@ function field(label: string, value: string): string {
  */
 const text = (value: string): string => oneLine(value);
 
-/** The full block `show` prints. */
-export function formatTaskDetail(detail: TaskDetail): string {
+/**
+ * A claim's liveness, in the wording `claims/repo.ts`'s conflict message
+ * already established: `last seen <age>` when a presence row backs the
+ * holder, `never seen` when it does not.
+ *
+ * **"last seen", never "active on"** (T4's security scan): `last_seen` is a
+ * per-worktree heartbeat any command bumps, not evidence of work on *this*
+ * task — a holder polling the board for other work would otherwise read as
+ * live on every claim it holds.
+ *
+ * **`never seen`** is a real, reachable state, not a theoretical one: a
+ * holder whose very first heartbeat failed, or a session that crashed before
+ * finishing its first `openStore`, has a claim with no presence row behind it
+ * (`claims/types.ts`). No age is fabricated from `claimedAt` for that case —
+ * `claimedAt` is a `--json`-only fact here (spec req 8, amended), so a text
+ * reader sees exactly the two facts a claim renders anywhere: holder and
+ * liveness.
+ *
+ * `timeAgoOrNull`, not `timeAgo`: `lastSeen` is read back out of `presence`,
+ * a row this renderer does not control and does not fully trust — the same
+ * reason `claims/repo.ts`'s own `describeLiveness` uses the lenient form
+ * rather than the strict one. Before this, a malformed stored timestamp made
+ * `timeAgo` throw *inside a render*, turning `board`/`brief`/`show` into an
+ * exit 1 on the exact claim `release --force` still handled fine — a display
+ * bug reported as a bigger failure than the one it was displaying.
+ */
+function claimLiveness(claim: ClaimInfo, now: string): string {
+  const age = claim.lastSeen === null ? null : timeAgoOrNull(claim.lastSeen, now);
+  return age === null ? "never seen" : `last seen ${age}`;
+}
+
+/**
+ * The "claimed" field's value on `brief` and `show`: the frozen claim-time
+ * actor, plus its liveness. `claim.actor` is stored text, so it goes through
+ * {@link text} like every other rendered field.
+ */
+function claimedField(claim: ClaimInfo, now: string): string {
+  return `${text(claim.actor)} · ${claimLiveness(claim, now)}`;
+}
+
+/**
+ * The full block `show` prints.
+ *
+ * `claim` is a separate parameter rather than a field on {@link TaskDetail}:
+ * `update` also renders this block from a plain `TaskDetail`, which carries
+ * no claim (`tasks/types.ts` — the extra query belongs only to the callers
+ * that display it). Omitting it renders no "claimed" line, so `update`'s
+ * output is unaffected. `now` defaults to the real instant so every ordinary
+ * caller gets live ages for free; tests pin it for a deterministic render.
+ */
+export function formatTaskDetail(
+  detail: TaskDetail,
+  claim: ClaimInfo | null = null,
+  now: string = nowIso(),
+): string {
   const { task, parent } = detail;
   const lines = [
     `${task.id}  ${text(task.title)}`,
@@ -39,6 +93,7 @@ export function formatTaskDetail(detail: TaskDetail): string {
     field("priority", `P${task.priority}`),
   ];
 
+  if (claim !== null) lines.push(field("claimed", claimedField(claim, now)));
   if (task.assignee !== null) lines.push(field("assignee", text(task.assignee)));
   if (parent !== null) lines.push(field("epic", `${parent.id}  ${text(parent.title)}`));
 
@@ -142,8 +197,15 @@ export function formatUpdatedTasks(tasks: readonly TaskDetail[]): string {
  * get pasted, and a raw ANSI escape executes on whatever renders it.
  *
  * Note *bodies* are the deliberately-multiline case and are not rendered here.
+ *
+ * Exported for `cli/output.ts`: `emitError`'s text-mode message is built from
+ * `KatraErrorDetail.message`, which F4's claim conflicts populate with a
+ * stored actor string — the first core message to carry free-form stored
+ * text straight to stderr. Wrapping it here, rather than duplicating this
+ * function, keeps every untrusted-text rendering in katra going through one
+ * definition.
  */
-function oneLine(value: string): string {
+export function oneLine(value: string): string {
   return value.replaceAll(CONTROLS, " ").replaceAll(BIDI, "").trim();
 }
 
@@ -191,6 +253,12 @@ function describeEvent(event: LoggedEvent): string {
   // constraint and F5 routes external refs through it — one-line it before the
   // first URL arrives, not after.
   if (event.ref !== null) parts.push(oneLine(event.ref));
+  // Set only on a forced release (`claims/repo.ts`'s `settleClaim`): the
+  // holder it displaced. Without this the column's whole justification —
+  // "the takeover reads straight off the event" — is write-only: the fact is
+  // stored and never shown. `priorActor` is a frozen actor string, the same
+  // stored-text shape `reason`/`ref` are, so it gets the same one-lining.
+  if (event.priorActor !== null) parts.push(`from ${oneLine(event.priorActor)}`);
   return parts.join("  ");
 }
 
@@ -414,9 +482,13 @@ const PREVIEW_WIDTH = 56;
  *
  * A task with no notes and no activity gets neither heading: an empty section
  * is a line that says nothing happened, which the absence already says.
+ *
+ * `now` defaults to the real instant — see {@link formatTaskDetail} — and
+ * feeds the claim line's age alone. Notes and activity rows below render
+ * absolute timestamps and do not depend on it.
  */
-export function formatTaskView(view: TaskView): string {
-  const lines = [formatTaskDetail(view)];
+export function formatTaskView(view: TaskView, now: string = nowIso()): string {
+  const lines = [formatTaskDetail(view, view.claim, now)];
 
   if (view.notes.length > 0) {
     lines.push("", `notes (${view.notes.length}, newest first — \`katra note list\` for bodies)`);
@@ -460,14 +532,22 @@ export function formatTaskView(view: TaskView): string {
  * blocker titles, event fields, and above all the handoff body, which is the
  * largest untrusted-text surface katra has. `--json` stays verbatim; these are
  * two renderings of one value, not one string built once and printed twice.
+ *
+ * `now` defaults to the real instant — see {@link formatTaskDetail} — for the
+ * claim line's age.
  */
-export function formatBrief(brief: BriefResult): string {
+export function formatBrief(brief: BriefResult, now: string = nowIso()): string {
   const lines = [
     `${brief.task.id}  ${text(brief.task.title)}`,
     field("level", brief.task.level),
     field("lane", brief.task.lane),
     field("priority", `P${brief.task.priority}`),
   ];
+  // Task arm only — an epic can never hold a claim (AC6), and `claim` is not
+  // a field the epic arm even carries (`contract.ts`).
+  if (brief.level === "task" && brief.claim !== null) {
+    lines.push(field("claimed", claimedField(brief.claim, now)));
+  }
   if (brief.epic !== null) {
     lines.push(field("epic", `${brief.epic.id}  ${text(brief.epic.title)}`));
   }
@@ -591,6 +671,25 @@ export function formatBrief(brief: BriefResult): string {
 const BLOCKERS_SHOWN = 3;
 
 /**
+ * A board row's trailing "claimed by" marker — empty for every row but a
+ * `claimedElsewhere` one (ADR-012: claimed-by-me is deliberately not a
+ * marker, so an own claim renders no differently from unclaimed here; `brief`
+ * and `show` still show it in full). The bit rides on the row itself
+ * (`BoardTask.claimedElsewhere`) rather than being derived here by comparing
+ * identities — this formatter has no caller identity to compare against.
+ *
+ * `branch` comes from `ClaimInfo.branch` — presence-sourced, never parsed out
+ * of `actor` — falling back to the full frozen actor string when the holder
+ * has no presence row, the same "nothing to show" state {@link claimLiveness}
+ * renders as `never seen`.
+ */
+function claimedMarker(task: BoardTask, now: string): string {
+  if (!task.claimedElsewhere || task.claim === null) return "";
+  const branch = task.claim.branch === null ? text(task.claim.actor) : text(task.claim.branch);
+  return `  claimed by ${branch} · ${claimLiveness(task.claim, now)}`;
+}
+
+/**
  * The board: where the repository stands, in five parts.
  *
  * Actionable first, activity last. An agent that reads only the header and the
@@ -599,8 +698,11 @@ const BLOCKERS_SHOWN = 3;
  * The counts are totals and the sections are capped, so a section saying
  * `showing 2 of 14` is the normal case rather than an error — a header that
  * shrank to match the cap would state a backlog size that is not true.
+ *
+ * `now` defaults to the real instant — see {@link formatTaskDetail} — for
+ * every claimed row's age.
  */
-export function formatBoard(board: BoardResult): string {
+export function formatBoard(board: BoardResult, now: string = nowIso()): string {
   const { counts } = board;
   const lines: string[] = [];
 
@@ -642,7 +744,7 @@ export function formatBoard(board: BoardResult): string {
       const blockers = showBlockers
         ? `  blocked by ${shown.join(", ")}${rest > 0 ? `, +${rest} more` : ""}`
         : "";
-      return `  ${padTo(task.id, idWidth)}  P${task.priority}  ${padTo(task.lane, laneWidth)}  ${clamp(text(task.title), TITLE_WIDTH)}${marker}${blockers}`;
+      return `  ${padTo(task.id, idWidth)}  P${task.priority}  ${padTo(task.lane, laneWidth)}  ${clamp(text(task.title), TITLE_WIDTH)}${marker}${blockers}${claimedMarker(task, now)}`;
     });
   };
 

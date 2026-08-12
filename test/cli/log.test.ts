@@ -150,6 +150,7 @@ describe("formatEventLog", () => {
     ref: null,
     reason: null,
     title: null,
+    priorActor: null,
     createdAt: "2026-08-05T16:41:09.123Z",
     entityTitle: null,
     ...overrides,
@@ -200,6 +201,39 @@ describe("formatEventLog", () => {
     );
 
     expect(rendered).toContain("Defined -> Planned");
+  });
+
+  it("names the prior actor a forced release displaces", () => {
+    // T1's review: the column's whole justification is that a takeover reads
+    // straight off the event. Without this, `priorActor` is stored and never
+    // shown — the column ships write-only.
+    const rendered = formatEventLog(
+      [event({ type: "released", priorActor: "feature/other @ /repo/wt" })],
+      false,
+    );
+
+    expect(rendered).toContain("from feature/other @ /repo/wt");
+  });
+
+  it("says nothing about a prior actor on a plain release", () => {
+    // `priorActor` is null on a self-release — nothing was displaced, so
+    // nothing should be named.
+    const rendered = formatEventLog([event({ type: "released", priorActor: null })], false);
+
+    expect(rendered).not.toContain("from ");
+  });
+
+  it("keeps one physical line when a hostile prior actor carries a newline", () => {
+    // `priorActor` is a frozen actor string — free text, like every other
+    // stored value this file renders — so it goes through the same one-lining
+    // `reason` and `ref` already get.
+    const rendered = formatEventLog(
+      [event({ type: "released", priorActor: "feature/x\nsecond line @ /wt" })],
+      false,
+    );
+
+    expect(rendered.split("\n")).toHaveLength(1);
+    expect(rendered).toContain("from feature/x second line @ /wt");
   });
 
   it("renders the date as well as the time", () => {
@@ -381,6 +415,7 @@ describe("column alignment across character widths", () => {
       ref: null,
       reason: null,
       title: "a title",
+      priorActor: null,
       entityTitle: "a title",
       createdAt: stamp,
     });

@@ -17,6 +17,8 @@
  * different snapshot from the sections beneath them.
  */
 
+import { assembleClaimInfo } from "./claims/repo.js";
+import type { ClaimInfo } from "./claims/types.js";
 import type { BoardCounts, BoardResult, BoardSection, BoardTask } from "./contract.js";
 import { readTx } from "./db/connection.js";
 import { IN_FLIGHT_LANES, sqlEnum, TERMINAL_LANES, UNTRIAGED_LANES } from "./enums.js";
@@ -25,7 +27,13 @@ import { listBlockersFor, READINESS_VIEW } from "./graph/deps.js";
 import { latestHandoff } from "./notes/repo.js";
 import type { OpenStore } from "./store.js";
 import { BRIEF_HANDOFF_CHARS } from "./tasks/brief.js";
-import { readyPredicate, TASK_RANKING } from "./tasks/next.js";
+import {
+  CLAIMED_ELSEWHERE,
+  CLAIMS_JOIN,
+  rankingWith,
+  readyPredicate,
+  TASK_RANKING,
+} from "./tasks/next.js";
 import { capText } from "./text.js";
 
 /**
@@ -92,13 +100,49 @@ const BLOCKED = `${OPEN} AND t.lane NOT IN (${sqlEnum(IN_FLIGHT_LANES)}) AND r.i
 /** Startable work nobody has planned yet — the residue the other three miss. */
 const UNTRIAGED = `${TASKS_ONLY} AND t.lane IN (${sqlEnum(UNTRIAGED_LANES)}) AND r.is_ready = 1`;
 
-/** The raw shape every section query returns. */
+/**
+ * The raw shape every section query returns.
+ *
+ * `claim_*` and `claimed_elsewhere` ride on every section's row, not only
+ * ready's — in flight and blocked carry claim data too (ADR-012), even
+ * though only the ready section's `ORDER BY` reads `claimed_elsewhere`.
+ * `claim_holder` is the discriminant: `null` means the `claims` LEFT JOIN
+ * matched nothing, so the rest of the `claim_*` columns are unclaimed too.
+ */
 interface BoardRow {
   readonly id: string;
   readonly title: string;
   readonly lane: string;
   readonly priority: number;
   readonly is_ready: number;
+  readonly claim_holder: unknown;
+  readonly claim_actor: unknown;
+  readonly claim_claimed_at: unknown;
+  readonly claim_branch: unknown;
+  readonly claim_last_seen: unknown;
+  readonly claimed_elsewhere: number;
+}
+
+/**
+ * Builds `BoardTask.claim` from one row's joined claim columns.
+ *
+ * Narrowing itself lives in `claims/repo.ts`'s exported `assembleClaimInfo`
+ * — the one spelling of "raw columns become a `ClaimInfo`", shared with
+ * `claimFor`. A board row cannot reuse `claimFor`'s own `ClaimRow` shape: it
+ * already carries `id`, `title`, `lane`, so the section query's `SELECT`
+ * prefixes every claim column (`claim_holder`, `claim_branch`, …) to keep
+ * the two apart, and `assembleClaimInfo` takes the five values positionally
+ * rather than a named row shape for exactly that reason.
+ */
+function claimFromRow(row: BoardRow): ClaimInfo | null {
+  if (row.claim_holder === null) return null;
+  return assembleClaimInfo(
+    row.claim_holder,
+    row.claim_actor,
+    row.claim_claimed_at,
+    row.claim_branch,
+    row.claim_last_seen,
+  );
 }
 
 function countWhere(store: OpenStore, where: string, params: readonly unknown[] = []): number {
@@ -117,24 +161,49 @@ function countWhere(store: OpenStore, where: string, params: readonly unknown[] 
  *
  * The idiom `listEvents` and `viewTask` already use: a bound that cannot report
  * itself is indistinguishable from the end of the data.
+ *
+ * Every section joins `claims` (T6's {@link CLAIMS_JOIN}) and `presence` —
+ * mirroring `claims/repo.ts`'s own claim-plus-presence read — so every row
+ * carries claim data (ADR-012). `claimed_elsewhere`
+ * ({@link CLAIMED_ELSEWHERE}) is computed **once**, as a `SELECT`-list alias,
+ * so its single `?` binds the caller's worktree in exactly one position
+ * regardless of which section is asking or whether that section orders by
+ * it (iter-2 advisory 10 / T6 review). `orderBy` defaults to the unchanged
+ * {@link TASK_RANKING}; the ready section is the only caller that passes
+ * {@link rankingWith}`("claimed_elsewhere")`, which leads the ranking with
+ * the alias **by name** rather than re-embedding the expression — so
+ * ordering by it costs no second bind either.
+ *
+ * `worktree` binds first because the `SELECT`-list alias sits, in the raw
+ * SQL text, ahead of `where`'s own `?`s and the trailing `LIMIT ?` — binding
+ * is positional, so the params array here has to follow the text, not the
+ * argument order callers find natural.
  */
 function section(
   store: OpenStore,
   where: string,
   limit: number,
+  worktree: string,
   params: readonly unknown[] = [],
+  orderBy: string = TASK_RANKING,
 ): { rows: BoardRow[]; truncated: boolean } {
   const rows = store.db
     .prepare(
       `SELECT t.id AS id, t.title AS title, t.lane AS lane, t.priority AS priority,
-              r.is_ready AS is_ready
+              r.is_ready AS is_ready,
+              c.holder AS claim_holder, c.actor AS claim_actor,
+              c.claimed_at AS claim_claimed_at,
+              p.branch AS claim_branch, p.last_seen AS claim_last_seen,
+              ${CLAIMED_ELSEWHERE} AS claimed_elsewhere
          FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
+         ${CLAIMS_JOIN}
+         LEFT JOIN presence p ON p.worktree = c.holder
         WHERE ${where}
-        ${TASK_RANKING}
+        ${orderBy}
         LIMIT ?`,
     )
-    .all(...params, limit + 1) as BoardRow[];
+    .all(worktree, ...params, limit + 1) as BoardRow[];
 
   return { rows: rows.slice(0, limit), truncated: rows.length > limit };
 }
@@ -147,13 +216,26 @@ function toBoardTask(row: BoardRow, blockers: readonly BoardTask["blockers"][num
     priority: row.priority as BoardTask["priority"],
     blocked: row.is_ready === 0,
     blockers,
+    claim: claimFromRow(row),
+    claimedElsewhere: row.claimed_elsewhere === 1,
   };
 }
 
-/** Assembles the board. Reads only; opens no write transaction and no actor. */
+/**
+ * Assembles the board. Reads only; opens no write transaction.
+ *
+ * Reads `store.identity().worktree` to evaluate the claims join's
+ * own-vs-other comparison — the one piece of caller identity this function
+ * touches, and it costs no fresh git spawn: `identity()` is memoised, and
+ * `openStore`'s heartbeat (ADR-011) has already resolved the worktree before
+ * any command reaches here. `store.actor()` — the more expensive branch
+ * resolution — is never called; nothing board renders is written under an
+ * actor string.
+ */
 export function readBoard(store: OpenStore, options: BoardOptions = {}): BoardResult {
   const limit = options.limit ?? BOARD_SECTION_LIMIT;
   const ready = readyPredicate();
+  const worktree = store.identity().worktree;
 
   // One deferred snapshot around every read: five questions whose answers must
   // describe one store. As separate auto-commit reads, a commit landing between
@@ -169,9 +251,24 @@ export function readBoard(store: OpenStore, options: BoardOptions = {}): BoardRe
       untriaged: countWhere(store, UNTRIAGED),
     };
 
-    const inFlight = section(store, IN_FLIGHT, limit);
-    const readyRows = section(store, ready.sql, limit, ready.params);
-    const blockedRows = section(store, BLOCKED, limit);
+    const inFlight = section(store, IN_FLIGHT, limit, worktree);
+    // The only section whose ORDER BY reads claimed_elsewhere: unclaimed
+    // (and own-claimed) rows first in next's own ranking, other-claimed rows
+    // last (ADR-012). rankingWith takes the alias's *name*, not
+    // CLAIMED_ELSEWHERE itself — re-embedding the expression here would add
+    // a second `?` to this one statement, exactly the drift the T6 review
+    // flagged. Referencing the name costs nothing extra: SQLite resolves an
+    // ORDER BY term against the SELECT list before falling back to the FROM
+    // clause.
+    const readyRows = section(
+      store,
+      ready.sql,
+      limit,
+      worktree,
+      ready.params,
+      rankingWith("claimed_elsewhere"),
+    );
+    const blockedRows = section(store, BLOCKED, limit, worktree);
     // The same bound as every other section. A second constant here meant
     // `--limit 0` emptied the task sections and still printed eight activity
     // rows — a section the flag was documented to bound and did not.

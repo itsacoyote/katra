@@ -22,11 +22,27 @@ so the commands work from anywhere in the repository.
   latest handoff, recent activity. Long bodies are capped; if the output
   says truncated, `katra brief <id> --full` lifts the caps.
 - **Choosing what to start:** `katra next` names the one task worth starting
-  now; the board's ready section is ordered the same way.
+  now; the board's ready section is ordered the same way. It never offers a
+  task another worktree already holds, and hands your own still-`Planned`
+  claim back first if you already have one.
+- **Claiming work:** before touching a task, run `katra claim <id>`. It
+  refuses — exit 3, naming the current holder and how recently they were
+  seen — if another worktree already claimed it; it succeeds quietly if you
+  already do, so it is safe to repeat after a `/clear` or restart. Claims are
+  per-**worktree**, not per-session: two agent sessions running in the same
+  worktree share one identity and one claim, so claiming does not coordinate
+  *within* a single directory — only across worktrees.
 - **Starting and finishing:** move the task as you go —
   `katra update <id> --lane "In Progress"` when you pick it up,
-  `katra close <id>` when it is done. The in-flight section is what other
-  worktrees see; a task nobody moves is invisible to them.
+  `katra close <id>` when it is done. Closing or cancelling releases your
+  claim automatically. The in-flight section is what other worktrees see; a
+  task nobody moves is invisible to them.
+- **Releasing work:** if you stop before finishing — handing off, or
+  abandoning the attempt — run `katra release <id>` so the next session does
+  not have to guess whether you are still on it. A claim left behind by a
+  session that never comes back needs `katra release <id> --force` from
+  whoever picks the task up, informed by the holder and last-seen age the
+  refusal names.
 - **Before stopping:** write a handoff so the next session starts where you
   stopped — `katra note add <id> --kind handoff --body-file -`, with the
   note piped in (`--body-file -` reads stdin, and the command refuses an

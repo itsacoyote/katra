@@ -13,6 +13,7 @@
  * from whoever was about to start it.
  */
 
+import { settleClaim } from "../claims/repo.js";
 import type { LifecycleResult } from "../contract.js";
 import { writeTx } from "../db/connection.js";
 import type { EventType, Lane } from "../enums.js";
@@ -67,6 +68,13 @@ interface Move {
  * The before-and-after readiness comparison shares that transaction too, so the
  * reported sets are exactly what this change caused rather than what a
  * concurrent writer happened to change alongside it.
+ *
+ * **A claimed task's release rides the same transaction** (`settleClaim`,
+ * `claims/repo.ts`) rather than a call out to `releaseTask`: that function
+ * opens its own `writeTx`, and calling it from in here would either resolve
+ * identity under the write lock or split one logical change across two
+ * transactions — exactly the atomicity spec req 5 forbids. `settleClaim`
+ * exists precisely to be the shared core without either hazard.
  */
 function transition(
   store: OpenStore,
@@ -74,9 +82,16 @@ function transition(
   plan: (task: Task) => Move,
 ): LifecycleResult {
   const id = requireId(store, idInput);
-  // Before the transaction: resolving the actor spawns two git subprocesses,
-  // and doing that under `BEGIN IMMEDIATE` holds the write lock across both.
+  // Before the transaction: resolving identity spawns git subprocesses, and
+  // doing that under `BEGIN IMMEDIATE` holds the write lock across them. Both
+  // halves are resolved unconditionally — including on `reopen`, which never
+  // uses `worktree` — because `openStore` already resolved and memoised the
+  // worktree itself, in `bumpPresence` (`presence.ts`), before this ever
+  // runs: every store pays that spawn once at open time, so reading it again
+  // here costs nothing, whether or not this store's `actor` was supplied
+  // independently of `identity`.
   const actor = store.actor();
+  const worktree = store.identity().worktree;
 
   return writeTx(store.db, (now) => {
     const task = loadOrThrow(store, id, idInput);
@@ -90,6 +105,15 @@ function transition(
         .run(lane, markClosed ? now : null, reason, now, id);
       return loadOrThrow(store, id, idInput);
     });
+
+    // Only close and cancel settle a live claim — both are terminal, and a
+    // claim on a task no one can work on anymore is stale by construction
+    // (spec req 5). `markClosed` already draws exactly that line: `reopen` is
+    // the one move that leaves it `false`, since reviving a task is not a
+    // takeover.
+    if (markClosed) {
+      settleClaim(store, task, actor, worktree, now);
+    }
 
     // Both lanes travel on the event as well as the verb. `closed` already
     // implies the destination, but not where the task came from — and "what

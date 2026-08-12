@@ -16,10 +16,11 @@
  * ```
  *
  * Nothing here may import from `store.ts`, `db/`, or any module that does.
- * `enums.ts` and `tasks/types.ts` are the only permitted dependencies, and
- * neither touches the database.
+ * `enums.ts`, `tasks/types.ts` and `claims/types.ts` are the only permitted
+ * dependencies, and none of them touches the database.
  */
 
+import type { ClaimInfo } from "./claims/types.js";
 import type { Lane, NoteKind, Priority } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
 import type { Note } from "./notes/types.js";
@@ -39,13 +40,18 @@ export interface StoreWarning {
 }
 
 /**
- * A task standing between another task and readiness.
+ * Two types this file does not define, re-exported here so it stays the one
+ * place to read the `--json` contract.
  *
- * Defined in `tasks/types.ts` and re-exported here so this file stays the one
- * place to read the `--json` contract. It moved there because `TaskDetail`
- * needs it, and this module already imports that one.
+ * `Blocker` is defined in `tasks/types.ts` because {@link TaskDetail} needs
+ * it there, and this module already imports that one back.
+ *
+ * `ClaimInfo` (F4) is defined in `claims/types.ts`, the third of this file's
+ * permitted dependencies (see the module docs above): that module has to
+ * stay free of `store.ts`/`db/*` too, for the identical reason. It rides on
+ * `TaskView.claim`, the {@link BriefResult} task arm, and `BoardTask.claim`.
  */
-export type { Blocker };
+export type { Blocker, ClaimInfo };
 
 /**
  * What `update` prints.
@@ -179,6 +185,17 @@ export type NextResult =
        * store answered with a lane the caller had never heard of.
        */
       readonly untriaged: number;
+      /**
+       * Planned work that exists but is claimed by another worktree (F4).
+       *
+       * A fourth answer behind "nothing to do", distinct from `untriaged`:
+       * every one of the backlog's `Planned` candidates being claimed
+       * elsewhere is not the same as the store having none at all, and an
+       * agent that cannot tell the two apart reads a live backlog as an empty
+       * one. Declared here in full by T8; `nextTask` (`tasks/next.ts`)
+       * produces `0` until T6 makes the candidate query claim-aware.
+       */
+      readonly claimedElsewhere: number;
     };
 
 /** A note shown in full, and what the cap did to it. */
@@ -255,9 +272,14 @@ interface BriefCommon {
  * {@link BoardResult} is deliberately the opposite: fixed keys, always present,
  * empty when they have nothing (ADR-009). `brief` describes one thing that is
  * one of two kinds; `board` describes one thing that is always the same shape.
+ *
+ * `claim` (F4) is on the **task arm only**, for the same reason `children` is
+ * on the epic arm only: an epic cannot be claimed (AC6), so a `claim` field on
+ * that arm would be permanently `null` — the exact absent-vs-unfilled
+ * ambiguity this union exists to rule out, not ordinary nullable data.
  */
 export type BriefResult =
-  | (BriefCommon & { readonly level: "task" })
+  | (BriefCommon & { readonly level: "task"; readonly claim: ClaimInfo | null })
   | (BriefCommon & {
       readonly level: "epic";
       /** Children grouped by lane, in lane order, so the shape of the work reads. */
@@ -284,6 +306,28 @@ export interface BoardTask {
   readonly blocked: boolean;
   /** What stands in its way. Populated for the blocked section. */
   readonly blockers: readonly Blocker[];
+  /**
+   * Who holds this task, or `null` when it is unclaimed (F4).
+   *
+   * Declared here in full by T8; `toBoardTask` (`board.ts`) produces `null`
+   * for every row until T7 joins `claims` into the section queries — the
+   * board's `SELECT`s do not reach that table yet, so there is nothing
+   * truthful to fill in before then. Not the union-arm ambiguity
+   * {@link BriefResult} avoids: this is one fixed shape (ADR-009) reporting
+   * data it genuinely does not have yet, the same as any other honest `null`.
+   */
+  readonly claim: ClaimInfo | null;
+  /**
+   * True when another worktree holds this task (F4).
+   *
+   * A second field rather than deriving "claimed by someone else" from
+   * `claim` at render time: `toBoardTask` is a pure function of one row and
+   * has no caller identity to compare `claim.holder` against, so own-vs-other
+   * has to ride in on the row itself. `false` for every row until T7 wires
+   * the join and the caller-identity comparison it evaluates for the section
+   * `ORDER BY` — see `toBoardTask`.
+   */
+  readonly claimedElsewhere: boolean;
 }
 
 /** One bounded section of the board. */

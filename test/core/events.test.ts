@@ -149,6 +149,32 @@ describe("appendEvent", () => {
     expect(readEvent(id)).toMatchObject({ from_lane: "Defined", to_lane: "In Progress" });
   });
 
+  it("records the prior actor a forced release displaces", () => {
+    // Nothing calls appendEvent with a non-null priorActor yet — release
+    // --force lands in T4 — so the `?? null` default at the tail of the bind
+    // list could silently swallow a real value with nothing to catch it.
+    // Round-tripping through listEvents covers the bind position and the
+    // read path in one assertion, not just the write.
+    const task = seedTask(fixture.store);
+
+    writeTx(fixture.store.db, (stamp) =>
+      appendEvent(
+        fixture.store,
+        {
+          type: "released",
+          entityId: task,
+          actor: ACTOR,
+          priorActor: "feature/x @ /repo/wt-x",
+        },
+        stamp,
+      ),
+    );
+
+    expect(listEvents(fixture.store, { entityId: task }).events[0]?.priorActor).toBe(
+      "feature/x @ /repo/wt-x",
+    );
+  });
+
   it("records an event for an entity that no longer exists", () => {
     // ADR-008: `delete` appends its event as its last act, after the row is
     // gone. A foreign key — or a lookup inside appendEvent — would make the
@@ -210,7 +236,18 @@ describe("event ids as a total order", () => {
       `,
     });
 
-    expect(outcomes.map((o) => o.stderr).join("")).toBe("");
+    // Every process opens the same worktree, so presence's own heartbeat
+    // (F4 T3, ADR-011) races on that one row alongside the appendEvent
+    // contention this test is deliberately manufacturing. Its own short busy
+    // budget can lose that race and warn once — expected, and distinct from
+    // an actual failure in the write path this test exists to pin.
+    const unexpectedStderr = outcomes
+      .map((o) => o.stderr)
+      .join("")
+      .split("\n")
+      .filter((line) => line !== "" && !/KatraPresenceWarning|--trace-warnings/.test(line))
+      .join("\n");
+    expect(unexpectedStderr).toBe("");
     expect(outcomes.map((o) => o.value?.ok)).toEqual([20, 20, 20, 20, 20, 20]);
 
     const verify = openDatabase(dbPath);
@@ -365,7 +402,7 @@ describe("rowToEvent", () => {
     // reaching a renderer that has no case for it.
     const row = {
       id: 1,
-      type: "claimed",
+      type: "ref-linked",
       entity_id: "kt-aaaaaa",
       epic_id: null,
       actor: ACTOR,

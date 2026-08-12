@@ -369,6 +369,42 @@ describe("katra show", () => {
   });
 });
 
+describe("show and claims", () => {
+  it("shows the claim where one exists", async () => {
+    const task = await add(["do the thing"]);
+    const claimed = (await runCli(["claim", task, "--json"], { cwd: repo.dir })).json() as {
+      claim: { actor: string };
+    };
+
+    const result = await runCli(["show", task], { cwd: repo.dir });
+
+    expect(result.stdout).toContain("claimed");
+    expect(result.stdout).toContain(claimed.claim.actor);
+    expect(result.stdout).toContain("last seen");
+    // T4's security scan: last_seen is worktree liveness, not evidence of
+    // work on this task.
+    expect(result.stdout).not.toContain("active on");
+  });
+
+  it("carries the claim in the JSON document", async () => {
+    const task = await add(["do the thing"]);
+    await runCli(["claim", task], { cwd: repo.dir });
+
+    const view = (await runCli(["show", task, "--json"], { cwd: repo.dir })).json() as TaskView;
+
+    expect(view.claim).not.toBeNull();
+    expect(view.claim?.actor).not.toBe("");
+  });
+
+  it("shows no claimed line for an unclaimed task", async () => {
+    const task = await add(["free to take"]);
+
+    const result = await runCli(["show", task], { cwd: repo.dir });
+
+    expect(result.stdout).not.toContain("claimed");
+  });
+});
+
 describe("command registration", () => {
   it("registers init, add and show on the program", () => {
     // No task previously owned wiring commands onto the program, so they could

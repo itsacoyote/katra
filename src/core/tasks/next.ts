@@ -24,20 +24,63 @@ export type { BlockedTask, NextResult };
 export const NEXT_LANE = "Planned";
 
 /**
+ * The tail every ranking in this module ends with: priority, then oldest
+ * first, then `rowid` — the last because two tasks written in the same
+ * millisecond are routine and would otherwise come back in an arbitrary
+ * order between runs. The `t.` prefix is part of it: every consumer aliases
+ * `tasks` to `t`.
+ */
+const RANKING_TAIL = "t.priority, t.created_at, t.rowid";
+
+/**
  * How katra ranks tasks against each other, everywhere.
- *
- * Priority, then oldest first, then `rowid` — the last because two tasks
- * written in the same millisecond are routine and would otherwise come back in
- * an arbitrary order between runs.
  *
  * Exported because `board` ranks three sections by it and this fragment is
  * already hand-written at seven call sites. An eighth and ninth typed by hand
  * is how two commands quietly start disagreeing about what comes first — and
  * `board`'s contract is that its top ready row *is* what `next` returns.
- *
- * The `t.` prefix is part of it: every consumer aliases `tasks` to `t`.
  */
-export const TASK_RANKING = "ORDER BY t.priority, t.created_at, t.rowid";
+export const TASK_RANKING = `ORDER BY ${RANKING_TAIL}`;
+
+/**
+ * {@link TASK_RANKING} with an extra sort key spliced in ahead of priority.
+ *
+ * The composition point plan-review MEDIUM-6 asked for: `next` leads with
+ * "claimed by me first" ({@link OWN_CLAIM_FIRST} below), and T7's board ready
+ * section leads with "unclaimed first, other-claimed last" (ADR-012). Both
+ * want {@link RANKING_TAIL}, and a ninth hand-typed copy of it is exactly the
+ * drift {@link TASK_RANKING}'s own docs warn about.
+ */
+export function rankingWith(prefix: string): string {
+  return `ORDER BY ${prefix}, ${RANKING_TAIL}`;
+}
+
+/**
+ * The claims join and the "belongs to someone else" test every claim-aware
+ * query in this module shares — the one spelling of claim classification
+ * (plan-review HIGH-1). A claim is never a filter baked into
+ * {@link readyPredicate} or {@link conditionsFor}: only the candidate query in
+ * {@link nextTask} applies `CLAIMED_ELSEWHERE` as an exclusion. The blocked
+ * branch and `countUntriaged` join nothing and stay exactly as F3 left them.
+ *
+ * `CLAIMED_ELSEWHERE`'s single `?` binds the caller's own worktree
+ * (`store.identity().worktree`) — wherever this fragment lands in a query's
+ * text is where that parameter belongs in the bound params array.
+ */
+export const CLAIMS_JOIN = "LEFT JOIN claims c ON c.task_id = t.id";
+
+/** True when the row's claim belongs to a worktree other than the caller's. */
+export const CLAIMED_ELSEWHERE = "(c.task_id IS NOT NULL AND c.holder <> ?)";
+
+/**
+ * Ranks the caller's own claim ahead of every other candidate — including a
+ * higher-priority unclaimed task — so a session that loses context (`/clear`,
+ * crash, restart) resumes exactly where it left off instead of being handed
+ * something else (ADR-012). Scoped by construction: this only reorders rows
+ * {@link readyPredicate} already admitted into the Planned-and-ready pool, so
+ * an own claim that has moved out of `Planned` never re-enters here.
+ */
+const OWN_CLAIM_FIRST = "CASE WHEN c.holder = ? THEN 0 ELSE 1 END";
 
 export interface NextFilters {
   readonly kind?: Kind;
@@ -142,15 +185,17 @@ export function readyPredicate(filters: NextFilters = {}): Conditions {
  */
 export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResult {
   const ready = readyPredicate(filters);
+  const worktree = store.identity().worktree;
   const candidate = store.db
     .prepare(
       `SELECT t.id AS id FROM tasks t
          JOIN ${READINESS_VIEW} r ON r.id = t.id
-        WHERE ${ready.sql}
-        ${TASK_RANKING}
+         ${CLAIMS_JOIN}
+        WHERE ${ready.sql} AND NOT ${CLAIMED_ELSEWHERE}
+        ${rankingWith(OWN_CLAIM_FIRST)}
         LIMIT 1`,
     )
-    .get(...ready.params) as { id: string } | undefined;
+    .get(...ready.params, worktree, worktree) as { id: string } | undefined;
 
   if (candidate !== undefined) {
     const task = getTask(store, candidate.id);
@@ -193,7 +238,32 @@ export function nextTask(store: OpenStore, filters: NextFilters = {}): NextResul
       blockers: listBlockers(store, row.id),
     })),
     untriaged: countUntriaged(store, filters),
+    claimedElsewhere: countClaimedElsewhere(store, filters, worktree),
   };
+}
+
+/**
+ * How many otherwise-startable tasks are claimed by a worktree other than
+ * `worktree`.
+ *
+ * Only ever asked once the candidate query above has already come back
+ * empty — a second question over the same {@link readyPredicate} pool, this
+ * time about who holds it rather than whether it is free. What lets an
+ * all-claimed backlog answer differently from a genuinely empty one
+ * (ADR-012), the same way `untriaged` separates "nothing planned" from
+ * "everything planned is blocked".
+ */
+function countClaimedElsewhere(store: OpenStore, filters: NextFilters, worktree: string): number {
+  const ready = readyPredicate(filters);
+  const row = store.db
+    .prepare(
+      `SELECT COUNT(*) AS claimed FROM tasks t
+         JOIN ${READINESS_VIEW} r ON r.id = t.id
+         ${CLAIMS_JOIN}
+        WHERE ${ready.sql} AND ${CLAIMED_ELSEWHERE}`,
+    )
+    .get(...ready.params, worktree) as { claimed: number };
+  return row.claimed;
 }
 
 /**

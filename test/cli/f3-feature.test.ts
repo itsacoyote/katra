@@ -9,9 +9,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import type { BoardResult, EventLog, NextResult } from "../../src/core/contract.js";
+import { readPresence } from "../../src/core/presence.js";
+import { openStore } from "../../src/core/store.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
 import { createGitRepo } from "../helpers/fixture.js";
+import { seedPresence, seedTime } from "../helpers/seed.js";
 
 let repo: GitFixture;
 beforeEach(async () => {
@@ -34,6 +37,38 @@ async function eventCount(): Promise<number> {
   return (log as EventLog).events.length;
 }
 
+/**
+ * Overwrites this repo's own worktree presence row with a stale `last_seen`
+ * (T3's lever), opening the store only long enough to write it.
+ *
+ * ADR-011: every `openStore` call bumps presence, so the write commands a
+ * test runs before this already left the row fresh — inside
+ * `PRESENCE_FRESH_MS`, the read commands under test would skip their own
+ * bump and prove nothing about it. Returns the worktree and the stale value
+ * seeded, so the caller can assert the row moved off of it.
+ */
+function seedStalePresence(dir: string): { worktree: string; staleLastSeen: string } {
+  const { store } = openStore(dir, {});
+  try {
+    const worktree = store.identity().worktree;
+    const staleLastSeen = seedTime();
+    seedPresence(store, { worktree, lastSeen: staleLastSeen });
+    return { worktree, staleLastSeen };
+  } finally {
+    store.close();
+  }
+}
+
+/** Reads a worktree's presence row directly, opening the store only to do so. */
+function readPresenceRow(dir: string, worktree: string): string | undefined {
+  const { store } = openStore(dir, {});
+  try {
+    return readPresence(store, worktree)?.lastSeen;
+  } finally {
+    store.close();
+  }
+}
+
 describe("F3 reads change nothing", () => {
   it("runs brief and board without writing an event", async () => {
     // Asserted over **both** commands in one run, because that is what the
@@ -48,6 +83,11 @@ describe("F3 reads change nothing", () => {
     });
 
     const before = await eventCount();
+    // ADR-011 narrows F3's "writes nothing" to "writes no event": every
+    // command bumps presence, reads included. The seed above so it can be
+    // proven against a genuinely stale row, not one the writes just left
+    // fresh.
+    const { worktree, staleLastSeen } = seedStalePresence(repo.dir);
 
     for (const args of [
       ["brief", task],
@@ -62,6 +102,11 @@ describe("F3 reads change nothing", () => {
     }
 
     expect(await eventCount()).toBe(before);
+    // The narrowed contract's other half: no event, but the presence row
+    // this worktree seeded stale did move.
+    const lastSeen = readPresenceRow(repo.dir, worktree);
+    expect(lastSeen).toBeDefined();
+    expect(Date.parse(lastSeen ?? "")).toBeGreaterThan(Date.parse(staleLastSeen));
   });
 });
 

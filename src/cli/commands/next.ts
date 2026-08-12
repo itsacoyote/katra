@@ -7,6 +7,7 @@ import { narrowKind, narrowLevel } from "../../core/narrow.js";
 import type { NextFilters, NextResult } from "../../core/tasks/next.js";
 import { NEXT_LANE, nextTask } from "../../core/tasks/next.js";
 import { requireEpicId } from "../../core/tasks/repo.js";
+import { oneLine } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
@@ -14,42 +15,80 @@ import { withStore } from "../with-store.js";
 function formatNext(result: NextResult): string {
   if (result.status === "found") {
     const lines = [
-      `${result.task.id}  P${result.task.priority}  ${result.task.title}`,
+      `${result.task.id}  P${result.task.priority}  ${oneLine(result.task.title)}`,
       `  lane      ${result.task.lane}`,
       `  kind      ${result.task.kind}`,
       "  blockers  none",
     ];
-    if (result.epic !== null) lines.push(`  epic      ${result.epic.id}  ${result.epic.title}`);
+    if (result.epic !== null) {
+      lines.push(`  epic      ${result.epic.id}  ${oneLine(result.epic.title)}`);
+    }
     return lines.join("\n");
   }
 
-  // Three answers hide behind "nothing to do", and the reply has to say which.
-  // Left as a bare "nothing is in the Planned lane", the middle case is a dead
-  // end: `add` puts work in `Defined`, so a caller who has just filled a store
-  // is told about a lane they have never heard of and given no way forward.
-  if (result.blocked.length === 0) {
-    if (result.untriaged === 0) {
-      return `nothing is in the ${NEXT_LANE} lane, and there is no unfinished work elsewhere`;
-    }
+  // Up to three answers hide behind "nothing to do", and they are not
+  // mutually exclusive — a backlog can be blocked *and* claimed at once, so
+  // each fact that applies gets its own section rather than one branch
+  // winning and silencing the rest (iteration-3 addendum).
+  //
+  // `contended` reshapes the blocked/untriaged leads themselves — not just
+  // whether a claimed section is appended — because both of their unqualified
+  // forms assert something false the moment a claim is in play: "no Planned
+  // task is ready" reads as if none exists, when one does and is merely held
+  // elsewhere, and "nothing is in the Planned lane" is the literal ADR-012
+  // violation this exists to prevent.
+  const contended = result.claimedElsewhere > 0;
+  const sections: string[] = [];
+
+  if (result.blocked.length > 0) {
+    // Naming the blockers turns "nothing to do" into "clear this first".
+    const scope = contended ? `unclaimed ${NEXT_LANE}` : NEXT_LANE;
+    sections.push(
+      [
+        `no ${scope} task is ready — ${result.blocked.length} blocked:`,
+        ...result.blocked.flatMap((task) => [
+          `  ${task.id}  ${oneLine(task.title)}`,
+          ...task.blockers.map(
+            (blocker) => `    waits on ${blocker.id}  ${blocker.lane}  ${oneLine(blocker.title)}`,
+          ),
+        ]),
+      ].join("\n"),
+    );
+  } else if (result.untriaged > 0) {
+    // The middle case used to be a dead end: `add` puts work in `Defined`, so
+    // a caller who has just filled a store was told about a lane they had
+    // never heard of and given no way forward.
     const count =
       result.untriaged === 1 ? "1 unfinished task is" : `${result.untriaged} unfinished tasks are`;
-    return (
-      `nothing is in the ${NEXT_LANE} lane — ${count} waiting to be planned.\n` +
-      `  see them with \`katra list --ready\`, then plan one with ` +
-      `\`katra update <id> --lane ${NEXT_LANE}\``
+    const lead = contended
+      ? `${count} waiting to be planned.`
+      : `nothing is in the ${NEXT_LANE} lane — ${count} waiting to be planned.`;
+    sections.push(
+      `${lead}\n` +
+        `  see them with \`katra list --ready\`, then plan one with ` +
+        `\`katra update <id> --lane ${NEXT_LANE}\``,
     );
   }
 
-  // Naming the blockers turns "nothing to do" into "clear this first".
-  return [
-    `no ${NEXT_LANE} task is ready — ${result.blocked.length} blocked:`,
-    ...result.blocked.flatMap((task) => [
-      `  ${task.id}  ${task.title}`,
-      ...task.blockers.map(
-        (blocker) => `    waits on ${blocker.id}  ${blocker.lane}  ${blocker.title}`,
-      ),
-    ]),
-  ].join("\n");
+  if (contended) {
+    const count =
+      result.claimedElsewhere === 1
+        ? "1 ready task is"
+        : `${result.claimedElsewhere} ready tasks are`;
+    sections.push(
+      `${count} claimed by another worktree — pick different work, or ` +
+        `\`katra release <id> --force\` to take one over`,
+    );
+  }
+
+  // Genuinely nothing: no blocked work, nothing untriaged, nothing claimed.
+  // A length check rather than a third condition mirroring the two above —
+  // this is the one case none of them fired, not a fourth fact of its own.
+  if (sections.length === 0) {
+    sections.push(`nothing is in the ${NEXT_LANE} lane, and there is no unfinished work elsewhere`);
+  }
+
+  return sections.join("\n\n");
 }
 
 export function registerNext(program: Command, context: CliContext): void {

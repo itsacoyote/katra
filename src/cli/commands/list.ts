@@ -48,7 +48,9 @@ export function registerList(program: Command, context: CliContext): void {
     .option("--priority <n>", "only tasks at this priority")
     .option(
       "--ready",
-      "only startable tasks; excludes epics and finished work unless --level or --lane says otherwise",
+      "only startable tasks; excludes epics and finished work unless --level or --lane says " +
+        "otherwise. Claim-neutral: unlike `next`, returns a task whether or not another " +
+        "worktree holds it",
     )
     .option("--blocked", "only tasks waiting on something; same exclusions as --ready")
     .option("--limit <n>", "return at most this many, highest-ranked first")
