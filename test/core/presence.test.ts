@@ -255,7 +255,13 @@ describe("bumpPresence", () => {
 
     expect(probeOutcomes[0]?.ok).toBe(true);
     const probeElapsedMs = probeOutcomes[0]?.value?.elapsedMs;
-    expect(probeElapsedMs).toBeLessThan(500);
+    // The bound discriminates the short budget (200ms) from the connection's
+    // 7500ms — the mutation this test exists to catch measures ~7500ms. It is
+    // NOT a perf assertion: a loaded CI runner can deschedule the probe after
+    // the timeout expires (macOS measured 692ms on a healthy mechanism), so
+    // the margin is generous. Anything under 2000ms can only mean the short
+    // budget was in effect; tightening this bound buys nothing but flakes.
+    expect(probeElapsedMs).toBeLessThan(2000);
 
     const probeVerify = openDatabase(dbPath);
     const probeRow = probeVerify
