@@ -422,10 +422,19 @@ export interface AssembledNotes {
  * the note's `actor` and its `created_at`, normalized to katra's canonical
  * width (`normalizeTimestamp`).
  *
- * The three issue-level fields share one `createdAt` — the issue's own
- * `created_at` (already normalized by the caller, since it's a single value
- * reused three times rather than three independent ones) — because beads
- * carries no per-field timestamp for `design`/`acceptance_criteria`/`notes`.
+ * The three issue-level fields share one `createdAt` — `issueCreatedAt`,
+ * **already normalized by the caller** (`transform.ts`'s `mapIssue` calls
+ * `normalizeTimestamp` on the issue's own `created_at` once, for the
+ * `PlannedItem` itself, and threads that same value in here) rather than a
+ * raw string this function would normalize again. Re-deriving it here used
+ * to double-count one bad timestamp into `invalidTimestamps` — once from
+ * `mapIssue`'s own call, once from this function silently repeating it on
+ * the identical raw value (`katra-9aw.49.10`) — since beads carries no
+ * per-field timestamp for `design`/`acceptance_criteria`/`notes` to
+ * normalize independently anyway; all three share the issue's one value.
+ *
+ * A comment's own `created_at` is a genuinely separate value beads *does*
+ * carry per-comment, so that one is still normalized here, same as always.
  *
  * A comment missing `author`, or blank after trimming, falls back to
  * `migratingIdentity` and is reported under `commentAuthorFallbacks`
@@ -436,7 +445,7 @@ export interface AssembledNotes {
  */
 export function assembleNotes(
   ref: MigrationItemRef,
-  rawIssueCreatedAt: string,
+  issueCreatedAt: string,
   sources: BeadsNoteSources,
   migratingIdentity: string,
   fallbackTimestamp: string,
@@ -446,14 +455,6 @@ export function assembleNotes(
   const commentAuthorFallbacks: CommentRef[] = [];
   const invalidTimestamps: InvalidTimestamp[] = [];
 
-  const issueCreatedAt = normalizeTimestamp(
-    ref,
-    "created_at",
-    rawIssueCreatedAt,
-    fallbackTimestamp,
-  );
-  invalidTimestamps.push(...issueCreatedAt.degradations);
-
   const addIssueLevelNote = (kind: NoteKind, body: string | undefined): void => {
     if (body === undefined) return;
     const trimmed = body.trim();
@@ -461,7 +462,7 @@ export function assembleNotes(
       blankNotes.push({ oldId: ref.oldId, title: ref.title, noteKind: kind });
       return;
     }
-    value.push({ kind, body: trimmed, actor: migratingIdentity, createdAt: issueCreatedAt.value });
+    value.push({ kind, body: trimmed, actor: migratingIdentity, createdAt: issueCreatedAt });
   };
 
   addIssueLevelNote("decision", sources.design);

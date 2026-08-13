@@ -238,9 +238,12 @@ describe("assembleNotes", () => {
 
   it("assembles design/acceptance_criteria/notes/comments into typed notes preserving author and time", () => {
     const r = ref("bd-7", "t");
+    // issueCreatedAt is already normalized by the caller (mapIssue,
+    // transform.ts) — assembleNotes uses it as-is rather than re-normalizing,
+    // so this is the 24-char canonical width, not a raw beads timestamp.
     const result = assembleNotes(
       r,
-      "2026-08-03T09:05:00Z",
+      "2026-08-03T09:05:00.000Z",
       {
         design: "  Use postgres  ",
         acceptanceCriteria: "Must pass CI",
@@ -294,7 +297,7 @@ describe("assembleNotes", () => {
     const r = ref("bd-11", "t");
     const result = assembleNotes(
       r,
-      "2026-08-03T09:05:00Z",
+      "2026-08-03T09:05:00.000Z",
       { notes: "   " },
       "migrator@katra",
       fallback,
@@ -308,7 +311,7 @@ describe("assembleNotes", () => {
     const r = ref("bd-12", "t");
     const result = assembleNotes(
       r,
-      "2026-08-03T09:05:00Z",
+      "2026-08-03T09:05:00.000Z",
       {
         comments: [
           {
@@ -341,7 +344,7 @@ describe("assembleNotes", () => {
     const r = ref("bd-14", "t");
     const result = assembleNotes(
       r,
-      "2026-08-03T09:05:00Z",
+      "2026-08-03T09:05:00.000Z",
       {
         comments: [
           {

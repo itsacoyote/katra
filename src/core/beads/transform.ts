@@ -391,9 +391,15 @@ function mapIssue(
   // forbids assigning `string | undefined` to BeadsNoteSources's optional
   // `string`-typed fields, so an absent field must be an absent key, not a
   // key holding `undefined`.
+  //
+  // createdAt.value, not issue.created_at: assembleNotes takes the
+  // already-normalized value (mapIssue just normalized it above) rather than
+  // re-deriving it from the raw string a second time — the double-normalize
+  // used to double-count one bad created_at into invalidTimestamps
+  // (katra-9aw.49.10).
   const notesResult = assembleNotes(
     ref,
-    issue.created_at,
+    createdAt.value,
     {
       ...(issue.design !== undefined ? { design: issue.design } : {}),
       ...(issue.acceptance_criteria !== undefined

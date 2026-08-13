@@ -279,6 +279,35 @@ describe("planMigration", () => {
     ]);
   });
 
+  it("reports a bad issue-level created_at exactly once, not once per note source", () => {
+    // mapIssue normalizes issue.created_at once for the PlannedItem itself,
+    // then threads that already-normalized value into assembleNotes for the
+    // issue-level notes' shared createdAt. A `notes` field is included so
+    // assembleNotes actually runs its issue-level-note path; before the fix,
+    // assembleNotes silently re-normalized the same raw value, doubling this
+    // entry to 2 (katra-9aw.49.10).
+    const issue = makeIssue({
+      id: "BAD-TIME",
+      created_at: "not-a-date",
+      notes: "General remark",
+    });
+
+    const { report } = planMigration(makeExtract([issue]), IDENTITY, FALLBACK);
+
+    const createdAtEntries = report.invalidTimestamps.items.filter(
+      (entry) => entry.oldId === "BAD-TIME" && entry.field === "created_at",
+    );
+    expect(createdAtEntries).toEqual([
+      {
+        oldId: "BAD-TIME",
+        title: "Issue BAD-TIME",
+        field: "created_at",
+        raw: "not-a-date",
+        fallback: FALLBACK,
+      },
+    ]);
+  });
+
   it("orders the event plan by time, old id, then type, including note-added events", () => {
     const t0 = "2026-01-01T00:00:00.000Z";
     const aItem = makeIssue({
