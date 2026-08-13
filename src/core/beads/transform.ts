@@ -142,14 +142,21 @@ function isCommentShaped(value: unknown): boolean {
 }
 
 /**
- * Verifies exactly the field types the task body names: `status`/`issue_type`
- * strings, `priority` a number, the three timestamp fields strings, and
- * `dependencies`/`comments`/`labels` arrays of the right element shape.
- * Everything else `BeadsIssue` declares (`description`, `owner`,
- * `created_by`, `assignee`, `close_reason`, `external_ref`, `started_at`,
- * …) is copied or reported as-is downstream without a type claim to
- * verify — `mapping.ts` and this module either treat it as an opaque string
- * or never dereference it as anything narrower.
+ * Verifies the field types the task body names (`status`/`issue_type`
+ * strings, `priority` a number, the timestamp fields strings,
+ * `dependencies`/`comments`/`labels` arrays of the right element shape),
+ * *plus* every other field `mapIssue` dereferences as a string below —
+ * `owner`, `created_by`, `external_ref`, `started_at` all reach a `.trim()`
+ * call there, so each must be verified here too: `mapping.ts`'s never-throw
+ * rule and the T6 pairing ("a transform-passed plan loads with zero
+ * write-path exceptions") both mean this module cannot let an untyped value
+ * reach a method call either — a hostile `{"owner": 123, ...}` record must
+ * route to `invalidItems`, not throw a `TypeError` out of `mapIssue` and take
+ * the whole `planMigration` call down with it. `description`, `assignee`,
+ * and `close_reason` are the remaining fields this module reads, and they
+ * genuinely are copied through as-is (`description`/`assignee` directly,
+ * `close_reason` via `??`) without ever calling a method on them, so they
+ * stay unchecked.
  *
  * A failure here is whole-issue, not per-field: this function does not
  * report anything itself, it only answers "can the rest of this module trust
@@ -161,9 +168,14 @@ function hasValidShape(issue: BeadsIssue): boolean {
   if (typeof candidate.status !== "string") return false;
   if (typeof candidate.issue_type !== "string") return false;
   if (typeof candidate.priority !== "number") return false;
+  if (typeof candidate.owner !== "string") return false;
+  if (typeof candidate.created_by !== "string") return false;
   if (typeof candidate.created_at !== "string") return false;
   if (typeof candidate.updated_at !== "string") return false;
   if (candidate.closed_at !== undefined && typeof candidate.closed_at !== "string") return false;
+  if (candidate.external_ref !== undefined && typeof candidate.external_ref !== "string")
+    return false;
+  if (candidate.started_at !== undefined && typeof candidate.started_at !== "string") return false;
 
   if (candidate.dependencies !== undefined) {
     if (
@@ -311,6 +323,37 @@ interface MappedItem {
   readonly events: PlannedEvent[];
 }
 
+interface ClosedInfo {
+  readonly closedAt: string;
+  readonly closeReason: string | null;
+}
+
+/**
+ * Resolves a closed item's `closedAt`/`closeReason`, or `null` when the
+ * item's final lane is not terminal (`isDone` false) — one function instead
+ * of two mutable `let`s in `mapIssue` plus a later `isDone && closedAt !==
+ * null` re-check, since "is this item closed" only needs deciding once.
+ */
+function resolveClosedInfo(
+  ref: MigrationItemRef,
+  issue: BeadsIssue,
+  isDone: boolean,
+  fallbackTimestamp: string,
+  acc: ReportAccumulator,
+): ClosedInfo | null {
+  if (!isDone) return null;
+
+  const closedAtResult = normalizeTimestamp(
+    ref,
+    "closed_at",
+    issue.closed_at ?? "",
+    fallbackTimestamp,
+  );
+  acc.invalidTimestamps.push(...closedAtResult.degradations);
+
+  return { closedAt: closedAtResult.value, closeReason: issue.close_reason ?? null };
+}
+
 function mapIssue(
   issue: BeadsIssue,
   migratingIdentity: string,
@@ -395,19 +438,7 @@ function mapIssue(
   // module only decides the *final* lane; the two-step creation is load's
   // concern.
   const isDone = status.value.lane === "Done";
-  let closedAt: string | null = null;
-  let closeReason: string | null = null;
-  if (isDone) {
-    const closedAtResult = normalizeTimestamp(
-      ref,
-      "closed_at",
-      issue.closed_at ?? "",
-      fallbackTimestamp,
-    );
-    acc.invalidTimestamps.push(...closedAtResult.degradations);
-    closedAt = closedAtResult.value;
-    closeReason = issue.close_reason ?? null;
-  }
+  const closedInfo = resolveClosedInfo(ref, issue, isDone, fallbackTimestamp, acc);
 
   const draft: PlannedItem = {
     oldId: issue.id,
@@ -422,15 +453,20 @@ function mapIssue(
     tags: tags.value,
     createdAt: createdAt.value,
     updatedAt: updatedAt.value,
-    closedAt,
-    closeReason,
+    closedAt: closedInfo?.closedAt ?? null,
+    closeReason: closedInfo?.closeReason ?? null,
   };
 
   const events: PlannedEvent[] = [
     { type: "created", itemOldId: issue.id, at: createdAt.value, title: issue.title },
   ];
-  if (isDone && closedAt !== null) {
-    events.push({ type: "closed", itemOldId: issue.id, at: closedAt, reason: closeReason });
+  if (closedInfo !== null) {
+    events.push({
+      type: "closed",
+      itemOldId: issue.id,
+      at: closedInfo.closedAt,
+      reason: closedInfo.closeReason,
+    });
   }
 
   const notes: PlannedNote[] = notesResult.value.map((assembled, index) => {
@@ -601,21 +637,53 @@ interface AncestryWalk {
  * research notes) looking for the nearest ancestor whose level is `epic`,
  * with its own visited set so a cycle breaks this walk without corrupting
  * any other item's.
+ *
+ * `cache` is shared across every call {@link resolveAncestry} makes in one
+ * `planMigration` run. A straight n-deep chain would otherwise cost O(n²) —
+ * each node re-walking the full remaining suffix its descendants already
+ * walked — the exact hostile-export threat model {@link findPath}'s own
+ * docstring cites for the same reason. Once a walk resolves *without* hitting
+ * a cycle (an epic found, or a genuine dead end), every node on that path
+ * shares the identical answer — "Y's nearest epic ancestor" does not depend
+ * on who asked — so it is memoized for all of them, turning the chain into
+ * O(n) total. A cyclic termination is deliberately never cached: caching it
+ * would let a downstream node's walk short-circuit past the cycle instead of
+ * revisiting it on its own path, silently dropping that node's own
+ * `parentCycles` report — every cyclic node must still discover the cycle
+ * from its own `seen` set, exactly as the un-memoized walk did.
  */
 function walkAncestry(
   startOldId: string,
   parentOf: ReadonlyMap<string, string>,
   levelOf: ReadonlyMap<string, Level>,
+  cache: Map<string, string | null>,
 ): AncestryWalk {
+  const cached = cache.get(startOldId);
+  if (cached !== undefined) return { epicOldId: cached };
+
   const seen = new Set<string>([startOldId]);
   const path: string[] = [startOldId];
   let current = startOldId;
 
   for (;;) {
     const parent = parentOf.get(current);
-    if (parent === undefined) return { epicOldId: null };
+    if (parent === undefined) {
+      for (const node of path) cache.set(node, null);
+      return { epicOldId: null };
+    }
     if (seen.has(parent)) return { epicOldId: null, cyclePath: [...path, parent] };
-    if (levelOf.get(parent) === "epic") return { epicOldId: parent };
+
+    if (levelOf.get(parent) === "epic") {
+      for (const node of path) cache.set(node, parent);
+      return { epicOldId: parent };
+    }
+
+    const parentCached = cache.get(parent);
+    if (parentCached !== undefined) {
+      for (const node of path) cache.set(node, parentCached);
+      return { epicOldId: parentCached };
+    }
+
     seen.add(parent);
     path.push(parent);
     current = parent;
@@ -638,6 +706,9 @@ function resolveAncestry(
   acc: ReportAccumulator,
 ): Map<string, string | null> {
   const resolved = new Map<string, string | null>();
+  // Shared across every walkAncestry call below — see that function's docs
+  // for why this is what keeps a deep chain O(n) instead of O(n²).
+  const ancestryCache = new Map<string, string | null>();
 
   for (const [oldId, mapped] of draftByOldId) {
     if (mapped.level === "epic") {
@@ -651,7 +722,7 @@ function resolveAncestry(
       continue;
     }
 
-    const walk = walkAncestry(oldId, parentOf, levelOf);
+    const walk = walkAncestry(oldId, parentOf, levelOf, ancestryCache);
     if (walk.cyclePath !== undefined) {
       acc.parentCycles.push({ oldId, title: mapped.draft.title, path: walk.cyclePath });
       resolved.set(oldId, null);

@@ -97,6 +97,32 @@ describe("planMigration", () => {
     );
   });
 
+  it("resolves a long chain onto its epic correctly (memoized ancestry walk)", () => {
+    const epic = makeIssue({ id: "Epic", issue_type: "epic", title: "Epic" });
+    const depth = 8;
+    const chain = Array.from({ length: depth }, (_, i) => {
+      const id = `T${String(i + 1)}`;
+      const parentId = i === 0 ? "Epic" : `T${String(i)}`;
+      return makeIssue({ id, title: id, dependencies: [edge(id, parentId, "parent-child")] });
+    });
+
+    // Reverse order: the deepest item (T8) is processed first by the outer
+    // loop, forcing a full walk that every shallower item's resolution must
+    // then reuse from the shared cache.
+    const issues = [epic, ...[...chain].reverse()];
+
+    const { plan, report } = planMigration(makeExtract(issues), IDENTITY, FALLBACK);
+
+    for (let i = 1; i <= depth; i++) {
+      expect(plan.items.find((item) => item.oldId === `T${String(i)}`)?.parentOldId).toBe("Epic");
+    }
+
+    // T1's direct parent already is the epic — not reparented; every other
+    // level skipped at least one task-level ancestor.
+    expect(report.reparented.items.some((r) => r.oldId === "T1")).toBe(false);
+    expect(report.reparented.count).toBe(depth - 1);
+  });
+
   it("drops and reports epic-to-epic parent edges", () => {
     const parentEpic = makeIssue({ id: "E-parent", issue_type: "epic", title: "Parent epic" });
     const childEpic = makeIssue({
@@ -224,6 +250,22 @@ describe("planMigration", () => {
     expect(report.invalidNotes.items).toEqual([
       { oldId: "HAS-NOTE", title: "Real title", noteKind: "general" },
     ]);
+  });
+
+  it("routes an issue with a non-string owner to invalidItems instead of throwing", () => {
+    // extract.ts only guarantees id/title are strings — a hostile record like
+    // {"_type":"issue","id":"x","title":"t",...,"owner":123} reaches
+    // transform.ts exactly like this. mapIssue calls .trim() on owner, so an
+    // unchecked non-string here would throw a TypeError out of planMigration
+    // instead of being pre-classified. Cast around makeIssue's BeadsIssue
+    // typing since the whole point is a value the type system would forbid.
+    const hostile = { ...makeIssue({ id: "HOSTILE" }), owner: 123 } as unknown as BeadsIssue;
+
+    expect(() => planMigration(makeExtract([hostile]), IDENTITY, FALLBACK)).not.toThrow();
+
+    const { plan, report } = planMigration(makeExtract([hostile]), IDENTITY, FALLBACK);
+    expect(plan.items.some((item) => item.oldId === "HOSTILE")).toBe(false);
+    expect(report.invalidItems.items).toEqual([{ oldId: "HOSTILE", rawTitle: "Issue HOSTILE" }]);
   });
 
   it("clamps and reports out-of-range priorities", () => {
