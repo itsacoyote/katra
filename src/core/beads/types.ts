@@ -68,6 +68,14 @@ export interface BeadsComment {
  * input, and `--from` accepts arbitrary exports (epic research, "security
  * adjacent"). `transform.ts`'s edge classification (T5 body, step 3) is where
  * an unrecognised value gets a decision, not this type.
+ *
+ * The real export also carries `created_by` and `metadata` on every edge
+ * (verified in `.beads/issues.jsonl`), deliberately unmodeled here: edge-level
+ * identity/machinery fields, dropped for the same reason `BeadsIssue.owner`/
+ * `created_by` are — nothing in katra's dependency or link model has anywhere
+ * to put them, and no report category exists for an edge-level drop the way
+ * `droppedFields` covers issue-level ones. Named here so the "verified
+ * field-by-field" claim above stays true rather than silent.
  */
 export interface BeadsDependency {
   readonly issue_id: string;
@@ -225,7 +233,14 @@ export interface InvalidTimestamp extends MigrationItemRef {
   readonly fallback: string;
 }
 
-/** An issue skipped outright because its title was empty after trimming. Its edges then report as dangling (T5 body, step 4). */
+/**
+ * An issue skipped outright because its title was empty after trimming. Its
+ * edges then report as dangling (T5 body, step 4).
+ *
+ * Carries `rawTitle`, not {@link MigrationItemRef}'s `title` — the title is
+ * exactly what's invalid here, so presenting it as legible would misstate the
+ * finding.
+ */
 export interface InvalidItem {
   readonly oldId: string;
   readonly rawTitle: string;
@@ -311,8 +326,20 @@ export interface MigrationReport {
   readonly commentsConverted: ReportSection<CommentRef>;
   readonly unmappedStatuses: ReportSection<UnmappedValue>;
   readonly unmappedTypes: ReportSection<UnmappedValue>;
-  /** Non-`issue` `_type` records, forwarded from `extract.ts`'s own per-type counts. */
-  readonly skippedRecords: ReportSection<SkippedRecordType>;
+  /**
+   * Non-`issue` `_type` records, forwarded from `extract.ts`'s own per-type
+   * counts. Deliberately **not** a {@link ReportSection}: that shape's own
+   * invariant is `count === items.length`, and `SkippedRecordType` items are
+   * per-type aggregates, not per-record entries — a `ReportSection` here
+   * would make `count` read as "distinct types skipped" while the real
+   * skipped-record total hid inside `items[].count`. `count` below is the
+   * true sum across every type; `byType` is the breakdown.
+   */
+  readonly skippedRecords: {
+    /** Total non-`issue` records skipped, summed across all types below. */
+    readonly count: number;
+    readonly byType: readonly SkippedRecordType[];
+  };
   readonly danglingEdges: ReportSection<MigrationEdgeRef>;
   /** Includes self-edges (an issue depending on itself). */
   readonly duplicateEdges: ReportSection<MigrationEdgeRef>;
