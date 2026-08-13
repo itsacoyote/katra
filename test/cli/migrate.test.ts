@@ -140,6 +140,51 @@ describe("katra migrate beads — preview", () => {
     const lines = result.stdout.trim().split("\n");
     expect(lines).toHaveLength(6);
   });
+
+  it("sanitizes a hostile comment id embedded in an invalid-timestamp field (regression)", async () => {
+    // A second, independently-discovered channel for the same class of bug:
+    // mapping.ts's assembleNotes builds InvalidTimestamp.field by
+    // interpolating the comment's own id (`comment:${comment.id}.created_at`)
+    // when a comment's created_at fails to parse — so `field` is export
+    // content too, not an internal literal, whenever it carries a hostile id.
+    // The sibling test above never exercises this path (it never supplies an
+    // unparseable comment timestamp), so it does not catch this channel.
+    const esc = String.fromCharCode(27);
+    const hostileCommentId = ["evil-comment", esc, "[31m", "\ninjected: forged summary line"].join(
+      "",
+    );
+    writeExport(repo.dir, ".beads/issues.jsonl", [
+      issueLine({
+        id: "bd-ts",
+        comment_count: 1,
+        comments: [
+          {
+            id: hostileCommentId,
+            issue_id: "bd-ts",
+            author: "someone",
+            text: "a normal comment",
+            created_at: "NOT-A-DATE",
+          },
+        ],
+      }),
+    ]);
+
+    const result = await runCli(["migrate", "beads"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).toContain("bd-ts");
+    expect(result.stdout.includes(esc)).toBe(false);
+
+    // The forgery half: a real, non-blank comment with a bad created_at always
+    // triggers two sections together — "comments converted to notes" (the
+    // comment itself becomes a note) and "invalid timestamps" (the created_at
+    // fell back) — so a correctly sanitized report here is exactly four
+    // blocks: the summary, each two-line section, and the closing line — nine
+    // physical lines once the blank block separators are counted. An
+    // unsanitized field's embedded newline would inject a tenth.
+    const lines = result.stdout.trim().split("\n");
+    expect(lines).toHaveLength(9);
+  });
 });
 
 describe("katra migrate beads --apply", () => {

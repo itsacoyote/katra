@@ -140,7 +140,21 @@ function readExportFile(path: string): string {
     });
   }
 
-  return readFileSync(path, "utf8");
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    // Stat succeeding proves the path exists and is a regular file, but not
+    // that this process can read it — a mode-000 file (or a permission
+    // change between the stat and this read) would otherwise let an EACCES
+    // escape as an unhandled fault (exit 4, "katra broke") for what is really
+    // a user-fixable permissions problem.
+    throw new KatraException({
+      code: "validation",
+      message: `could not read --from ${path}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
+      field: "from",
+      value: path,
+    });
+  }
 }
 
 /** Merges a completed apply's write counts and minted ids into the plan's own report. */
@@ -281,7 +295,7 @@ function formatMigrationReport(report: MigrationReport): string {
     report.invalidTimestamps.count,
     report.invalidTimestamps.items.map(
       (ts) =>
-        `  ${id(ts.oldId)}  ${oneLine(ts.title)}  ${ts.field}: ${oneLine(ts.raw)} -> ${ts.fallback}`,
+        `  ${id(ts.oldId)}  ${oneLine(ts.title)}  ${oneLine(ts.field)}: ${oneLine(ts.raw)} -> ${oneLine(ts.fallback)}`,
     ),
   );
   push(
