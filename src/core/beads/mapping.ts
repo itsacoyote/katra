@@ -103,9 +103,21 @@ export interface MappedStatus {
  * An unrecognised status defaults to `Defined` — the same conservative
  * landing spot `open` gets — and is reported rather than thrown: `mapping.ts`
  * classifies and reports, it does not crash a migration over one bad row.
+ *
+ * `Object.hasOwn` guards the lookup, not a plain index: `status` is an
+ * untrusted string from `--from`, and indexing a plain object with a hostile
+ * key (`"constructor"`, `"toString"`, `"__proto__"`) resolves through
+ * `Object.prototype` instead of returning `undefined` — the recognised-status
+ * branch would then run with an inherited, non-`StatusMapping` value, landing
+ * a `lane` of `undefined` on a `NOT NULL` column with zero degradations
+ * reported. `extract.ts`'s per-type counter uses a `Map` for the same
+ * reason — prototype-free by construction; a plain object needs the explicit
+ * own-property check instead.
  */
 export function mapStatus(ref: MigrationItemRef, status: string): MappedStatus {
-  const mapped = (STATUS_MAP as Record<string, StatusMapping>)[status];
+  const mapped = Object.hasOwn(STATUS_MAP, status)
+    ? (STATUS_MAP as Record<string, StatusMapping>)[status]
+    : undefined;
   if (mapped !== undefined) return { value: mapped, degradations: [] };
 
   return {
@@ -208,16 +220,22 @@ export interface MappedLevelAndKind {
  * `degradations` regardless of whether the title prefix recovered a usable
  * `kind` — the raw `issue_type` value was still unmapped, and that fact
  * doesn't disappear just because `kind` didn't end up needing it.
+ *
+ * Parses `ref.title` — not a separate `title` parameter: `ref` already
+ * carries the item's title, and a second copy would let a caller parse one
+ * string while `degradations` reports another, drifting silently apart.
+ *
+ * Same `Object.hasOwn` guard as {@link mapStatus}, for the same reason: an
+ * `issue_type` of `"toString"` or `"constructor"` must not resolve through
+ * `Object.prototype` and be mistaken for a recognised type.
  */
-export function mapLevelAndKind(
-  ref: MigrationItemRef,
-  title: string,
-  issueType: string,
-): MappedLevelAndKind {
-  const typeMapping = (TYPE_MAP as Record<string, TypeMapping>)[issueType];
+export function mapLevelAndKind(ref: MigrationItemRef, issueType: string): MappedLevelAndKind {
+  const typeMapping = Object.hasOwn(TYPE_MAP, issueType)
+    ? (TYPE_MAP as Record<string, TypeMapping>)[issueType]
+    : undefined;
   const level = typeMapping?.level ?? "task";
   const fallbackKind = typeMapping?.kind ?? "chore";
-  const prefix = parseTitleKindPrefix(title);
+  const prefix = parseTitleKindPrefix(ref.title);
   const kind = prefix?.kind ?? fallbackKind;
 
   return {
@@ -331,10 +349,10 @@ export interface BuiltTags {
  * union, so a label that happens to collide with either is not duplicated.
  *
  * A label blank after trimming is skipped and reported under `emptyLabels`,
- * not silently carried through: `createTask` already skips a blank tag
- * on write (`repo.ts:207-210`), so an unclassified blank here would vanish
- * from the store with nothing in the report to explain why the written tag
- * count doesn't match the label count.
+ * not silently carried through: the tag-insert loop in `createTaskWithin`
+ * (`repo.ts`) already skips a blank tag on write, so an unclassified blank
+ * here would vanish from the store with nothing in the report to explain why
+ * the written tag count doesn't match the label count.
  */
 export function buildTags(
   ref: MigrationItemRef,

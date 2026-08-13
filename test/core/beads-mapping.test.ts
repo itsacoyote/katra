@@ -53,6 +53,21 @@ describe("STATUS_MAP", () => {
     expect(result.value).toEqual({ lane: "Defined" });
     expect(result.degradations).toEqual([{ oldId: "bd-2", title: "weird one", raw: "quantum" }]);
   });
+
+  it("treats a prototype-property status as unmapped rather than resolving Object.prototype", () => {
+    // A plain-object index with an attacker-controlled key ("constructor",
+    // "toString", "__proto__", ...) resolves through Object.prototype
+    // instead of returning undefined. Without an own-property guard this
+    // would silently take the recognised-status branch with a non-
+    // StatusMapping value — lane undefined, zero degradations reported.
+    const r = ref("bd-15", "hostile export");
+    const result = mapStatus(r, "constructor");
+
+    expect(result.value).toEqual({ lane: "Defined" });
+    expect(result.degradations).toEqual([
+      { oldId: "bd-15", title: "hostile export", raw: "constructor" },
+    ]);
+  });
 });
 
 describe("TYPE_MAP and title kind-prefix parsing", () => {
@@ -86,7 +101,7 @@ describe("TYPE_MAP and title kind-prefix parsing", () => {
     // issue_type "bug" IS in TYPE_MAP (-> kind "fix"), yet the title prefix
     // must still win per req 4's resolution order.
     const r = ref("bd-4", "feat: new exporter");
-    const result = mapLevelAndKind(r, "feat: new exporter", "bug");
+    const result = mapLevelAndKind(r, "bug");
 
     expect(result.value).toEqual({ level: "task", kind: "feat" });
     // bug is a recognised issue_type, so nothing is unmapped here.
@@ -95,7 +110,7 @@ describe("TYPE_MAP and title kind-prefix parsing", () => {
 
   it("falls back to the issue_type map when the title has no kind prefix", () => {
     const r = ref("bd-4b", "fix a bug that has no prefix");
-    const result = mapLevelAndKind(r, "fix a bug that has no prefix", "bug");
+    const result = mapLevelAndKind(r, "bug");
 
     expect(result.value).toEqual({ level: "task", kind: "fix" });
     expect(result.degradations).toEqual([]);
@@ -103,7 +118,7 @@ describe("TYPE_MAP and title kind-prefix parsing", () => {
 
   it("reports and defaults an unknown issue_type to task/chore", () => {
     const r = ref("bd-9", "no prefix here");
-    const result = mapLevelAndKind(r, "no prefix here", "gremlin");
+    const result = mapLevelAndKind(r, "gremlin");
 
     expect(result.value).toEqual({ level: "task", kind: "chore" });
     expect(result.degradations).toEqual([
@@ -113,13 +128,23 @@ describe("TYPE_MAP and title kind-prefix parsing", () => {
 
   it("still recovers kind from a valid title prefix even when issue_type is unmapped", () => {
     const r = ref("bd-9b", "perf: speed it up");
-    const result = mapLevelAndKind(r, "perf: speed it up", "gremlin");
+    const result = mapLevelAndKind(r, "gremlin");
 
     expect(result.value).toEqual({ level: "task", kind: "perf" });
     // The issue_type is still unmapped and still reported, even though the
     // title prefix supplied a usable kind.
     expect(result.degradations).toEqual([
       { oldId: "bd-9b", title: "perf: speed it up", raw: "gremlin" },
+    ]);
+  });
+
+  it("treats a prototype-property issue_type as unmapped rather than resolving Object.prototype", () => {
+    const r = ref("bd-16", "hostile export");
+    const result = mapLevelAndKind(r, "toString");
+
+    expect(result.value).toEqual({ level: "task", kind: "chore" });
+    expect(result.degradations).toEqual([
+      { oldId: "bd-16", title: "hostile export", raw: "toString" },
     ]);
   });
 });
