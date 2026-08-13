@@ -22,7 +22,7 @@
 
 import type { MigrationReport } from "./beads/types.js";
 import type { ClaimInfo } from "./claims/types.js";
-import type { Lane, NoteKind, Priority } from "./enums.js";
+import type { Kind, Lane, Level, NoteKind, Priority } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
 import type { Note } from "./notes/types.js";
 import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
@@ -428,6 +428,58 @@ export interface BoardResult {
   readonly pointer: string | null;
   /** The newest handoff, when `--digest` asked for it. */
   readonly digest: BoardDigest | null;
+}
+
+/**
+ * One entity with recorded activity — the row shape `recent` and `stale`
+ * share (F6 T4), and the base that `search`'s hit extends (T5).
+ *
+ * Epics appear here on equal footing with tasks: unlike {@link BoardResult}'s
+ * sections, which exclude an epic because it is a container nobody picks up,
+ * activity is a question about *history*, not about what is startable, and an
+ * epic accrues events the same as any task.
+ */
+export interface ActivityHit {
+  readonly id: string;
+  readonly title: string;
+  readonly level: Level;
+  readonly lane: Lane;
+  readonly kind: Kind;
+  readonly priority: Priority;
+  /** The epic this belongs under, or null for top-level work and for an epic itself. */
+  readonly epicId: string | null;
+  /**
+   * The most recent event's timestamp, or null when there is none.
+   *
+   * Null is only ever real on search's outer-joined filter path (T5): a task
+   * that matches the filters but was never touched still has to appear there
+   * — a filter narrows, it never deletes. `recent` and `stale` join inner
+   * (`activityJoin({outer: false})`, `src/core/activity.ts`), so every hit
+   * either of them returns truly has one; the field stays nullable regardless,
+   * because one document's shape cannot depend on which command produced it.
+   */
+  readonly lastActivity: string | null;
+}
+
+/** What `recent` prints. */
+export interface RecentResult {
+  readonly hits: readonly ActivityHit[];
+  /** True when the bound cut the result short. `recent` is capped by default, so it owes this the same as `log` does. */
+  readonly truncated: boolean;
+}
+
+/** What `stale` prints. */
+export interface StaleResult {
+  readonly hits: readonly ActivityHit[];
+  readonly truncated: boolean;
+  /**
+   * The cutoff actually applied, in katra's canonical timestamp format.
+   *
+   * Echoed rather than left implicit: `--older-than` has a default (2 weeks),
+   * and a result that does not say which instant it compared against leaves a
+   * caller guessing whether the default or an explicit flag produced it.
+   */
+  readonly olderThan: string;
 }
 
 /** What `--help --json` prints: the usage screen, as data. */

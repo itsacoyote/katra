@@ -85,6 +85,12 @@ describe("the public barrel", () => {
       // contract.ts, so it needs its own tuple entry the same way ClaimInfo
       // does — nothing else in this tuple references it structurally.
       katra.MigrationReport,
+      // F6 T4: what `recent` and `stale` print. ActivityHit does not get its
+      // own entry — it rides on these two the same way Blocker rides on
+      // TaskDetail and friends without one — but losing either envelope's
+      // barrel export is still this same compile error.
+      katra.RecentResult,
+      katra.StaleResult,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -93,8 +99,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 19;
-    expect(count).toBe(19);
+    const count: PublishedDocuments["length"] = 21;
+    expect(count).toBe(21);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {

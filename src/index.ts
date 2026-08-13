@@ -27,6 +27,7 @@
 // into `dist/index.d.ts` by way of `OpenStore`, breaking any consumer that had
 // not set `skipLibCheck`.
 export type {
+  ActivityHit,
   BlockedTask,
   Blocker,
   BoardCounts,
@@ -49,6 +50,8 @@ export type {
   MigrationReport,
   NextResult,
   NoteList,
+  RecentResult,
+  StaleResult,
   StoreWarning,
   TaskList,
   UpdateResult,
