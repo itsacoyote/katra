@@ -31,4 +31,11 @@ describe("narrowWhen", () => {
       );
     }
   });
+
+  it("accepts a padded duration the way narrowCount accepts padded numbers", () => {
+    // parseWhen's grammar is anchored (^...$), so unlike narrowCount — where
+    // Number(" 5 ") already ignores the padding — a padded value here would
+    // fail the regex gate unless narrowWhen trims before parsing.
+    expect(narrowWhen(" 2w ", "--older-than", now)).toBe(narrowWhen("2w", "--older-than", now));
+  });
 });

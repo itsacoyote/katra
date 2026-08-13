@@ -117,13 +117,22 @@ export function narrowCount(value: unknown, field: string): number {
  * This is the CLI boundary: it adds the `unknown`/blank check every other
  * narrow* function here starts with, and reports a refusal naming the actual
  * flag rather than the generic field — same shape as `narrowCount`.
+ *
+ * Trims once and parses the trimmed text: `parseWhen`'s grammar is anchored
+ * (`^...$`), so unlike `narrowCount` — where `Number(" 5 ")` already ignores
+ * the padding — a padded value here would otherwise fail the regex gate and
+ * refuse. Trimming here keeps that padding-tolerant behavior consistent
+ * across every narrow* function in this module.
  */
 export function narrowWhen(value: unknown, flag: string, now: string): string {
-  if (typeof value === "string" && value.trim() !== "") {
-    try {
-      return parseWhen(value, now);
-    } catch (error) {
-      if (!isKatraException(error)) throw error;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed !== "") {
+      try {
+        return parseWhen(trimmed, now);
+      } catch (error) {
+        if (!isKatraException(error)) throw error;
+      }
     }
   }
   throw new KatraException({

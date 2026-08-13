@@ -124,7 +124,7 @@ export function timeAgoOrNull(iso: string, now: string): string | null {
  * falls through to the absolute-timestamp checks in {@link parseWhen} and
  * ultimately refuses.
  */
-const RELATIVE_DURATION_PATTERN = /^(\d+)([wWdDhHmM])$/;
+const RELATIVE_DURATION_PATTERN = /^(\d+)([wdhm])$/i;
 
 /** Milliseconds per unit letter {@link RELATIVE_DURATION_PATTERN} accepts. */
 const DURATION_UNIT_MS: Record<string, number> = {
@@ -186,10 +186,11 @@ function refuseWhen(input: string): never {
  *   negative counts refuse; unit arithmetic reuses the same `MS_PER_*`
  *   constants {@link timeAgo} steps through.
  * - An **absolute timestamp**: either katra's own canonical 24-char form or a
- *   bare `YYYY-MM-DD` date. Both route through {@link CANONICAL_TIMESTAMP_PATTERN}'s
- *   (or {@link BARE_DATE_PATTERN}'s) strict gate before `Date.parse` ever
- *   runs — no `Date.parse` leniency, no expanded years, no locale grammar;
- *   see {@link CANONICAL_TIMESTAMP_PATTERN}'s docstring for why that matters.
+ *   bare `YYYY-MM-DD` date (widened to midnight UTC). Both route through
+ *   {@link CANONICAL_TIMESTAMP_PATTERN} or {@link BARE_DATE_PATTERN}'s strict
+ *   gate before `Date.parse` ever runs — no `Date.parse` leniency, no
+ *   expanded years, no locale grammar; see {@link CANONICAL_TIMESTAMP_PATTERN}'s
+ *   docstring for why that matters.
  *
  * `now` is the caller's own clock reading (typically {@link nowIso}'s
  * output), threaded through rather than read internally — this function is
@@ -215,14 +216,9 @@ export function parseWhen(input: string, now: string): string {
     refuseWhen(input);
   }
 
-  if (CANONICAL_TIMESTAMP_PATTERN.test(input)) {
-    const ms = Date.parse(input);
-    if (!Number.isNaN(ms)) return toIso(new Date(ms));
-    refuseWhen(input);
-  }
-
-  if (BARE_DATE_PATTERN.test(input)) {
-    const ms = Date.parse(`${input}T00:00:00.000Z`);
+  if (CANONICAL_TIMESTAMP_PATTERN.test(input) || BARE_DATE_PATTERN.test(input)) {
+    const dateText = BARE_DATE_PATTERN.test(input) ? `${input}T00:00:00.000Z` : input;
+    const ms = Date.parse(dateText);
     if (!Number.isNaN(ms)) return toIso(new Date(ms));
     refuseWhen(input);
   }
