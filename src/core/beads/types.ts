@@ -361,7 +361,7 @@ export interface MigrationReport {
   readonly invalidNotes: ReportSection<InvalidNote>;
   /** Out-of-range numeric values clamped to their nearest valid bound. */
   readonly clampedValues: ReportSection<ClampedValue>;
-  /** Blank-after-trim labels dropped rather than becoming an empty tag (`createTask` silently skips blanks — `repo.ts:207-210` — so an unclassified blank would drop with nothing to show for it). */
+  /** Blank-after-trim labels dropped rather than becoming an empty tag (the tag-insert loop in `createTaskWithin` silently skips blanks, so an unclassified blank would drop with nothing to show for it). */
   readonly emptyLabels: ReportSection<MigrationItemRef>;
   readonly imported: ImportedCounts;
   readonly idMap: readonly MigrationIdMapEntry[];
