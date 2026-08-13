@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BeadsExtract } from "../../src/core/beads/extract.js";
-import { planMigration } from "../../src/core/beads/transform.js";
+import { MAX_CYCLE_PATH, planMigration } from "../../src/core/beads/transform.js";
 import type { BeadsDependency, BeadsIssue } from "../../src/core/beads/types.js";
 
 const FALLBACK = "1970-01-01T00:00:00.000Z";
@@ -177,6 +177,28 @@ describe("planMigration", () => {
     // one CycleBreak per task in it.
     expect(report.parentCycles.count).toBe(2);
     expect(report.parentCycles.items.map((c) => c.oldId).sort()).toEqual(["A", "B"]);
+  });
+
+  it("caps a large parent cycle's reported path and marks it truncated", () => {
+    // A 40-node ring: C1's parent is C2, C2's parent is C3, ..., C40's
+    // parent is C1. Nothing is ever cached for a cyclic termination (see
+    // walkAncestry's own docs), so each of the 40 nodes independently walks
+    // the full ring before revisiting itself — a 41-entry path per node,
+    // well past MAX_CYCLE_PATH.
+    const n = 40;
+    const issues = Array.from({ length: n }, (_, i) => {
+      const id = `C${String(i + 1)}`;
+      const parentId = `C${String(((i + 1) % n) + 1)}`;
+      return makeIssue({ id, title: id, dependencies: [edge(id, parentId, "parent-child")] });
+    });
+
+    const { report } = planMigration(makeExtract(issues), IDENTITY, FALLBACK);
+
+    expect(report.parentCycles.count).toBe(n);
+    for (const entry of report.parentCycles.items) {
+      expect(entry.path).toHaveLength(MAX_CYCLE_PATH);
+      expect(entry.truncated).toBe(true);
+    }
   });
 
   it("maps blocks edges as issue_id-depends-on-depends_on_id and related/discovered-from as links", () => {

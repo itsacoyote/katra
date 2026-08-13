@@ -249,6 +249,28 @@ export interface NormalizedTimestamp {
 }
 
 /**
+ * Matches a strict ISO-8601 UTC instant — `YYYY-MM-DDTHH:MM:SS(.sss)?Z` — the
+ * shape beads actually exports (`2026-08-03T09:05:00Z`, second precision)
+ * and katra's own canonical width (`.000` milliseconds, `clock.ts`).
+ * `Date.parse` alone is not a safe gate on untrusted input: its ECMA-262
+ * grammar also accepts an *expanded* year (`"+275760-09-13T...Z"`, a 6-digit
+ * year with a leading sign), which produces a 27-char timestamp that sorts
+ * *before* every ordinary 4-digit-year value (`"+"` < any digit) —
+ * corrupting the exact lexicographic-order invariant `normalizeTimestamp`'s
+ * own docs below depend on — and, for anything that doesn't match the
+ * standard date grammar at all, silently falls back to an
+ * implementation-defined, host-locale-dependent parser
+ * (`Date.parse("Dec 25 1995")`, `Date.parse("1")`), which breaks the
+ * "identical input -> identical output" determinism this module promises
+ * across two different machines. Gating with this pattern first means only
+ * the one, unambiguous, UTC-anchored grammar ever reaches `Date.parse` —
+ * everything else — expanded years, locale-grammar strings, garbage — routes
+ * into the same `invalidTimestamps` branch as any other unparseable value,
+ * no new path.
+ */
+const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+
+/**
  * Normalizes one beads timestamp — `created_at`/`updated_at`/`closed_at`, or
  * a comment's `created_at` — to katra's canonical width.
  *
@@ -262,15 +284,16 @@ export interface NormalizedTimestamp {
  *
  * This reuses `clock.ts`'s own `toIso` — the one place katra formats a
  * timestamp — rather than re-deriving `.toISOString()` here, but only after
- * confirming `Date.parse` succeeded: `toIso` throws on an invalid `Date`,
- * and this module never throws (classify-and-report, not crash).
+ * confirming `raw` matches {@link ISO_INSTANT_PATTERN} and `Date.parse`
+ * succeeded on it: `toIso` throws on an invalid `Date`, and this module
+ * never throws (classify-and-report, not crash).
  *
- * An unparseable `raw` reports an {@link InvalidTimestamp} and returns
- * `fallback` verbatim. `fallback` is the caller's job to supply
- * (`transform.ts`, T5) rather than something this function reaches for
- * itself — reading the wall clock here would make the same bad input
- * normalize differently across two calls in the same run, breaking the
- * "deterministic" contract this whole module holds to.
+ * A `raw` that fails the shape gate or fails to parse reports an
+ * {@link InvalidTimestamp} and returns `fallback` verbatim. `fallback` is
+ * the caller's job to supply (`transform.ts`, T5) rather than something this
+ * function reaches for itself — reading the wall clock here would make the
+ * same bad input normalize differently across two calls in the same run,
+ * breaking the "deterministic" contract this whole module holds to.
  */
 export function normalizeTimestamp(
   ref: MigrationItemRef,
@@ -278,7 +301,7 @@ export function normalizeTimestamp(
   raw: string,
   fallback: string,
 ): NormalizedTimestamp {
-  const ms = Date.parse(raw);
+  const ms = ISO_INSTANT_PATTERN.test(raw) ? Date.parse(raw) : Number.NaN;
   if (Number.isNaN(ms)) {
     return {
       value: fallback,

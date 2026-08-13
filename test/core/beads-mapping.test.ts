@@ -185,6 +185,42 @@ describe("normalizeTimestamp", () => {
       { oldId: "bd-13", title: "t", field: "created_at", raw: "not-a-date", fallback },
     ]);
   });
+
+  it("rejects an expanded-year timestamp instead of trusting Date.parse's ISO grammar", () => {
+    // Date.parse accepts ECMA-262's expanded-year form (a 6-digit year with a
+    // leading sign) and would happily return a real instant for this — but
+    // toIso() would then emit a 27-char string starting with "+", which
+    // sorts *before* every ordinary 4-digit-year timestamp lexicographically
+    // and corrupts the fixed-width sort invariant this function exists to
+    // guarantee.
+    const r = ref("bd-17");
+    const raw = "+275760-09-13T00:00:00.000Z";
+    const result = normalizeTimestamp(r, "created_at", raw, fallback);
+
+    expect(result.value).toBe(fallback);
+    expect(result.value).toHaveLength(24);
+    expect(result.degradations).toEqual([
+      { oldId: "bd-17", title: "t", field: "created_at", raw, fallback },
+    ]);
+  });
+
+  it("rejects a locale/non-ISO date grammar string instead of parsing it host-locally", () => {
+    // Date.parse falls back to an implementation-defined, host-locale-
+    // dependent grammar for anything outside the standard ISO format
+    // (V8 parses "Dec 25 1995" using the runtime's local timezone) — the
+    // same raw input would normalize to a different instant on a different
+    // machine, breaking the "identical input -> identical output"
+    // determinism this module promises.
+    const r = ref("bd-18");
+    const raw = "Dec 25 1995";
+    const result = normalizeTimestamp(r, "created_at", raw, fallback);
+
+    expect(result.value).toBe(fallback);
+    expect(result.value).toHaveLength(24);
+    expect(result.degradations).toEqual([
+      { oldId: "bd-18", title: "t", field: "created_at", raw, fallback },
+    ]);
+  });
 });
 
 describe("clampPriority", () => {

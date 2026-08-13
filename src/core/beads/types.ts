@@ -217,9 +217,18 @@ export interface SkippedRecordType {
  * beads ids the walk visited before it revisited one — the same shape
  * `KatraErrorDetail`'s `cycle` arm uses for `path` (`errors.ts`), reused here
  * because a broken parent cycle is legible the same way a refused one is.
+ *
+ * `path` is capped at `MAX_CYCLE_PATH` (`transform.ts`) entries. Every node
+ * in an n-node cycle walks it independently (`resolveAncestry`'s per-item
+ * ancestry walk), so an unbounded `path` would retain O(n) ids per entry
+ * across O(n) entries — O(n²) total, measured at roughly 1.9 GiB for a 5 MiB
+ * hostile export. `truncated` is `true` when the real path ran longer than
+ * the cap — the same "a bounded read reports itself" doctrine
+ * `MAX_SKIPPED_TYPES` follows in `extract.ts`.
  */
 export interface CycleBreak extends MigrationItemRef {
   readonly path: readonly string[];
+  readonly truncated: boolean;
 }
 
 /** A `blocks` edge dropped to break a dependency cycle transform detected (deterministic edge-drop order — T5 body, step 4). */

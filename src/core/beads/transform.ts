@@ -685,9 +685,36 @@ function dedupeLinkCandidates(
 
 interface AncestryWalk {
   readonly epicOldId: string | null;
-  /** Present only when the walk revisited an already-seen ancestor. */
+  /** Present only when the walk revisited an already-seen ancestor, or ran past {@link MAX_ANCESTRY_DEPTH}. */
   readonly cyclePath?: readonly string[];
 }
+
+/**
+ * How many entries {@link CycleBreak.path} keeps before truncating — the
+ * same "a bounded read reports itself" doctrine `MAX_SKIPPED_TYPES` follows
+ * in `extract.ts`. An n-node parent cycle walks independently from every
+ * node in it ({@link resolveAncestry}'s per-item walk), so an unbounded path
+ * would retain O(n) ids per entry across O(n) entries — O(n²) total,
+ * measured at roughly 1.9 GiB for a 5 MiB hostile export at preview time,
+ * defeating the point of any upstream size cap. `BlocksCycleBreak.path`
+ * (`breakBlocksCycles`, below) does not share this shape — `findPath` runs
+ * once per cycle-closing edge, not once per node in the cycle — so it is
+ * not capped here.
+ */
+export const MAX_CYCLE_PATH = 32;
+
+/**
+ * How many parent-child hops {@link walkAncestry} follows before giving up —
+ * a chain this long is hostile by construction (real beads projects run a
+ * few levels deep at most; `katra-9aw.9`'s own 3-hop chain is the deepest
+ * this repo's corpus has). Without this, a genuinely acyclic but
+ * absurdly-long chain would still cost one O(n) walk (building an
+ * n-entry `path`/`seen`) before memoization could help anyone — the same
+ * resource-exhaustion shape a cycle has, just without ever revisiting a
+ * node. Capped the walk reports through the same `cyclePath` arm a real
+ * cycle uses, truncated by {@link MAX_CYCLE_PATH} the same way.
+ */
+const MAX_ANCESTRY_DEPTH = 10_000;
 
 /**
  * Walks up `startOldId`'s parent-child chain (never beads id dot-counting —
@@ -708,7 +735,10 @@ interface AncestryWalk {
  * would let a downstream node's walk short-circuit past the cycle instead of
  * revisiting it on its own path, silently dropping that node's own
  * `parentCycles` report — every cyclic node must still discover the cycle
- * from its own `seen` set, exactly as the un-memoized walk did.
+ * from its own `seen` set, exactly as the un-memoized walk did. A
+ * depth-exceeded termination *is* cached (as a dead end), on the pragmatic
+ * theory that a chain past {@link MAX_ANCESTRY_DEPTH} is already hostile —
+ * correctness past the cap is not guaranteed, only boundedness is.
  */
 function walkAncestry(
   startOldId: string,
@@ -724,6 +754,11 @@ function walkAncestry(
   let current = startOldId;
 
   for (;;) {
+    if (path.length >= MAX_ANCESTRY_DEPTH) {
+      for (const node of path) cache.set(node, null);
+      return { epicOldId: null, cyclePath: path };
+    }
+
     const parent = parentOf.get(current);
     if (parent === undefined) {
       for (const node of path) cache.set(node, null);
@@ -793,7 +828,13 @@ function resolveAncestry(
 
     const walk = walkAncestry(oldId, parentOf, levelOf, ancestryCache);
     if (walk.cyclePath !== undefined) {
-      acc.parentCycles.push({ oldId, title: mapped.draft.title, path: walk.cyclePath });
+      const truncated = walk.cyclePath.length > MAX_CYCLE_PATH;
+      acc.parentCycles.push({
+        oldId,
+        title: mapped.draft.title,
+        path: truncated ? walk.cyclePath.slice(0, MAX_CYCLE_PATH) : walk.cyclePath,
+        truncated,
+      });
       resolved.set(oldId, null);
       continue;
     }

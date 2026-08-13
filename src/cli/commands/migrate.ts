@@ -282,7 +282,8 @@ function formatMigrationReport(report: MigrationReport): string {
     report.parentCycles.count,
     report.parentCycles.items.map(
       (cycle) =>
-        `  ${id(cycle.oldId)}  ${oneLine(cycle.title)}  cycle: ${cycle.path.map(id).join(" -> ")}`,
+        `  ${id(cycle.oldId)}  ${oneLine(cycle.title)}  cycle: ${cycle.path.map(id).join(" -> ")}` +
+        (cycle.truncated ? " …" : ""),
     ),
   );
   push(
