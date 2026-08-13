@@ -38,13 +38,13 @@ point (`__proto__`) or an id beads owns (a comment's own `id`).
 | 15 | `parentCycles` | `bf-cycle-a` ↔ `bf-cycle-b`, a 2-node `parent-child` cycle — each side's own ancestry walk discovers it independently, so it reports once per side | 2 | same |
 | 16 | `blocksCycles` | `bf-bc-a` → `bf-bc-b` → `bf-bc-c` → `bf-bc-a` (`blocks`); sorted by `(issue_id, depends_on_id)`, `bf-bc-c → bf-bc-a` is the edge that would close the loop and is the one dropped | 1 | same |
 | 17 | `invalidTimestamps` | `bf-bad-timestamp` (`created_at: "not-a-real-date"`) — see "The invalidTimestamps count", below | 1 | same |
-| 18 | `invalidItems` | `bf-empty-title` (title is `"   "`, empty after trim); `bf-dup-id`'s second occurrence (same id planted twice — first occurrence wins, deterministically, by input order); `bf-status-nonstring` (`status: 42`, a number — fails the shape gate before `mapStatus` ever runs) | 3 | same |
+| 18 | `invalidItems` | `bf-empty-title` (title is `"   "`, empty after trim); `bf-dup-id`'s second occurrence (same id planted twice — first occurrence wins, deterministically, by input order); `bf-status-nonstring` (`status: 42`, a number — fails the shape gate before `mapStatus` ever runs); `bf-description-nonstring` (`description: 42`, a number — `load.ts` binds `description` straight into a SQL `INSERT`, exactly as type-sensitive as a method call, so this fails the shape gate the same way) | 4 | same |
 | 19 | `invalidNotes` | `bf-comments-edge`'s `cec-blank` (comment `text` is `"   "`, blank after trim) | 1 | same |
 | 20 | `clampedValues` | `bf-bad-priority` (`priority: 99`, clamped to `4`) | 1 | same |
 | 21 | `emptyLabels` | `bf-blank-label` (`labels: ["ok-label", "   "]"` — the blank one is dropped, `"ok-label"` survives as a tag) | 1 | same |
 
-**Successful migration totals** (also asserted in the same test): 40 issue
-records − 3 `invalidItems` = **37** planned items (`report.idMap` length),
+**Successful migration totals** (also asserted in the same test): 41 issue
+records − 4 `invalidItems` = **37** planned items (`report.idMap` length),
 **3** epics (`bf-top-epic`, `bf-mid-epic`, `bf-flatten-epic`) and **34**
 tasks (`report.imported.byLevel`).
 
@@ -66,6 +66,7 @@ post-apply behavior through real commands.
 | Prototype-key **status** | `bf-status-ctor` (`status: "constructor"`) | `unmappedStatuses` (#10 above) |
 | Control character + bidi override in a title | `bf-hostile-title` — `[31m……‮…` (ESC, BEL, RIGHT-TO-LEFT OVERRIDE), written as literal `\u` escape text in this file so the committed fixture stays plain ASCII; the real characters exist only after `JSON.parse` | "renders hostile titles harmlessly…" — storage is raw (idMap resolves it like any other item), and `show` after apply renders it with the hostile bytes stripped |
 | Non-string status value | `bf-status-nonstring` (`status: 42`) | `invalidItems` (#18 above) — fails `hasValidShape`, never reaches `mapStatus` |
+| Non-string description value | `bf-description-nonstring` (`description: 42`) | `invalidItems` (#18 above) — fails `hasValidShape` before `load.ts` could bind a number where it expects a SQL-bindable description; `katra-9aw.49` branch review found a boolean threw past a clean preview and a single-element array silently flattened into the description column |
 | Duplicate old id | `bf-dup-id` planted twice, second occurrence with a different title | `invalidItems` (#18) — first occurrence wins deterministically; a real command (`show`) on the resolved id proves it is the *first* occurrence's title that survived |
 | Directionally asymmetric `blocks` edge (open task blocked by an already-closed prerequisite) | `bf-open-dependent` (open) → `bf-closed-prereq` (closed), mirroring a real finished dependency | "computes blocked-ness of a migrated blocked item from its edges, not a lane" — `bf-open-dependent` is *ready* despite carrying a real dependency edge, and `show` reports zero blockers; a flipped edge direction fails this loudly (see "Falsifiability", below) |
 | Cross-item chronological event interleaving | `bf-order-q` (created 2024-01-01, commented 2024-01-15), `bf-order-r` (created 2024-01-05), `bf-order-p` (created 2024-01-10) | "interleaves created, note-added and closed events chronologically across items in log" — `q`'s own history is not contiguous in the log (its `created` event sorts before `r`'s and `p`'s, its `note-added` event sorts after both) |

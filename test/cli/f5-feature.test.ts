@@ -180,9 +180,10 @@ describe("F5 full-coverage fixture — preview", () => {
     ).toBe(true);
 
     // Empty title, the duplicate id's second occurrence, and the
-    // non-string-status shape violation.
-    expect(report.invalidItems.count).toBe(3);
+    // non-string-status and non-string-description shape violations.
+    expect(report.invalidItems.count).toBe(4);
     expect(report.invalidItems.items.map((i) => i.oldId).sort()).toEqual([
+      "bf-description-nonstring",
       "bf-dup-id",
       "bf-empty-title",
       "bf-status-nonstring",
@@ -214,13 +215,14 @@ describe("F5 full-coverage fixture — preview", () => {
       { oldId: "bf-blank-label", title: expect.any(String) },
     ]);
 
-    // Every planted issue but the three invalidItems becomes a planned item:
-    // 40 issue records - 3 invalid = 37, none of them the wisp record.
+    // Every planted issue but the four invalidItems becomes a planned item:
+    // 41 issue records - 4 invalid = 37, none of them the wisp record.
     expect(report.idMap).toHaveLength(37);
     expect(report.imported.byLevel).toEqual({ epic: 3, task: 34 });
     // The duplicate id's dropped second occurrence, and the shape-invalid and
     // empty-title records, never appear in the id map at all.
     expect(report.idMap.map((e) => e.oldId)).not.toContain("bf-status-nonstring");
+    expect(report.idMap.map((e) => e.oldId)).not.toContain("bf-description-nonstring");
     expect(report.idMap.map((e) => e.oldId)).not.toContain("bf-empty-title");
     expect(report.idMap.every((e) => e.newId === null)).toBe(true);
 

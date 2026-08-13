@@ -160,21 +160,19 @@ export const TYPE_MAP = {
   task: { level: "task", kind: "chore" },
 } as const satisfies Record<string, TypeMapping>;
 
-/** A Conventional-Commit-style kind prefix parsed off a title. */
-export interface TitleKindPrefix {
-  readonly kind: Kind;
-  readonly scope?: string;
-}
-
 /**
  * Matches `<kind>:` or `<kind>(<scope>):` at the start of a title, strictly
  * against {@link KINDS} — built from the array itself so nothing here can
- * drift from it.
+ * drift from it. The `(scope)` group is non-capturing: nothing downstream
+ * consumes the scope text, only whether one was present so the prefix still
+ * ends at `:`.
  */
-const KIND_PREFIX_PATTERN = new RegExp(`^(${KINDS.join("|")})(?:\\(([^()]+)\\))?:`);
+const KIND_PREFIX_PATTERN = new RegExp(`^(${KINDS.join("|")})(?:\\([^()]+\\))?:`);
 
 /**
- * Parses a Conventional-Commit kind prefix off a beads issue title.
+ * Parses a Conventional-Commit kind prefix off a beads issue title, returning
+ * just the {@link Kind} — no production caller has ever consumed a captured
+ * scope, so this returns `Kind | undefined` rather than a wrapper type.
  *
  * TRAP (state it, don't just rely on it): `decision:` must **not** match
  * here. `decision` is a {@link NoteKind} — `design` maps to a `decision`
@@ -192,15 +190,12 @@ const KIND_PREFIX_PATTERN = new RegExp(`^(${KINDS.join("|")})(?:\\(([^()]+)\\))?
  * `KINDS` value, but also not `feat` followed by `:`) and `a feat: thing`
  * (not anchored) both correctly fail to match.
  */
-export function parseTitleKindPrefix(title: string): TitleKindPrefix | undefined {
+export function parseTitleKindPrefix(title: string): Kind | undefined {
   const match = KIND_PREFIX_PATTERN.exec(title);
   if (!match) return undefined;
 
   const kind = match[1];
-  if (kind === undefined || !isKind(kind)) return undefined;
-
-  const scope = match[2];
-  return scope === undefined ? { kind } : { kind, scope };
+  return kind !== undefined && isKind(kind) ? kind : undefined;
 }
 
 export interface MappedLevelAndKind {
@@ -235,8 +230,7 @@ export function mapLevelAndKind(ref: MigrationItemRef, issueType: string): Mappe
     : undefined;
   const level = typeMapping?.level ?? "task";
   const fallbackKind = typeMapping?.kind ?? "chore";
-  const prefix = parseTitleKindPrefix(ref.title);
-  const kind = prefix?.kind ?? fallbackKind;
+  const kind = parseTitleKindPrefix(ref.title) ?? fallbackKind;
 
   return {
     value: { level, kind },

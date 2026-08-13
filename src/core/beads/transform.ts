@@ -145,18 +145,21 @@ function isCommentShaped(value: unknown): boolean {
  * Verifies the field types the task body names (`status`/`issue_type`
  * strings, `priority` a number, the timestamp fields strings,
  * `dependencies`/`comments`/`labels` arrays of the right element shape),
- * *plus* every other field `mapIssue` dereferences as a string below —
- * `owner`, `created_by`, `external_ref`, `started_at` all reach a `.trim()`
- * call there, so each must be verified here too: `mapping.ts`'s never-throw
- * rule and the T6 pairing ("a transform-passed plan loads with zero
- * write-path exceptions") both mean this module cannot let an untyped value
- * reach a method call either — a hostile `{"owner": 123, ...}` record must
- * route to `invalidItems`, not throw a `TypeError` out of `mapIssue` and take
- * the whole `planMigration` call down with it. `description`, `assignee`,
- * and `close_reason` are the remaining fields this module reads, and they
- * genuinely are copied through as-is (`description`/`assignee` directly,
- * `close_reason` via `??`) without ever calling a method on them, so they
- * stay unchecked.
+ * *plus* every other field that reaches a write path downstream, typed
+ * right. The real rule is not "only a field this module calls a method on
+ * needs checking" — `mapIssue`'s `owner`/`created_by`/`external_ref`/
+ * `started_at` `.trim()` calls are one way a wrong type bites, but a SQL
+ * bind parameter is exactly as type-sensitive as a method call: `load.ts`
+ * binds `description`, `assignee`, and `close_reason` straight into an
+ * `INSERT`/`UPDATE` (`tasks/repo.ts`'s `createTaskWithin`,
+ * `tasks/lifecycle.ts`'s `applyMoveWithin`), and better-sqlite3 only accepts
+ * numbers, strings, bigints, buffers, and `null` there — a boolean
+ * `description` throws out of the bind call (surfacing as `internal`, exit
+ * 4, *after* a clean preview said the migration was safe to apply), and a
+ * single-element array like `["SHIFTED"]` is worse: better-sqlite3 flattens
+ * it into its own positional parameter and writes it as the description
+ * *silently*, no exception at all. Every field reaching a write path is
+ * therefore verified here, whether this module calls a method on it or not.
  *
  * A failure here is whole-issue, not per-field: this function does not
  * report anything itself, it only answers "can the rest of this module trust
@@ -168,6 +171,7 @@ function hasValidShape(issue: BeadsIssue): boolean {
   if (typeof candidate.status !== "string") return false;
   if (typeof candidate.issue_type !== "string") return false;
   if (typeof candidate.priority !== "number") return false;
+  if (typeof candidate.description !== "string") return false;
   if (typeof candidate.owner !== "string") return false;
   if (typeof candidate.created_by !== "string") return false;
   if (typeof candidate.created_at !== "string") return false;
@@ -176,6 +180,9 @@ function hasValidShape(issue: BeadsIssue): boolean {
   if (candidate.external_ref !== undefined && typeof candidate.external_ref !== "string")
     return false;
   if (candidate.started_at !== undefined && typeof candidate.started_at !== "string") return false;
+  if (candidate.assignee !== undefined && typeof candidate.assignee !== "string") return false;
+  if (candidate.close_reason !== undefined && typeof candidate.close_reason !== "string")
+    return false;
 
   if (candidate.dependencies !== undefined) {
     if (
@@ -546,7 +553,10 @@ function classifyGenericEdges(
       continue;
     }
 
-    const key = `${edge.issue_id} ${edge.depends_on_id} ${edge.type}`;
+    // NUL separates the three parts (not a printable delimiter like ":" or
+    // " ") so an id or type crafted to contain the separator itself can
+    // never forge a collision with a different, unrelated edge triple.
+    const key = `${edge.issue_id}\u0000${edge.depends_on_id}\u0000${edge.type}`;
     if (seenKeys.has(key)) {
       acc.duplicateEdges.push(edgeRef);
       continue;
@@ -632,6 +642,43 @@ function routeEdgesByType(
   return { parentOf, blocksCandidates, linkCandidates };
 }
 
+/**
+ * Collapses `linkCandidates` on the *unordered* pair, not the (issue_id,
+ * depends_on_id, type) triple `classifyGenericEdges` already deduped on. A
+ * link is symmetric (links.ts's own `CHECK (a_id < b_id)` stores one row per
+ * pair regardless of which side supplied which id) and type-agnostic
+ * (`discovered-from`/`related` both become the same `addLink`), so
+ * `related(A,B)`, `discovered-from(A,B)`, and `related(B,A)` are one
+ * relationship declared three times, not three distinct edges — the generic
+ * pass's triple key treats each as unique since it differs by type and/or
+ * direction. First occurrence wins (candidates arrive in the original edge
+ * order); every later collapse is reported under `duplicateEdges`, whose own
+ * doc already owns "collapsed" edges (the self-edge case above).
+ */
+function dedupeLinkCandidates(
+  candidates: readonly BeadsDependency[],
+  acc: ReportAccumulator,
+): BeadsDependency[] {
+  const seenPairs = new Set<string>();
+  const deduped: BeadsDependency[] = [];
+
+  for (const edge of candidates) {
+    const pairKey = [edge.issue_id, edge.depends_on_id].sort().join("\u0000");
+    if (seenPairs.has(pairKey)) {
+      acc.duplicateEdges.push({
+        fromOldId: edge.issue_id,
+        toOldId: edge.depends_on_id,
+        type: edge.type,
+      });
+      continue;
+    }
+    seenPairs.add(pairKey);
+    deduped.push(edge);
+  }
+
+  return deduped;
+}
+
 // ---------------------------------------------------------------------------
 // Step 2 — ancestry / two-level flattening.
 // ---------------------------------------------------------------------------
@@ -709,6 +756,17 @@ function walkAncestry(
  * task, not a degradation. A task whose walk finds an epic more than one hop
  * away is reparented onto it and reported; one hop away (the direct parent
  * already is the nearest epic) is not reparenting, just the ordinary case.
+ *
+ * A task that *does* have a direct parent-child edge, but whose whole chain
+ * never reaches an epic (reachable in any beads project that never used
+ * `epic`/`milestone` types — nothing but `task`-level ancestors all the way
+ * up), also reports under `epicEdgesDropped`: `{fromOldId: oldId, toOldId:
+ * direct, type: "parent-child"}`. This widens the same category
+ * {@link routeEdgesByType} already uses for a dropped epic-to-epic edge
+ * rather than adding a new one — both are "a parent-child edge that named a
+ * parent katra will not attach this item to," just for different reasons
+ * (the parent is an epic that can't itself have a parent, vs. no epic exists
+ * anywhere on the chain to attach to).
  */
 function resolveAncestry(
   draftByOldId: ReadonlyMap<string, MappedItem>,
@@ -741,8 +799,15 @@ function resolveAncestry(
     }
 
     resolved.set(oldId, walk.epicOldId);
-    if (walk.epicOldId !== null && walk.epicOldId !== direct) {
-      acc.reparented.push({ oldId, title: mapped.draft.title, newParentOldId: walk.epicOldId });
+    if (walk.epicOldId !== null) {
+      if (walk.epicOldId !== direct) {
+        acc.reparented.push({ oldId, title: mapped.draft.title, newParentOldId: walk.epicOldId });
+      }
+    } else {
+      // The chain terminated (no more parent-child edges) without ever
+      // finding an epic — the item's own direct parent edge names a task,
+      // and nothing above it ever resolves to a katra parent either.
+      acc.epicEdgesDropped.push({ fromOldId: oldId, toOldId: direct, type: "parent-child" });
     }
   }
 
@@ -989,6 +1054,7 @@ export function planMigration(
 
   const parentOldIdByOldId = resolveAncestry(draftByOldId, parentOf, levelOf, acc);
   const dependencyEdgeSources = breakBlocksCycles(blocksCandidates, acc);
+  const dedupedLinkCandidates = dedupeLinkCandidates(linkCandidates, acc);
 
   const itemMeta = new Map<string, ItemMeta>();
   for (const [oldId, mapped] of draftByOldId) {
@@ -1001,7 +1067,7 @@ export function planMigration(
     dependsOnOldId: edge.depends_on_id,
     createdAt: edgeCreatedAt(edge, itemMeta, acc),
   }));
-  const linkEdges: PlannedEdge[] = linkCandidates.map((edge) => ({
+  const linkEdges: PlannedEdge[] = dedupedLinkCandidates.map((edge) => ({
     kind: "link",
     aOldId: edge.issue_id,
     bOldId: edge.depends_on_id,

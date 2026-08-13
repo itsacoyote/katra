@@ -322,6 +322,15 @@ export interface MigrationIdMapEntry {
 export interface MigrationReport {
   readonly droppedFields: DroppedFieldsReport;
   readonly reparented: ReportSection<ReparentedItem>;
+  /**
+   * A `parent-child` edge dropped because katra has nowhere to attach it —
+   * two distinct causes share this one category: an epic's own beads parent
+   * (an epic can never keep one; katra is two levels only), and a task
+   * whose whole ancestor chain never reaches an epic at all (no
+   * `epic`/`milestone` type anywhere above it, reachable in any beads
+   * project that never used them). Both leave `toOldId` naming a parent
+   * katra will not attach the item to.
+   */
   readonly epicEdgesDropped: ReportSection<MigrationEdgeRef>;
   /** Count of comments that became notes — the observable, plantable half of "comment threading flattens"; the flattening itself has no field to observe (beads 1.0.4 comments carry no thread/reply field — iteration-2 finding D), so it is not a key here. */
   readonly commentsConverted: ReportSection<CommentRef>;

@@ -235,10 +235,14 @@ function formatMigrationReport(report: MigrationReport): string {
     ),
   );
 
-  // Called out on its own line: an epic can never keep a beads parent (katra
-  // is two levels only), so this is a structural drop, not an ordinary one.
+  // Called out on its own line: a structural drop, not an ordinary one. Two
+  // distinct reasons share this one category — an epic can never keep a
+  // beads parent (katra is two levels only), or the chain the item's own
+  // parent-child edge belongs to never reaches an epic at all (no
+  // epic/milestone anywhere above it) — both leave the edge with nothing in
+  // katra to attach to.
   push(
-    "epic edges dropped (an epic cannot keep a beads parent)",
+    "parent edges dropped (no katra parent to attach to)",
     report.epicEdgesDropped.count,
     report.epicEdgesDropped.items.map(edgeRef),
   );

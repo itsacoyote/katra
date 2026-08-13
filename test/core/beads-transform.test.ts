@@ -144,6 +144,27 @@ describe("planMigration", () => {
     ]);
   });
 
+  it("reports a parent chain with no epic anywhere and leaves the items parentless", () => {
+    // Two task-typed issues, A <- B, no epic/milestone anywhere on the
+    // chain — reachable in any beads project that never used those types.
+    // Previously this dropped silently; now it widens epicEdgesDropped
+    // rather than adding a new category.
+    const a = makeIssue({ id: "A", title: "A" });
+    const b = makeIssue({
+      id: "B",
+      title: "B",
+      dependencies: [edge("B", "A", "parent-child")],
+    });
+
+    const { plan, report } = planMigration(makeExtract([a, b]), IDENTITY, FALLBACK);
+
+    expect(plan.items.find((item) => item.oldId === "A")?.parentOldId).toBeNull();
+    expect(plan.items.find((item) => item.oldId === "B")?.parentOldId).toBeNull();
+    expect(report.epicEdgesDropped.items).toEqual([
+      { fromOldId: "B", toOldId: "A", type: "parent-child" },
+    ]);
+  });
+
   it("breaks and reports a parent cycle, leaving the item parentless", () => {
     const a = makeIssue({ id: "A", title: "A", dependencies: [edge("A", "B", "parent-child")] });
     const b = makeIssue({ id: "B", title: "B", dependencies: [edge("B", "A", "parent-child")] });
@@ -181,6 +202,35 @@ describe("planMigration", () => {
     const pairs = links.map((l) => (l.kind === "link" ? new Set([l.aOldId, l.bOldId]) : new Set()));
     expect(pairs.some((pair) => pair.has("X") && pair.has("Z"))).toBe(true);
     expect(pairs.some((pair) => pair.has("X") && pair.has("W"))).toBe(true);
+  });
+
+  it("collapses link pairs regardless of type or direction, reporting the losers as duplicates", () => {
+    // related(X,Y), discovered-from(X,Y) and related(Y,X) are the same
+    // symmetric relationship declared three times — classifyGenericEdges's
+    // (issue_id, depends_on_id, type) key treats all three as distinct
+    // (different type, or reversed direction), so this collapse has to
+    // happen after routeEdgesByType, on the unordered pair alone.
+    const x = makeIssue({
+      id: "X",
+      dependencies: [
+        edge("X", "Y", "related"),
+        edge("X", "Y", "discovered-from"),
+        edge("Y", "X", "related"),
+      ],
+    });
+    const y = makeIssue({ id: "Y" });
+
+    const { plan, report } = planMigration(makeExtract([x, y]), IDENTITY, FALLBACK);
+
+    const links = plan.edges.filter((e) => e.kind === "link");
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({ kind: "link", aOldId: "X", bOldId: "Y" });
+
+    expect(report.duplicateEdges.count).toBe(2);
+    expect(report.duplicateEdges.items).toEqual([
+      { fromOldId: "X", toOldId: "Y", type: "discovered-from" },
+      { fromOldId: "Y", toOldId: "X", type: "related" },
+    ]);
   });
 
   it("reports and skips dangling, duplicate and self edges", () => {
@@ -266,6 +316,24 @@ describe("planMigration", () => {
     const { plan, report } = planMigration(makeExtract([hostile]), IDENTITY, FALLBACK);
     expect(plan.items.some((item) => item.oldId === "HOSTILE")).toBe(false);
     expect(report.invalidItems.items).toEqual([{ oldId: "HOSTILE", rawTitle: "Issue HOSTILE" }]);
+  });
+
+  it("routes an issue with a non-string description to invalidItems instead of a bad SQL bind", () => {
+    // load.ts binds description straight into an INSERT (tasks/repo.ts's
+    // createTaskWithin); better-sqlite3 only accepts numbers, strings,
+    // bigints, buffers, and null there. A boolean throws out of the bind
+    // call after a clean preview claimed the migration was safe; a
+    // single-element array like ["SHIFTED"] is worse — better-sqlite3
+    // flattens it into its own positional parameter and writes it as the
+    // description silently. A SQL bind is exactly as type-sensitive as the
+    // .trim() calls above, so this is a shape-gate failure too.
+    const hostile = { ...makeIssue({ id: "BAD-DESC" }), description: 42 } as unknown as BeadsIssue;
+
+    expect(() => planMigration(makeExtract([hostile]), IDENTITY, FALLBACK)).not.toThrow();
+
+    const { plan, report } = planMigration(makeExtract([hostile]), IDENTITY, FALLBACK);
+    expect(plan.items.some((item) => item.oldId === "BAD-DESC")).toBe(false);
+    expect(report.invalidItems.items).toEqual([{ oldId: "BAD-DESC", rawTitle: "Issue BAD-DESC" }]);
   });
 
   it("clamps and reports out-of-range priorities", () => {

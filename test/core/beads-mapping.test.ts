@@ -78,11 +78,8 @@ describe("TYPE_MAP and title kind-prefix parsing", () => {
   });
 
   it("parses feat:, fix(scope): prefixes and rejects gap:, finding:, decision:, sweep:", () => {
-    expect(parseTitleKindPrefix("feat: katra brief")).toEqual({ kind: "feat" });
-    expect(parseTitleKindPrefix("fix(scope): repair the thing")).toEqual({
-      kind: "fix",
-      scope: "scope",
-    });
+    expect(parseTitleKindPrefix("feat: katra brief")).toBe("feat");
+    expect(parseTitleKindPrefix("fix(scope): repair the thing")).toBe("fix");
 
     // decision is a NOTE_KIND, not a KIND — it must never match the title
     // parser, or an issue_type "decision" row would double up with a title

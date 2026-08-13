@@ -49,7 +49,6 @@ import { addDependencyWithin } from "../graph/deps.js";
 import { addLinkWithin } from "../graph/links.js";
 import { createNoteWithin } from "../notes/repo.js";
 import type { OpenStore } from "../store.js";
-import type { Move } from "../tasks/lifecycle.js";
 import { applyMoveWithin } from "../tasks/lifecycle.js";
 import { createTaskWithin } from "../tasks/repo.js";
 import type { ImportedCounts, MigrationIdMapEntry, MigrationPlan } from "./types.js";
@@ -205,16 +204,12 @@ export function loadMigration(
           });
         }
 
-        const move: Move = {
-          lane: item.lane,
-          markClosed: true,
-          reason: item.closeReason,
-          // Structurally required by `Move` but never read by
-          // `applyMoveWithin` itself — the real `closed` event comes from
-          // `plan.events` in step 4, in its own historical order.
-          event: "closed",
-        };
-        applyMoveWithin(store, newId, move, { at: item.closedAt, updatedAt: item.updatedAt });
+        applyMoveWithin(
+          store,
+          newId,
+          { lane: item.lane, markClosed: true, reason: item.closeReason },
+          { at: item.closedAt, updatedAt: item.updatedAt },
+        );
       }
     }
 

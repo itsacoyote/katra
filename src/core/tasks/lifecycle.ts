@@ -78,18 +78,29 @@ export interface Move {
  * `reportReadinessChange`'s mutate callback, then settles any claim and
  * appends the lifecycle event itself.
  *
- * Two guards a hand-built `Move` from a direct caller — the F5 loader chief
+ * Takes only the three fields it actually reads (`lane`, `markClosed`,
+ * `reason`) — never `event`, which `applyMoveWithin` has no use for; that one
+ * exists purely for `transition`'s own `appendEvent` call after this returns.
+ * A full `Move` (`transition`'s own hand-built object, or the F5 loader's)
+ * stays structurally compatible with this narrower shape without a cast —
+ * only the excess-property check on an object *literal* would object, and
+ * every real caller passes a `Move`-typed variable.
+ *
+ * Three guards a hand-built `Move` from a direct caller — the F5 loader chief
  * among them — cannot skip: a `Move` that marks a task closed but targets a
  * non-terminal lane would write `closed_at` onto a task the schema's own
- * `CHECK` still calls active, since that constraint only forbids the
- * converse (a terminal lane with no `closed_at`); and `taskId` naming nothing
- * would otherwise commit a no-op `UPDATE` silently rather than telling the
- * caller its id was wrong.
+ * `CHECK` still calls active; the converse — targeting a terminal lane
+ * without marking closed — would leave that same `CHECK` refusing the row for
+ * the opposite reason (a terminal lane demands a `closed_at`, and only
+ * `markClosed` ever supplies one), so it is refused here too, as a typed
+ * `internal` rather than a raw `CHECK`-constraint dump the caller would have
+ * to decode; and `taskId` naming nothing would otherwise commit a no-op
+ * `UPDATE` silently rather than telling the caller its id was wrong.
  */
 export function applyMoveWithin(
   store: OpenStore,
   taskId: string,
-  move: Move,
+  move: Pick<Move, "lane" | "markClosed" | "reason">,
   ctx: { readonly at: string; readonly updatedAt?: string },
 ): void {
   if (!store.db.inTransaction) {
@@ -106,6 +117,12 @@ export function applyMoveWithin(
     throw new KatraException({
       code: "internal",
       message: `applyMoveWithin: a Move that marks closed must target a terminal lane, not ${move.lane}`,
+    });
+  }
+  if (!move.markClosed && isTerminal(move.lane)) {
+    throw new KatraException({
+      code: "internal",
+      message: `applyMoveWithin: a Move targeting terminal lane ${move.lane} must markClosed — the row would otherwise carry a terminal lane with no closed_at`,
     });
   }
 

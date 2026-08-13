@@ -300,6 +300,19 @@ describe("applyMoveWithin", () => {
       writeTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
     ).toThrowError(/terminal lane/);
   });
+
+  it("throws internal when a Move targets a terminal lane without marking closed", () => {
+    // The converse of the guard above: a Move reaching a terminal lane
+    // without markClosed would leave the row with no closed_at, which the
+    // schema's own CHECK also refuses (it demands one for a terminal lane) —
+    // a typed internal here instead of a raw CHECK-constraint dump.
+    const id = seedTask(fixture.store);
+    const move: Move = { lane: "Done", markClosed: false, reason: null, event: "closed" };
+
+    expect(() =>
+      writeTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
+    ).toThrowError(/markClosed/);
+  });
 });
 
 describe("transition", () => {
