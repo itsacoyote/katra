@@ -112,12 +112,24 @@ describe("migrating a v1 store under contention", () => {
     const setup = await runCli(["init"], { cwd: repo.dir });
     expect(setup.exitCode).toBe(EXIT.ok);
 
-    // Rewind to v1: drop what 0002 and 0003 added and reset the version, so
-    // the store is exactly what an installation from before this feature has.
+    // Rewind to v1: drop what 0002, 0003 and 0004 added and reset the
+    // version, so the store is exactly what an installation from before this
+    // feature has. The six FTS triggers and the two FTS5 virtual tables have
+    // to go too, not just the ordinary tables: `init` already brought this
+    // store to the current version, so `tasks_fts`/`notes_fts` and their
+    // triggers exist before this rewind runs. Left in place, they survive
+    // the table drops below untouched — the triggers stay attached to
+    // `tasks`/`notes`, which are never dropped — and migration 0004's own
+    // `CREATE VIRTUAL TABLE tasks_fts` collides with the leftover table the
+    // instant every process below tries to re-migrate this "v1" store.
     const rewind = openDatabase(dbPath);
     rewind.exec(
       "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS claims; " +
-        "DROP TABLE IF EXISTS presence; DROP TABLE IF EXISTS events;",
+        "DROP TABLE IF EXISTS presence; DROP TABLE IF EXISTS events; " +
+        "DROP TRIGGER IF EXISTS tasks_fts_ai; DROP TRIGGER IF EXISTS tasks_fts_ad; " +
+        "DROP TRIGGER IF EXISTS tasks_fts_au; DROP TRIGGER IF EXISTS notes_fts_ai; " +
+        "DROP TRIGGER IF EXISTS notes_fts_ad; DROP TRIGGER IF EXISTS notes_fts_au; " +
+        "DROP TABLE IF EXISTS tasks_fts; DROP TABLE IF EXISTS notes_fts;",
     );
     rewind.pragma("user_version = 1");
     expect(readSchemaVersion(rewind)).toBe(1);
@@ -180,6 +192,6 @@ describe("migrating a v1 store under contention", () => {
     // again, so editing it would leave two stores with different schemas at
     // the same version number.
     expect(MIGRATIONS[0]?.sql).toBe(migration0001.sql);
-    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3]);
+    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4]);
   });
 });
