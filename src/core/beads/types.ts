@@ -33,6 +33,7 @@
  */
 
 import type { Kind, Lane, Level, NoteKind, Priority } from "../enums.js";
+import { KINDS, LANES, LEVELS } from "../enums.js";
 
 // ---------------------------------------------------------------------------
 // Input: the bd export surface
@@ -516,4 +517,34 @@ export interface MigrationPlan {
   readonly notes: readonly PlannedNote[];
   readonly edges: readonly PlannedEdge[];
   readonly events: readonly PlannedEvent[];
+}
+
+// ---------------------------------------------------------------------------
+// Shared pure helpers — used by both `transform.ts` (planned counts, for its
+// preview report) and `load.ts` (written counts, for its post-apply report).
+// The two answer different questions ("what would be written" vs "what was
+// written") but compute them identically from a `PlannedItem[]`, so the
+// arithmetic lives once, here, rather than as two copies that could drift.
+// ---------------------------------------------------------------------------
+
+/** A fully-keyed, zero-initialized `Record` from a fixed literal-union key list — `LEVELS`/`KINDS`/`LANES` are katra's own enums, not attacker content, so a plain object is fine here (unlike every old-id-keyed map in `transform.ts`). */
+function zeroCounts<K extends string>(keys: readonly K[]): Record<K, number> {
+  const result = {} as Record<K, number>;
+  for (const key of keys) result[key] = 0;
+  return result;
+}
+
+/** Tallies a list of planned items by level, kind and lane — every key of each enum present, `0` when unused, per {@link ImportedCounts}'s own "always present" discipline. */
+export function computeImportedCounts(items: readonly PlannedItem[]): ImportedCounts {
+  const byLevel = zeroCounts(LEVELS);
+  const byKind = zeroCounts(KINDS);
+  const byLane = zeroCounts(LANES);
+
+  for (const item of items) {
+    byLevel[item.level] += 1;
+    byKind[item.kind] += 1;
+    byLane[item.lane] += 1;
+  }
+
+  return { byLevel, byKind, byLane };
 }

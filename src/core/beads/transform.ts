@@ -72,7 +72,7 @@
  */
 
 import type { Level } from "../enums.js";
-import { KINDS, LANES, LEVELS } from "../enums.js";
+import { isTerminal } from "../enums.js";
 import type { BeadsExtract } from "./extract.js";
 import {
   assembleNotes,
@@ -89,7 +89,6 @@ import type {
   ClampedValue,
   CommentRef,
   CycleBreak,
-  ImportedCounts,
   InvalidItem,
   InvalidNote,
   InvalidTimestamp,
@@ -105,6 +104,7 @@ import type {
   ReparentedItem,
   UnmappedValue,
 } from "./types.js";
+import { computeImportedCounts } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Step 0 — shape gate: verify BeadsIssue's field types before any mapping.
@@ -330,18 +330,18 @@ interface ClosedInfo {
 
 /**
  * Resolves a closed item's `closedAt`/`closeReason`, or `null` when the
- * item's final lane is not terminal (`isDone` false) — one function instead
- * of two mutable `let`s in `mapIssue` plus a later `isDone && closedAt !==
+ * item's final lane is not terminal (`isClosed` false) — one function instead
+ * of two mutable `let`s in `mapIssue` plus a later `isClosed && closedAt !==
  * null` re-check, since "is this item closed" only needs deciding once.
  */
 function resolveClosedInfo(
   ref: MigrationItemRef,
   issue: BeadsIssue,
-  isDone: boolean,
+  isClosed: boolean,
   fallbackTimestamp: string,
   acc: ReportAccumulator,
 ): ClosedInfo | null {
-  if (!isDone) return null;
+  if (!isClosed) return null;
 
   const closedAtResult = normalizeTimestamp(
     ref,
@@ -430,15 +430,20 @@ function mapIssue(
     acc.droppedFields.startedAt.push(ref);
   }
 
-  // A closed item's FINAL lane is a terminal one (Done) — tasks/repo.ts's
-  // createTaskWithin refuses to *create* directly into a terminal lane
-  // (repo.ts:181-190, the terminal-lane creation guard), which is exactly why
-  // T6's loader creates every item into Defined and reaches Done through
-  // applyMoveWithin instead of stamping this lane on at INSERT time. This
-  // module only decides the *final* lane; the two-step creation is load's
-  // concern.
-  const isDone = status.value.lane === "Done";
-  const closedInfo = resolveClosedInfo(ref, issue, isDone, fallbackTimestamp, acc);
+  // A closed item's FINAL lane is a terminal one (Done today, but gated on
+  // isTerminal rather than the literal `=== "Done"` — status mapping only
+  // ever produces Done for a closed issue right now, but a lane-equality
+  // check here would silently stop closing the item the day another status
+  // maps to Cancelled instead, which load.ts's own isTerminal-gated
+  // choreography would then have no closedAt/closeReason to honor).
+  // tasks/repo.ts's createTaskWithin refuses to *create* directly into a
+  // terminal lane (repo.ts:181-190, the terminal-lane creation guard), which
+  // is exactly why T6's loader creates every item into Defined and reaches
+  // its terminal lane through applyMoveWithin instead of stamping it on at
+  // INSERT time. This module only decides the *final* lane; the two-step
+  // creation is load's concern.
+  const isClosed = isTerminal(status.value.lane);
+  const closedInfo = resolveClosedInfo(ref, issue, isClosed, fallbackTimestamp, acc);
 
   const draft: PlannedItem = {
     oldId: issue.id,
@@ -895,27 +900,6 @@ function compareEvents(a: PlannedEvent, b: PlannedEvent): number {
 
 function section<T>(items: readonly T[]): { readonly count: number; readonly items: readonly T[] } {
   return { count: items.length, items };
-}
-
-/** Builds a fully-keyed, zero-initialized `Record` from a fixed literal-union key list — `LEVELS`/`KINDS`/`LANES` are katra's own enums, not attacker content, so a plain object is fine here (unlike every old-id-keyed map above). */
-function zeroCounts<K extends string>(keys: readonly K[]): Record<K, number> {
-  const result = {} as Record<K, number>;
-  for (const key of keys) result[key] = 0;
-  return result;
-}
-
-function computeImportedCounts(items: readonly PlannedItem[]): ImportedCounts {
-  const byLevel = zeroCounts(LEVELS);
-  const byKind = zeroCounts(KINDS);
-  const byLane = zeroCounts(LANES);
-
-  for (const item of items) {
-    byLevel[item.level] += 1;
-    byKind[item.kind] += 1;
-    byLane[item.lane] += 1;
-  }
-
-  return { byLevel, byKind, byLane };
 }
 
 function buildReport(

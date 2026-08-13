@@ -42,7 +42,7 @@ import type { Identity } from "../actor.js";
 import { actorFromIdentity } from "../actor.js";
 import { writeTx } from "../db/connection.js";
 import type { Level } from "../enums.js";
-import { isTerminal, KINDS, LANES, LEVELS } from "../enums.js";
+import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
 import { addDependencyWithin } from "../graph/deps.js";
@@ -52,7 +52,8 @@ import type { OpenStore } from "../store.js";
 import type { Move } from "../tasks/lifecycle.js";
 import { applyMoveWithin } from "../tasks/lifecycle.js";
 import { createTaskWithin } from "../tasks/repo.js";
-import type { ImportedCounts, MigrationIdMapEntry, MigrationPlan, PlannedItem } from "./types.js";
+import type { ImportedCounts, MigrationIdMapEntry, MigrationPlan } from "./types.js";
+import { computeImportedCounts } from "./types.js";
 
 /** What `loadMigration` hands back once its transaction commits. */
 export interface LoadResult {
@@ -92,38 +93,8 @@ function requireMapped<V>(map: ReadonlyMap<string, V>, key: string, what: string
   return value;
 }
 
-/** A fully-keyed, zero-initialized `Record` — mirrors `transform.ts`'s own `zeroCounts`. */
-function zeroCounts<K extends string>(keys: readonly K[]): Record<K, number> {
-  const result = {} as Record<K, number>;
-  for (const key of keys) result[key] = 0;
-  return result;
-}
-
-/**
- * Counts what was actually written, grouped by level/kind/lane.
- *
- * Computed from `plan.items` after every row has committed, not carried over
- * from `transform.ts`'s own report — the two are numerically identical today
- * because a committed load writes every planned item or none, but they answer
- * different questions ("what would be written" vs "what was written"), and
- * only this function's answer is honest to call the load's.
- */
-function computeImportedCounts(items: readonly PlannedItem[]): ImportedCounts {
-  const byLevel = zeroCounts(LEVELS);
-  const byKind = zeroCounts(KINDS);
-  const byLane = zeroCounts(LANES);
-
-  for (const item of items) {
-    byLevel[item.level] += 1;
-    byKind[item.kind] += 1;
-    byLane[item.lane] += 1;
-  }
-
-  return { byLevel, byKind, byLane };
-}
-
 /** Just enough about an already-created item to compute its `created`/`closed`/`note-added` events' `epicId`. */
-interface ItemMeta {
+interface LoadItemMeta {
   readonly level: Level;
   readonly parentId: string | null;
 }
@@ -181,7 +152,7 @@ export function loadMigration(
     // stable partitioning keeps that order within each group.
     // ---------------------------------------------------------------------
     const idMap = new Map<string, string>();
-    const itemMeta = new Map<string, ItemMeta>();
+    const itemMeta = new Map<string, LoadItemMeta>();
 
     const epics = plan.items.filter((item) => item.level === "epic");
     const nonEpics = plan.items.filter((item) => item.level !== "epic");
@@ -238,6 +209,9 @@ export function loadMigration(
           lane: item.lane,
           markClosed: true,
           reason: item.closeReason,
+          // Structurally required by `Move` but never read by
+          // `applyMoveWithin` itself — the real `closed` event comes from
+          // `plan.events` in step 4, in its own historical order.
           event: "closed",
         };
         applyMoveWithin(store, newId, move, { at: item.closedAt, updatedAt: item.updatedAt });
