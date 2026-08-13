@@ -482,6 +482,66 @@ export interface StaleResult {
   readonly olderThan: string;
 }
 
+/**
+ * One `search` result row — {@link ActivityHit} plus what made it match
+ * (F6 T5).
+ *
+ * `search.ts`'s rollup pins two independent properties, and both ride on this
+ * one row per matched entity:
+ *
+ * - `idMatch` is an **any-row property**: true the moment *any* branch of the
+ *   underlying query matched this entity by id, even when the row chosen to
+ *   populate `snippet`/`score` came from a different branch entirely (a task
+ *   matching both by id fragment and by text keeps `idMatch: true`, with the
+ *   text branch's real snippet on display — see `search.ts`'s `readSearch`
+ *   docs for the SQL shape that makes this true).
+ * - `snippet`, `score` (and the tier that picked them, internal to the query)
+ *   are **winning-row properties**: whichever single branch's row the rollup
+ *   selected for this entity.
+ *
+ * `null` on both `snippet` and `score` for an id-only match (nothing to
+ * excerpt or rank when the hit came from `tasks.id`, not FTS5) and for every
+ * row on the filter-only path (no query text at all to score or excerpt).
+ */
+export interface SearchHit extends ActivityHit {
+  /**
+   * A marked excerpt from the winning field, or `null` for an id-only match
+   * and for the filter-only path.
+   *
+   * Raw stored bytes, exactly as FTS5's `snippet()` returns them — sanitized
+   * at render, not here (module docs, `search.ts`). `--json` carries it
+   * verbatim per policy; the markers are display-best-effort and can collide
+   * with identical literal characters already in the stored text, so they
+   * carry no structural meaning a consumer should parse.
+   */
+  readonly snippet: string | null;
+  /**
+   * The winning row's bm25 score — more negative is a better match — or
+   * `null` for an id-only match and for the filter-only path.
+   *
+   * Comparable only against another hit in the **same tier** (`matchedIn` the
+   * same value): bm25 magnitudes are not commensurable across `tasks_fts` and
+   * `notes_fts`, two structurally different indexes over different content.
+   */
+  readonly score: number | null;
+  /**
+   * Where the winning row's text lived — spec req 3's provenance marker,
+   * nothing more. `"task"` for a title/description hit and for an id-only
+   * match; `"note"` only when the winning row came from a note body.
+   */
+  readonly matchedIn: "task" | "note";
+  /** True when this entity matched the id-fragment branch — see this interface's docs. */
+  readonly idMatch: boolean;
+}
+
+/** What `search` prints. */
+export interface SearchResult {
+  /** The query text as given, echoed so a caller need not thread it through separately. Empty for a filter-only search. */
+  readonly query: string;
+  readonly hits: readonly SearchHit[];
+  readonly truncated: boolean;
+}
+
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {
   readonly help: string;

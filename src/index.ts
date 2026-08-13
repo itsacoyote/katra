@@ -51,6 +51,8 @@ export type {
   NextResult,
   NoteList,
   RecentResult,
+  SearchHit,
+  SearchResult,
   StaleResult,
   StoreWarning,
   TaskList,

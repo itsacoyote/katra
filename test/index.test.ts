@@ -91,6 +91,10 @@ describe("the public barrel", () => {
       // barrel export is still this same compile error.
       katra.RecentResult,
       katra.StaleResult,
+      // F6 T5: what `search` prints. SearchHit does not get its own entry —
+      // it rides on SearchResult the same way ActivityHit rides on
+      // RecentResult/StaleResult above without one.
+      katra.SearchResult,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -99,8 +103,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 21;
-    expect(count).toBe(21);
+    const count: PublishedDocuments["length"] = 22;
+    expect(count).toBe(22);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {
