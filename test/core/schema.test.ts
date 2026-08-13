@@ -35,6 +35,29 @@ function rawInsert(db: DB, row: Record<string, unknown>): void {
   );
 }
 
+/**
+ * Inserts a note with raw SQL, bypassing application validation like
+ * {@link rawInsert} does for tasks.
+ *
+ * Module-scoped, not describe-block-scoped: both the 0002 and 0004 describe
+ * blocks need it, and two independent copies (one per block) had already
+ * drifted into a byte-for-byte duplicate before this one replaced them.
+ */
+function insertNote(db: DB, row: Record<string, unknown> = {}): void {
+  const full = {
+    id: "nt-aaaaaa",
+    task_id: "kt-aaaaaa",
+    body: "a note",
+    actor: "main @ /repo",
+    created_at: TS,
+    ...row,
+  };
+  const cols = Object.keys(full);
+  db.prepare(`INSERT INTO notes (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`).run(
+    ...Object.values(full),
+  );
+}
+
 function baseTask(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     id: "kt-aaaaaa",
@@ -469,21 +492,6 @@ describe("migration 0002 — events and notes", () => {
     return db;
   }
 
-  const note = (db: DB, row: Record<string, unknown> = {}): void => {
-    const full = {
-      id: "nt-aaaaaa",
-      task_id: "kt-aaaaaa",
-      body: "a note",
-      actor: "main @ /repo",
-      created_at: TS,
-      ...row,
-    };
-    const cols = Object.keys(full);
-    db.prepare(
-      `INSERT INTO notes (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
-    ).run(...Object.values(full));
-  };
-
   it("matches the committed v2 schema byte for byte", () => {
     // Same reason as v1's snapshot: this DDL is rendered from the enum arrays
     // at import time, and forward-only migration never re-runs a step. A store
@@ -601,7 +609,7 @@ describe("migration 0002 — events and notes", () => {
     db.exec(migration0001.sql);
     db.exec(ddl);
     rawInsert(db, baseTask());
-    expect(() => note(db, { kind: "sentinel-kind" })).not.toThrow();
+    expect(() => insertNote(db, { kind: "sentinel-kind" })).not.toThrow();
     db.close();
   });
 
@@ -648,7 +656,7 @@ describe("migration 0002 — events and notes", () => {
     // not. A note without its task is unreachable and unreadable.
     const db = freshV2();
     rawInsert(db, baseTask());
-    note(db);
+    insertNote(db);
 
     db.prepare("DELETE FROM tasks WHERE id='kt-aaaaaa'").run();
 
@@ -658,7 +666,9 @@ describe("migration 0002 — events and notes", () => {
 
   it("refuses a note on a task that does not exist", () => {
     const db = freshV2();
-    expect(() => note(db, { task_id: "kt-zzzzzz" })).toThrowError(/FOREIGN KEY constraint failed/);
+    expect(() => insertNote(db, { task_id: "kt-zzzzzz" })).toThrowError(
+      /FOREIGN KEY constraint failed/,
+    );
     db.close();
   });
 
@@ -667,9 +677,9 @@ describe("migration 0002 — events and notes", () => {
     rawInsert(db, baseTask());
 
     for (const bad of ["kt-aaaaaa", "nt-aaaaa", "nt-aaaaaaa", "nt-AAAAAA", "nt-aaa_aa", "aaaaaa"]) {
-      expect(() => note(db, { id: bad }), bad).toThrowError(/CHECK constraint failed/);
+      expect(() => insertNote(db, { id: bad }), bad).toThrowError(/CHECK constraint failed/);
     }
-    expect(() => note(db, { id: generateId(NOTE_ID_PREFIX) })).not.toThrow();
+    expect(() => insertNote(db, { id: generateId(NOTE_ID_PREFIX) })).not.toThrow();
     db.close();
   });
 
@@ -679,7 +689,7 @@ describe("migration 0002 — events and notes", () => {
     const db = freshV2();
     rawInsert(db, baseTask());
 
-    expect(() => note(db, { body: "" })).toThrowError(/CHECK constraint failed/);
+    expect(() => insertNote(db, { body: "" })).toThrowError(/CHECK constraint failed/);
     db.close();
   });
 
@@ -779,13 +789,8 @@ describe("migration 0003 — claims and presence", () => {
     );
 
     expect(readSchemaVersion(db)).toBe(2);
-    // MIGRATIONS now carries migration 0004 too, so a v2 store applying the
-    // full list runs TWO steps (0003's rebuild, then 0004's index) and lands
-    // on v4 — the same unscoped-MIGRATIONS trap 0002's freshV2()/v1Store()
-    // comment names, sprung here because this test was never scoped to a
-    // slice the way those were.
-    expect(migrate(db, MIGRATIONS)).toBe(2);
-    expect(readSchemaVersion(db)).toBe(4);
+    expect(migrate(db, MIGRATIONS.slice(0, 3))).toBe(1);
+    expect(readSchemaVersion(db)).toBe(3);
 
     expect(db.prepare("SELECT title FROM tasks WHERE id='kt-aaaaaa'").get()).toEqual({
       title: "survives the rebuild",
@@ -953,22 +958,6 @@ describe("migration 0004 — search index", () => {
     db.pragma("foreign_keys = ON");
     migrate(db, MIGRATIONS);
     return db;
-  }
-
-  /** Inserts a note with raw SQL, scoped to this describe block like 0002's own helper. */
-  function insertNote(db: DB, row: Record<string, unknown> = {}): void {
-    const full = {
-      id: "nt-aaaaaa",
-      task_id: "kt-aaaaaa",
-      body: "a note",
-      actor: "main @ /repo",
-      created_at: TS,
-      ...row,
-    };
-    const cols = Object.keys(full);
-    db.prepare(
-      `INSERT INTO notes (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
-    ).run(...Object.values(full));
   }
 
   /** Whether `term` currently matches a row in one of the two FTS5 indexes. */

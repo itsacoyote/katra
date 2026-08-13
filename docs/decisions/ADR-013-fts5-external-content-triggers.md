@@ -49,6 +49,13 @@ in migration 0004 alongside a one-time backfill of existing rows.
   instead of every writer owning forever.
 - Read commands stay pure: search only reads; nothing about the index is
   maintained at read time.
+- The trigger/index pairing is a coupling any future schema change on
+  `tasks`/`notes` has to honor deliberately — `integrity-check` will not flag
+  a break. A migration that rebuilds either table by drop-and-recreate (0002's
+  and 0003's own idiom for widening a `CHECK`) drops these triggers with the
+  table, and must recreate them and rebuild the index in that same step. A
+  future `VACUUM` (none exists today) would need the same treatment, since it
+  can renumber the implicit rowids `content_rowid='rowid'` depends on.
 
 ## Alternatives considered
 

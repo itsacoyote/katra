@@ -10,6 +10,18 @@
 -- `id` is a TEXT PRIMARY KEY, not `WITHOUT ROWID`, so SQLite's implicit
 -- `rowid` column is there to join the index back to its row
 -- (research-verified).
+--
+-- Two ways this mapping can silently desync later, neither one caught by
+-- `integrity-check`:
+-- (a) a future migration that rebuilds `tasks` or `notes` by drop-and-recreate
+-- — 0002's and 0003's own idiom for widening a `CHECK` constraint — drops
+-- these triggers along with the table they're attached to. Any such
+-- migration must recreate the triggers **and** rebuild the index
+-- (`INSERT INTO tasks_fts(tasks_fts) VALUES('rebuild')`) in that same step,
+-- or writes after it stop reaching the index with nothing to say so.
+-- (b) `VACUUM` can renumber implicit rowids. Nothing in this codebase runs
+-- one today; if that ever changes, it has to rebuild both indexes in the
+-- same operation, or `content_rowid`'s mapping goes stale under it.
 CREATE VIRTUAL TABLE tasks_fts USING fts5(
   title, description,
   content='tasks',
@@ -86,7 +98,9 @@ END;
 -- clean, but every posting would be silently duplicated, skewing bm25
 -- ranking — and because neither table's rowid is AUTOINCREMENT, a stale
 -- posting left behind by some future bypass of this guarantee would
--- eventually collide with a reused rowid and corrupt that row's snippets.
+-- eventually collide with a reused rowid, and any `snippet()`/`highlight()`
+-- read over that stale posting throws SQLITE_CORRUPT ("database disk image
+-- is malformed") rather than merely returning wrong text.
 -- Backfilling here is also what makes the migrated dogfood store searchable
 -- with no extra step (ADR-013's stated consequence).
 INSERT INTO tasks_fts(rowid, title, description)

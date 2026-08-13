@@ -146,6 +146,11 @@ describe("migrating a v1 store under contention", () => {
       .map((row) => (row as { name: string }).name);
     expect(tables).not.toContain("events");
     expect(tables).not.toContain("notes");
+    // Same reason, for the FTS objects the drops above added: a regression
+    // here would otherwise only surface as eight opaque subprocess crashes
+    // from the concurrent block below, ~60s later.
+    expect(tables).not.toContain("tasks_fts");
+    expect(tables).not.toContain("notes_fts");
     rewind.close();
 
     const outcomes = await runConcurrent<{ version: number; created: boolean }>({
