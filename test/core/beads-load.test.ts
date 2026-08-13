@@ -588,6 +588,19 @@ describe("loadMigration + planMigration pairing", () => {
         title: "Blank Comment Task",
         comments: [pairComment("blank-comment-task", "   ")],
       }),
+
+      // A real (non-blank) comment — the only fixture entry that actually
+      // exercises the PlannedNote.id <-> PlannedEvent.noteRef handoff with
+      // transform's real id scheme (`${issue.id}:note-${index}`, mapIssue)
+      // resolved through load's noteIdMap, rather than a hand-built
+      // PlannedNote/PlannedEvent pair the other load.ts tests use. A
+      // distinct issue from blank-comment-task: pairComment always mints
+      // `${issueId}:c1`, so two comments on the same issue would collide.
+      pairIssue({
+        id: "commented-task",
+        title: "Commented Task",
+        comments: [pairComment("commented-task", "a real comment worth keeping")],
+      }),
     ];
 
     const extract: BeadsExtract = {
@@ -602,14 +615,15 @@ describe("loadMigration + planMigration pairing", () => {
     // Sane row counts: one fewer task than the raw fixture (the empty-title
     // issue never became a PlannedItem at all), exactly one epic, one real
     // dependency edge (cycle-a -> cycle-b; the self-edge, the dangling edge
-    // and the cycle's losing direction all dropped without a row), and one
-    // `created`/`closed` event per surviving item.
+    // and the cycle's losing direction all dropped without a row), one real
+    // note (the blank comment stayed excluded), and one `created` event per
+    // surviving item plus one `closed` plus one `note-added`.
     expect(countRows(fixture.store, "tasks")).toBe(issues.length - 1);
     expect(result.counts.byLevel.epic).toBe(1);
     expect(result.counts.byLevel.task).toBe(issues.length - 2);
     expect(countRows(fixture.store, "deps")).toBe(1);
-    expect(countRows(fixture.store, "notes")).toBe(0);
-    expect(countRows(fixture.store, "events")).toBe(issues.length - 1 + 1); // one created each, plus one closed
+    expect(countRows(fixture.store, "notes")).toBe(1);
+    expect(countRows(fixture.store, "events")).toBe(issues.length - 1 + 2); // one created each, plus one closed, plus one note-added
 
     // Grandchild reparented directly onto the epic, not its immediate parent.
     const epicId = newIdOf(result, "epic-root");
@@ -619,6 +633,21 @@ describe("loadMigration + planMigration pairing", () => {
     // The closed issue closed honestly through the move seam, not a direct
     // terminal-lane creation.
     expect(getTask(fixture.store, newIdOf(result, "closed-task"))?.lane).toBe("Done");
+
+    // The real comment's note-added event points at the actual minted note
+    // id — proving transform's PlannedNote.id <-> PlannedEvent.noteRef
+    // handoff (`${issue.id}:note-${index}`, resolved through load's
+    // noteIdMap) works end to end with transform's real id scheme, not just
+    // the hand-built plan-local ids the rest of this file uses.
+    const commentedTaskId = newIdOf(result, "commented-task");
+    const noteRow = fixture.store.db
+      .prepare("SELECT id FROM notes WHERE task_id = ?")
+      .get(commentedTaskId) as { id: string };
+    const { events: commentedTaskEvents } = listEvents(fixture.store, {
+      entityId: commentedTaskId,
+    });
+    const noteEvent = commentedTaskEvents.find((e) => e.type === "note-added");
+    expect(noteEvent?.ref).toBe(noteRow.id);
 
     // Every hostile path actually got pre-classified, not silently ignored.
     expect(report.invalidItems.count).toBe(1);
