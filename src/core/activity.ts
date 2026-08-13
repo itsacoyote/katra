@@ -137,6 +137,54 @@ const ACTIVITY_COLUMNS = `t.id AS id, t.title AS title, t.level AS level, t.lane
        t.kind AS kind, t.priority AS priority, t.parent_id AS epic_id,
        a.last_activity AS last_activity`;
 
+/**
+ * Runs one activity-shaped query — the skeleton `readRecent` and `readStale`
+ * both need (join, `SELECT` prefix, over-fetch-by-one, slice, truncation
+ * report) — the same shape `board.ts`'s `section` absorbs for its own
+ * sections, cited in both callers' docs below and now factored the same way.
+ *
+ * Always joins {@link activityJoin}`({outer: false})`: every caller in this
+ * module wants activity to be the subject of its read (an entity with zero
+ * events has nothing to report and must not appear), so INNER is not a
+ * parameter here — a caller wanting the outer form composes
+ * {@link activityJoin} directly instead of going through this helper (see
+ * `search.ts`, T5).
+ *
+ * `where` is optional and, when given, is assumed already `AND`-joined by
+ * the caller (`readStale`'s lane exclusion plus its cutoff). Bind order
+ * follows the SQL text: {@link activityJoin}'s own params (`[]` today)
+ * first, then `params` — which back `where` — then `limit + 1` last, since
+ * `LIMIT ?` is the final `?` in the statement.
+ */
+function readActivityRows(
+  store: OpenStore,
+  options: {
+    readonly where?: string;
+    readonly params?: readonly unknown[];
+    readonly orderBy: string;
+    readonly limit: number;
+  },
+): { readonly rows: readonly ActivityHit[]; readonly truncated: boolean } {
+  const join = activityJoin({ outer: false });
+  const params = options.params ?? [];
+
+  const rows = store.db
+    .prepare(
+      `SELECT ${ACTIVITY_COLUMNS}
+         FROM tasks t
+         ${join.sql}
+         ${options.where === undefined ? "" : `WHERE ${options.where}`}
+        ORDER BY ${options.orderBy}
+        LIMIT ?`,
+    )
+    .all(...join.params, ...params, options.limit + 1) as ActivityRow[];
+
+  return {
+    rows: rows.slice(0, options.limit).map(rowToHit),
+    truncated: rows.length > options.limit,
+  };
+}
+
 export interface RecentOptions {
   /** Newest-activity-first this many. Defaults to {@link DEFAULT_ACTIVITY_LIMIT}. */
   readonly limit?: number;
@@ -145,39 +193,22 @@ export interface RecentOptions {
 /**
  * Reads the entities with the most recent activity, newest first.
  *
- * Joins {@link activityJoin}`({outer: false})`: activity is the subject of
- * this read, so an entity that has never had an event has nothing to report
- * and does not appear. Epics are included on equal footing with tasks — see
- * `ActivityHit`'s docs — and a deleted task's surviving events (ADR-008)
- * never surface here, because the query is anchored at `tasks` and that
- * task's row is gone.
+ * Epics are included on equal footing with tasks — see `ActivityHit`'s docs
+ * — and a deleted task's surviving events (ADR-008) never surface here,
+ * because {@link readActivityRows}'s query is anchored at `tasks` and that
+ * task's row is gone. Ordered by `a.last_event_id DESC` — see
+ * {@link activityJoin}'s docs for why the id column, not the timestamp.
  *
- * Over-fetches by one so truncation is knowable, the same idiom `listEvents`
- * and `board`'s `section` use: a bound that cannot report itself is
- * indistinguishable from the end of the data. Wrapped in `readTx` even
- * though this is one statement, so a future second query added here (as
- * `board`'s sections were) inherits one consistent snapshot without a caller
- * having to remember to add it.
+ * Wrapped in `readTx` even though `readActivityRows` issues one statement,
+ * so a future second query added here (as `board`'s sections were) inherits
+ * one consistent snapshot without a caller having to remember to add it.
  */
 export function readRecent(store: OpenStore, options: RecentOptions = {}): RecentResult {
   const limit = options.limit ?? DEFAULT_ACTIVITY_LIMIT;
-  const join = activityJoin({ outer: false });
 
   return readTx(store.db, () => {
-    const rows = store.db
-      .prepare(
-        `SELECT ${ACTIVITY_COLUMNS}
-           FROM tasks t
-           ${join.sql}
-          ORDER BY a.last_event_id DESC
-          LIMIT ?`,
-      )
-      .all(...join.params, limit + 1) as ActivityRow[];
-
-    return {
-      hits: rows.slice(0, limit).map(rowToHit),
-      truncated: rows.length > limit,
-    };
+    const { rows, truncated } = readActivityRows(store, { orderBy: "a.last_event_id DESC", limit });
+    return { hits: rows, truncated };
   });
 }
 
@@ -197,35 +228,23 @@ export interface StaleOptions {
  * than `olderThan`, oldest first — most-forgotten first, so the item nothing
  * has touched the longest leads.
  *
- * Joins {@link activityJoin}`({outer: false})` for the same reason
- * {@link readRecent} does, and additionally excludes terminal lanes: `Done`
- * and `Cancelled` work is not waiting to be remembered. Ordered by
- * `a.last_event_id ASC` — the same total-order column `readRecent` orders
- * by, just ascending — rather than `a.last_activity`, for the reason
- * {@link activityJoin}'s docs state: it is the column that cannot tie
- * between two different entities.
+ * Excludes terminal lanes: `Done` and `Cancelled` work is not waiting to be
+ * remembered. Ordered by `a.last_event_id ASC` — the same total-order column
+ * `readRecent` orders by, just ascending — rather than `a.last_activity`,
+ * for the reason {@link activityJoin}'s docs state: it is the column that
+ * cannot tie between two different entities.
  */
 export function readStale(store: OpenStore, options: StaleOptions): StaleResult {
   const limit = options.limit ?? DEFAULT_ACTIVITY_LIMIT;
-  const join = activityJoin({ outer: false });
   const cutoff = activityCutoff(options.olderThan);
 
   return readTx(store.db, () => {
-    const rows = store.db
-      .prepare(
-        `SELECT ${ACTIVITY_COLUMNS}
-           FROM tasks t
-           ${join.sql}
-          WHERE t.lane NOT IN (${sqlEnum(TERMINAL_LANES)}) AND ${cutoff.sql}
-          ORDER BY a.last_event_id ASC
-          LIMIT ?`,
-      )
-      .all(...join.params, ...cutoff.params, limit + 1) as ActivityRow[];
-
-    return {
-      hits: rows.slice(0, limit).map(rowToHit),
-      truncated: rows.length > limit,
-      olderThan: options.olderThan,
-    };
+    const { rows, truncated } = readActivityRows(store, {
+      where: `t.lane NOT IN (${sqlEnum(TERMINAL_LANES)}) AND ${cutoff.sql}`,
+      params: cutoff.params,
+      orderBy: "a.last_event_id ASC",
+      limit,
+    });
+    return { hits: rows, truncated, olderThan: options.olderThan };
   });
 }
