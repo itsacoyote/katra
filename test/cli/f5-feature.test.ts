@@ -365,6 +365,11 @@ describe("F5 full-coverage fixture — apply and post-apply behavior", () => {
     expect(strip(appliedReport)).toEqual(strip(previewReport));
     expect(previewReport.applied).toBe(false);
     expect(appliedReport.applied).toBe(true);
+    // The apply half of "the id map resolves": every planned item's newId is
+    // a real minted id, not left null the way preview's is.
+    for (const entry of appliedReport.idMap) {
+      expect(entry.newId).toMatch(/^kt-/);
+    }
   });
 
   it("computes blocked-ness of a migrated blocked item from its edges, not a lane", async () => {
@@ -372,7 +377,6 @@ describe("F5 full-coverage fixture — apply and post-apply behavior", () => {
     const blockedId = idFor(report, "bf-blocked-status");
     const prereqId = idFor(report, "bf-in-progress");
     const openDependentId = idFor(report, "bf-open-dependent");
-    const closedPrereqId = idFor(report, "bf-closed-prereq");
 
     // Every migrated beads status (open/in_progress/blocked/deferred/pinned)
     // lands in the same lane, Defined — so partitioning these two correctly
@@ -401,7 +405,6 @@ describe("F5 full-coverage fixture — apply and post-apply behavior", () => {
     const shownDependent = await runCli(["show", openDependentId, "--json"], { cwd: repo.dir });
     const dependentView = shownDependent.json() as TaskView;
     expect(dependentView.blockers).toEqual([]);
-    void closedPrereqId;
   });
 
   it("finds migrated items by their beads:<oldId> tag", async () => {
@@ -421,19 +424,5 @@ describe("F5 full-coverage fixture — apply and post-apply behavior", () => {
 
     const second = await runCli(["migrate", "beads", "--apply"], { cwd: repo.dir });
     expect(second.exitCode).toBe(EXIT.conflict);
-  });
-
-  it("resolves every id map entry to a real minted id after --json apply", async () => {
-    const report = await applyFixture(repo.dir);
-
-    expect(report.applied).toBe(true);
-    expect(report.idMap.length).toBeGreaterThan(0);
-    for (const entry of report.idMap) {
-      expect(entry.newId).toMatch(/^kt-/);
-    }
-    // Round-trips through a real command, not just shape-checked in memory.
-    const anyId = idFor(report, "bf-kitchen-sink");
-    const shown = await runCli(["show", anyId], { cwd: repo.dir });
-    expect(shown.exitCode).toBe(EXIT.ok);
   });
 });
