@@ -221,13 +221,13 @@ function runShapeGate(issues: readonly BeadsIssue[]): ShapeGateResult {
 
   for (const issue of issues) {
     if (seenIds.has(issue.id)) {
-      invalidItems.push({ oldId: issue.id, rawTitle: issue.title });
+      invalidItems.push({ oldId: issue.id, rawTitle: issue.title, reason: "duplicate id" });
       continue;
     }
     seenIds.add(issue.id);
 
     if (!hasValidShape(issue)) {
-      invalidItems.push({ oldId: issue.id, rawTitle: issue.title });
+      invalidItems.push({ oldId: issue.id, rawTitle: issue.title, reason: "unusable field type" });
       continue;
     }
 
@@ -252,7 +252,7 @@ function filterEmptyTitles(shapeOkIssues: ReadonlyMap<string, BeadsIssue>): {
 
   for (const [oldId, issue] of shapeOkIssues) {
     if (issue.title.trim() === "") {
-      invalidItems.push({ oldId, rawTitle: issue.title });
+      invalidItems.push({ oldId, rawTitle: issue.title, reason: "empty title" });
       continue;
     }
     acceptedIssues.set(oldId, issue);

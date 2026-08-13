@@ -303,9 +303,11 @@ function formatMigrationReport(report: MigrationReport): string {
     ),
   );
   push(
-    "invalid items (empty title, skipped)",
+    "invalid items (skipped)",
     report.invalidItems.count,
-    report.invalidItems.items.map((item) => `  ${id(item.oldId)}  "${oneLine(item.rawTitle)}"`),
+    report.invalidItems.items.map(
+      (item) => `  ${id(item.oldId)}  "${oneLine(item.rawTitle)}"  (${oneLine(item.reason)})`,
+    ),
   );
   push(
     "invalid notes (blank body, skipped)",

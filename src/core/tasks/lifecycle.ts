@@ -42,11 +42,11 @@ function loadOrThrow(store: OpenStore, id: string, idInput: string): Task {
 /**
  * What a transition decides to do, once it has seen the task's current state.
  *
- * Exported so a caller of {@link applyMoveWithin} — the F5 loader chief among
- * them — can build one directly, without going through `plan`'s task-shaped
- * closures.
+ * Module-private: nothing outside `transition`'s own three callers
+ * (`closeTask`/`cancelTask`/`reopenTask`) needs the full shape — a direct
+ * caller of {@link applyMoveWithin} only needs {@link LaneChange}, below.
  */
-export interface Move {
+interface Move {
   readonly lane: Lane;
   readonly markClosed: boolean;
   readonly reason: string | null;
@@ -60,6 +60,16 @@ export interface Move {
    */
   readonly event: EventType;
 }
+
+/**
+ * The three fields {@link applyMoveWithin} actually reads off a `Move` —
+ * never `event`, which exists purely for `transition`'s own `appendEvent`
+ * call after `applyMoveWithin` returns. Exported so a direct caller of
+ * `applyMoveWithin` — the F5 loader chief among them — can build one without
+ * going through `transition`'s task-shaped `plan` closures or fabricating an
+ * `event` value it has no use for.
+ */
+export type LaneChange = Pick<Move, "lane" | "markClosed" | "reason">;
 
 /**
  * The row-mutation core of `transition`: applies one `Move` to a task's lane,
@@ -78,29 +88,30 @@ export interface Move {
  * `reportReadinessChange`'s mutate callback, then settles any claim and
  * appends the lifecycle event itself.
  *
- * Takes only the three fields it actually reads (`lane`, `markClosed`,
- * `reason`) — never `event`, which `applyMoveWithin` has no use for; that one
- * exists purely for `transition`'s own `appendEvent` call after this returns.
- * A full `Move` (`transition`'s own hand-built object, or the F5 loader's)
- * stays structurally compatible with this narrower shape without a cast —
- * only the excess-property check on an object *literal* would object, and
- * every real caller passes a `Move`-typed variable.
+ * Takes {@link LaneChange} — `lane`, `markClosed`, `reason`, never `event` —
+ * since `applyMoveWithin` has no use for the verb; that one exists purely for
+ * `transition`'s own `appendEvent` call after this returns. `transition`'s
+ * own hand-built `Move` stays structurally compatible with the narrower
+ * `LaneChange` shape without a cast — only the excess-property check on an
+ * object *literal* would object, and `transition` passes a `Move`-typed
+ * variable.
  *
- * Three guards a hand-built `Move` from a direct caller — the F5 loader chief
- * among them — cannot skip: a `Move` that marks a task closed but targets a
- * non-terminal lane would write `closed_at` onto a task the schema's own
- * `CHECK` still calls active; the converse — targeting a terminal lane
- * without marking closed — would leave that same `CHECK` refusing the row for
- * the opposite reason (a terminal lane demands a `closed_at`, and only
- * `markClosed` ever supplies one), so it is refused here too, as a typed
- * `internal` rather than a raw `CHECK`-constraint dump the caller would have
- * to decode; and `taskId` naming nothing would otherwise commit a no-op
- * `UPDATE` silently rather than telling the caller its id was wrong.
+ * Three guards a hand-built `LaneChange` from a direct caller — the F5
+ * loader chief among them — cannot skip: one that marks a task closed but
+ * targets a non-terminal lane would write `closed_at` onto a task the
+ * schema's own `CHECK` still calls active; the converse — targeting a
+ * terminal lane without marking closed — would leave that same `CHECK`
+ * refusing the row for the opposite reason (a terminal lane demands a
+ * `closed_at`, and only `markClosed` ever supplies one), so it is refused
+ * here too, as a typed `internal` rather than a raw `CHECK`-constraint dump
+ * the caller would have to decode; and `taskId` naming nothing would
+ * otherwise commit a no-op `UPDATE` silently rather than telling the caller
+ * its id was wrong.
  */
 export function applyMoveWithin(
   store: OpenStore,
   taskId: string,
-  move: Pick<Move, "lane" | "markClosed" | "reason">,
+  move: LaneChange,
   ctx: { readonly at: string; readonly updatedAt?: string },
 ): void {
   if (!store.db.inTransaction) {

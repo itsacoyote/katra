@@ -6,7 +6,7 @@ import { TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import { addDependency, isReady } from "../../src/core/graph/deps.js";
-import type { Move } from "../../src/core/tasks/lifecycle.js";
+import type { LaneChange } from "../../src/core/tasks/lifecycle.js";
 import {
   applyMoveWithin,
   cancelTask,
@@ -231,7 +231,7 @@ describe("applyMoveWithin", () => {
     seedClaim(fixture.store, { taskId: id, holder: "/repo/wt-ghost" });
     const at = seedTime(3_000);
     const updatedAt = seedTime(4_000);
-    const move: Move = { lane: "Done", markClosed: true, reason: "shipped", event: "closed" };
+    const move: LaneChange = { lane: "Done", markClosed: true, reason: "shipped" };
 
     expect(() => applyMoveWithin(fixture.store, id, move, { at })).toThrowError(
       /inside an open transaction/,
@@ -259,7 +259,7 @@ describe("applyMoveWithin", () => {
     // this — see its own docs (`db/connection.ts`) for why the plain
     // `inTransaction` check alone cannot.
     const id = seedTask(fixture.store);
-    const move: Move = { lane: "Done", markClosed: true, reason: null, event: "closed" };
+    const move: LaneChange = { lane: "Done", markClosed: true, reason: null };
 
     expect(() =>
       readTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
@@ -269,7 +269,7 @@ describe("applyMoveWithin", () => {
   it("defaults updated_at to ctx.at when updatedAt is omitted", () => {
     const id = seedTask(fixture.store);
     const at = seedTime(6_000);
-    const move: Move = { lane: "Done", markClosed: true, reason: null, event: "closed" };
+    const move: LaneChange = { lane: "Done", markClosed: true, reason: null };
 
     writeTx(fixture.store.db, () => {
       applyMoveWithin(fixture.store, id, move, { at });
@@ -279,7 +279,7 @@ describe("applyMoveWithin", () => {
   });
 
   it("throws not_found for an id that does not exist", () => {
-    const move: Move = { lane: "Done", markClosed: true, reason: null, event: "closed" };
+    const move: LaneChange = { lane: "Done", markClosed: true, reason: null };
 
     expect(() =>
       writeTx(fixture.store.db, () =>
@@ -294,7 +294,7 @@ describe("applyMoveWithin", () => {
     // converse (a terminal lane with no closed_at), so nothing else stops
     // this from writing closed_at onto a task the lane still calls active.
     const id = seedTask(fixture.store);
-    const move: Move = { lane: "In Progress", markClosed: true, reason: null, event: "closed" };
+    const move: LaneChange = { lane: "In Progress", markClosed: true, reason: null };
 
     expect(() =>
       writeTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
@@ -307,7 +307,7 @@ describe("applyMoveWithin", () => {
     // schema's own CHECK also refuses (it demands one for a terminal lane) —
     // a typed internal here instead of a raw CHECK-constraint dump.
     const id = seedTask(fixture.store);
-    const move: Move = { lane: "Done", markClosed: false, reason: null, event: "closed" };
+    const move: LaneChange = { lane: "Done", markClosed: false, reason: null };
 
     expect(() =>
       writeTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),

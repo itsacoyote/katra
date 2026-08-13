@@ -294,7 +294,9 @@ describe("planMigration", () => {
     const { plan, report } = planMigration(makeExtract([blank, withBlankNote]), IDENTITY, FALLBACK);
 
     expect(plan.items.some((item) => item.oldId === "BLANK")).toBe(false);
-    expect(report.invalidItems.items).toEqual([{ oldId: "BLANK", rawTitle: "   " }]);
+    expect(report.invalidItems.items).toEqual([
+      { oldId: "BLANK", rawTitle: "   ", reason: "empty title" },
+    ]);
 
     expect(plan.items.some((item) => item.oldId === "HAS-NOTE")).toBe(true);
     expect(report.invalidNotes.items).toEqual([
@@ -315,7 +317,9 @@ describe("planMigration", () => {
 
     const { plan, report } = planMigration(makeExtract([hostile]), IDENTITY, FALLBACK);
     expect(plan.items.some((item) => item.oldId === "HOSTILE")).toBe(false);
-    expect(report.invalidItems.items).toEqual([{ oldId: "HOSTILE", rawTitle: "Issue HOSTILE" }]);
+    expect(report.invalidItems.items).toEqual([
+      { oldId: "HOSTILE", rawTitle: "Issue HOSTILE", reason: "unusable field type" },
+    ]);
   });
 
   it("routes an issue with a non-string description to invalidItems instead of a bad SQL bind", () => {
@@ -333,7 +337,9 @@ describe("planMigration", () => {
 
     const { plan, report } = planMigration(makeExtract([hostile]), IDENTITY, FALLBACK);
     expect(plan.items.some((item) => item.oldId === "BAD-DESC")).toBe(false);
-    expect(report.invalidItems.items).toEqual([{ oldId: "BAD-DESC", rawTitle: "Issue BAD-DESC" }]);
+    expect(report.invalidItems.items).toEqual([
+      { oldId: "BAD-DESC", rawTitle: "Issue BAD-DESC", reason: "unusable field type" },
+    ]);
   });
 
   it("clamps and reports out-of-range priorities", () => {

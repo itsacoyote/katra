@@ -235,16 +235,24 @@ export interface InvalidTimestamp extends MigrationItemRef {
 }
 
 /**
- * An issue skipped outright because its title was empty after trimming. Its
- * edges then report as dangling (T5 body, step 4).
+ * An issue skipped outright — one of three fixed reasons: `"empty title"`
+ * (empty after trimming), `"duplicate id"` (a later occurrence of an id
+ * already accepted, first occurrence wins), or `"unusable field type"`
+ * (failed the shape gate — a field a downstream method call or SQL bind
+ * needs typed right came through some other JSON type). Its edges then
+ * report as dangling (T5 body, step 4).
  *
- * Carries `rawTitle`, not {@link MigrationItemRef}'s `title` — the title is
- * exactly what's invalid here, so presenting it as legible would misstate the
- * finding.
+ * Carries `rawTitle`, not {@link MigrationItemRef}'s `title`: for `"empty
+ * title"` the title is exactly what's invalid, so presenting it as legible
+ * would misstate the finding; for the other two reasons the item never
+ * passed the title-trim gate at all (it was rejected earlier), so `title`
+ * would imply a value this report accepted and validated when it did not.
  */
 export interface InvalidItem {
   readonly oldId: string;
   readonly rawTitle: string;
+  /** `"empty title"` | `"duplicate id"` | `"unusable field type"` — no other value is ever set. */
+  readonly reason: string;
 }
 
 /**
@@ -365,7 +373,7 @@ export interface MigrationReport {
   readonly parentCycles: ReportSection<CycleBreak>;
   readonly blocksCycles: ReportSection<BlocksCycleBreak>;
   readonly invalidTimestamps: ReportSection<InvalidTimestamp>;
-  /** Empty-after-trim titles — the item itself was skipped, not just a field on it. */
+  /** An empty-after-trim title, a duplicate id, or a shape-gate failure — the item itself was skipped, not just a field on it; each row's own `reason` says which. */
   readonly invalidItems: ReportSection<InvalidItem>;
   /** Blank-after-trim note bodies — the note was skipped, not just degraded. */
   readonly invalidNotes: ReportSection<InvalidNote>;
