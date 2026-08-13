@@ -336,9 +336,18 @@ export interface MigrationReport {
    * true sum across every type; `byType` is the breakdown.
    */
   readonly skippedRecords: {
-    /** Total non-`issue` records skipped, summed across all types below. */
+    /** Total non-`issue` records skipped, summed across all types below — exact, unaffected by `truncated`. */
     readonly count: number;
+    /** The first `MAX_SKIPPED_TYPES` (`extract.ts`) distinct types seen; each type string is capped too (`capText`, `core/text.ts`). */
     readonly byType: readonly SkippedRecordType[];
+    /**
+     * True when a distinct `_type` past `extract.ts`'s cap was folded into
+     * `count` without a `byType` entry of its own — the same "a bounded
+     * read reports itself" doctrine `MAX_CANDIDATES` follows in
+     * `tasks/ids.ts` (AGENTS.md: "A bounded read reports that it
+     * truncated").
+     */
+    readonly truncated: boolean;
   };
   readonly danglingEdges: ReportSection<MigrationEdgeRef>;
   /** Includes self-edges (an issue depending on itself). */
