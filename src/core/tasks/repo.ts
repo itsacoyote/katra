@@ -125,26 +125,29 @@ export function requireEpicId(store: OpenStore, input: string): string {
 
 /**
  * The row-mutation core of `createTask`: validates the input, resolves the
- * parent, and inserts the task and its tags — stamping the caller's actor and
- * time rather than `store.actor()` or `writeTx`'s own clock.
+ * parent, and inserts the task and its tags — stamping the caller's time
+ * rather than `writeTx`'s own clock.
  *
  * **Must be called inside an open transaction** — see `appendEvent`'s guard
- * (`events/repo.ts`), which this mirrors. `actor` is injected rather than
- * resolved here: resolving it spawns git subprocesses, and doing that under
- * the write lock this function runs inside would widen the lock window (see
- * `createTask`'s own note on that below) — and the F5 loader needs to stamp
- * migrated tasks with a foreign actor `store.actor()` could never produce.
- * `updatedAt` defaults to `createdAt`, matching every task `createTask` has
- * ever written. **Writes no event** — the F5 loader inserts historical tasks
- * without a `created` event masquerading as live activity, appending its own
- * events afterwards in true chronological order. `createTask` is the only
- * caller during ordinary use: it wraps this in `writeTx`, then appends the
- * `created` event itself from a fresh read of the row this seam just wrote.
+ * (`events/repo.ts`), which this mirrors. Validation runs under that lock
+ * rather than before it — every check lives in this one seam instead of a
+ * pre-lock fast-fail path plus a second copy in here; `reopenTask`'s argument
+ * check takes the opposite trade, and says why it can afford to.
+ *
+ * Takes no `actor`: `tasks` has no actor column, so there is nothing here to
+ * stamp it onto. The only place an actor reaches is the `created` event, and
+ * this seam does not write one — see below. `updatedAt` defaults to
+ * `createdAt`, matching every task `createTask` has ever written. **Writes no
+ * event** — the F5 loader inserts historical tasks without a `created` event
+ * masquerading as live activity, appending its own events afterwards in true
+ * chronological order. `createTask` is the only caller during ordinary use: it
+ * wraps this in `writeTx`, then appends the `created` event itself, with the
+ * actor it already held, from a fresh read of the row this seam just wrote.
  */
 export function createTaskWithin(
   store: OpenStore,
   input: NewTask,
-  ctx: { readonly actor: string; readonly createdAt: string; readonly updatedAt?: string },
+  ctx: { readonly createdAt: string; readonly updatedAt?: string },
 ): string {
   if (!store.db.inTransaction) {
     throw new KatraException({
@@ -246,13 +249,16 @@ export function createTask(store: OpenStore, input: NewTask): Task {
   // honoured by any of the five write paths.
   const actor = store.actor();
 
-  const id = writeTx(store.db, (now) => {
-    const created = createTaskWithin(store, input, { actor, createdAt: now });
+  return writeTx(store.db, (now) => {
+    const created = createTaskWithin(store, input, { createdAt: now });
 
     // Read back rather than carried out of the seam: `createTaskWithin`'s
     // return type is just the minted id, so the title/level/parent it
     // resolved come from the row it just wrote, not from local variables the
-    // seam kept to itself.
+    // seam kept to itself. Returned as-is below rather than re-read once
+    // `writeTx` returns — the same reasoning `showTaskWithin` states: a
+    // second, un-transacted read can return a concurrent writer's state
+    // instead of the one this call just wrote.
     const task = getTask(store, created);
     if (task === undefined) {
       throw new KatraException({
@@ -261,8 +267,10 @@ export function createTask(store: OpenStore, input: NewTask): Task {
       });
     }
 
-    // After `createTaskWithin`, not inside it: a retried insert would make the
-    // retry re-run an append that ever raised.
+    // After `createTaskWithin` returns, not inside its `insertWithRetry`
+    // callback: that callback is retried on a primary-key collision, and an
+    // append that ever raised one would make the retry re-run the task
+    // insert too.
     //
     // The title is stamped onto the event because a `created` event outlives
     // its task (ADR-008) — once the row is deleted, no join can recover what it
@@ -279,18 +287,8 @@ export function createTask(store: OpenStore, input: NewTask): Task {
       now,
     );
 
-    return created;
+    return task;
   });
-
-  const created = getTask(store, id);
-  if (created === undefined) {
-    throw new KatraException({
-      code: "not_found",
-      message: `task ${id} vanished immediately after being created`,
-      id,
-    });
-  }
-  return created;
 }
 
 /**

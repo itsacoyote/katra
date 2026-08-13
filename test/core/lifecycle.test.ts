@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { claimFor, claimTask } from "../../src/core/claims/repo.js";
-import { writeTx } from "../../src/core/db/connection.js";
+import { readTx, writeTx } from "../../src/core/db/connection.js";
 import type { EventType } from "../../src/core/enums.js";
 import { TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
@@ -252,10 +252,58 @@ describe("applyMoveWithin", () => {
     expect(claimFor(fixture.store, id)).not.toBeNull();
     expect(listEvents(fixture.store, { entityId: id }).events).toEqual([]);
   });
+
+  it("throws when called inside a read transaction", () => {
+    // The other half of the transaction-required guard: `db.inTransaction` is
+    // also true inside a deferred read, so only `assertNotReadOnly` catches
+    // this — see its own docs (`db/connection.ts`) for why the plain
+    // `inTransaction` check alone cannot.
+    const id = seedTask(fixture.store);
+    const move: Move = { lane: "Done", markClosed: true, reason: null, event: "closed" };
+
+    expect(() =>
+      readTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
+    ).toThrowError(/read transaction/);
+  });
+
+  it("defaults updated_at to ctx.at when updatedAt is omitted", () => {
+    const id = seedTask(fixture.store);
+    const at = seedTime(6_000);
+    const move: Move = { lane: "Done", markClosed: true, reason: null, event: "closed" };
+
+    writeTx(fixture.store.db, () => {
+      applyMoveWithin(fixture.store, id, move, { at });
+    });
+
+    expect(getTask(fixture.store, id)?.updatedAt).toBe(at);
+  });
+
+  it("throws not_found for an id that does not exist", () => {
+    const move: Move = { lane: "Done", markClosed: true, reason: null, event: "closed" };
+
+    expect(() =>
+      writeTx(fixture.store.db, () =>
+        applyMoveWithin(fixture.store, "kt-absent", move, { at: seedTime() }),
+      ),
+    ).toThrowError(/no task matches/);
+  });
+
+  it("throws internal when a Move marks closed into a non-terminal lane", () => {
+    // A hand-built Move — the F5 loader's own use of this seam — could close
+    // into a non-terminal lane; the schema's own CHECK only constrains the
+    // converse (a terminal lane with no closed_at), so nothing else stops
+    // this from writing closed_at onto a task the lane still calls active.
+    const id = seedTask(fixture.store);
+    const move: Move = { lane: "In Progress", markClosed: true, reason: null, event: "closed" };
+
+    expect(() =>
+      writeTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
+    ).toThrowError(/terminal lane/);
+  });
 });
 
-describe("transition through the seam", () => {
-  it("transition close, cancel and reopen still behave byte-identically through the seam", () => {
+describe("transition", () => {
+  it("close, cancel and reopen still behave byte-identically through the seam", () => {
     const closable = seedTask(fixture.store);
     const { task: closed } = closeTask(fixture.store, closable, "shipped");
     expect(closed.lane).toBe("Done");

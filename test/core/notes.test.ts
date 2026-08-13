@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { writeTx } from "../../src/core/db/connection.js";
+import { readTx, writeTx } from "../../src/core/db/connection.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import {
@@ -166,6 +166,24 @@ describe("createNoteWithin", () => {
     expect(note?.actor).toBe("someone-else");
     expect(note?.createdAt).toBe(createdAt);
     expect(listEvents(fixture.store, { entityId: task }).events).toEqual([]);
+  });
+
+  it("createNoteWithin throws when called inside a read transaction", () => {
+    // The other half of the transaction-required guard: `db.inTransaction` is
+    // also true inside a deferred read, so only `assertNotReadOnly` catches
+    // this — see its own docs (`db/connection.ts`) for why the plain
+    // `inTransaction` check alone cannot.
+    const task = seedTask(fixture.store);
+
+    expect(() =>
+      readTx(fixture.store.db, () =>
+        createNoteWithin(
+          fixture.store,
+          { taskId: task, body: "in a read" },
+          { actor: "someone-else", createdAt: seedTime() },
+        ),
+      ),
+    ).toThrowError(/read transaction/);
   });
 });
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { writeTx } from "../../src/core/db/connection.js";
+import { readTx, writeTx } from "../../src/core/db/connection.js";
 import { LANES, TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
@@ -400,7 +400,7 @@ describe("cycle detection cost", () => {
   });
 });
 
-describe("addDependencyWithin and addLinkWithin", () => {
+describe("graph seams", () => {
   it("addDependencyWithin and addLinkWithin write with the caller's time, no events", () => {
     const a = seedTask(fixture.store);
     const b = seedTask(fixture.store);
@@ -436,5 +436,20 @@ describe("addDependencyWithin and addLinkWithin", () => {
     // Neither path has ever appended an event — this seam only changes where
     // the timestamp comes from.
     expect(listEvents(fixture.store).events).toEqual([]);
+  });
+
+  it("addDependencyWithin throws when called inside a read transaction", () => {
+    // The other half of the transaction-required guard: `db.inTransaction` is
+    // also true inside a deferred read, so only `assertNotReadOnly` catches
+    // this — see its own docs (`db/connection.ts`) for why the plain
+    // `inTransaction` check alone cannot.
+    const a = seedTask(fixture.store);
+    const b = seedTask(fixture.store);
+
+    expect(() =>
+      readTx(fixture.store.db, () =>
+        addDependencyWithin(fixture.store, a, b, { createdAt: seedTime() }),
+      ),
+    ).toThrowError(/read transaction/);
   });
 });

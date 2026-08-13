@@ -108,15 +108,20 @@ function requireNoteTarget(store: OpenStore, input: string): string {
  * rather than `store.actor()` or `writeTx`'s own clock.
  *
  * **Must be called inside an open transaction** — see `appendEvent`'s guard
- * (`events/repo.ts`), which this mirrors. `actor` injected is load-bearing
- * here, not just a lock-window nicety: the F5 loader attaches a beads
- * comment's own author to the note it becomes, an actor `store.actor()`
- * could never produce since it always resolves to *this* process's identity.
- * **Writes no event** — the F5 loader inserts historical notes without a
- * `note-added` event masquerading as live activity, appending its own events
- * afterwards in true chronological order. `createNote` is the only caller
- * during ordinary use: it wraps this in `writeTx`, then appends the
- * `note-added` event itself from a fresh read of the row this seam just wrote.
+ * (`events/repo.ts`), which this mirrors. Validation runs under that lock
+ * rather than before it, the same trade `createTaskWithin` takes and explains.
+ *
+ * `actor` injected is load-bearing here, not just a lock-window nicety: the
+ * F5 loader attaches a beads comment's own author to the note it becomes, an
+ * actor `store.actor()` could never produce since it always resolves to
+ * *this* process's identity. This is the opposite of `createTaskWithin`,
+ * which takes no `actor` at all — the asymmetry follows the schema: `notes`
+ * has a real `actor` column to stamp, `tasks` does not. **Writes no event** —
+ * the F5 loader inserts historical notes without a `note-added` event
+ * masquerading as live activity, appending its own events afterwards in true
+ * chronological order. `createNote` is the only caller during ordinary use:
+ * it wraps this in `writeTx`, then appends the `note-added` event itself
+ * from a fresh read of the row this seam just wrote.
  */
 export function createNoteWithin(
   store: OpenStore,
@@ -165,13 +170,16 @@ export function createNote(store: OpenStore, input: NewNote): Note {
   // and under `BEGIN IMMEDIATE` that holds the write lock across both.
   const actor = store.actor();
 
-  const id = writeTx(store.db, (now) => {
+  return writeTx(store.db, (now) => {
     const noteId = createNoteWithin(store, input, { actor, createdAt: now });
 
     // Read back rather than carried out of the seam: `createNoteWithin`'s
     // return type is just the minted id, so the task it attached to comes
     // from the row it just wrote, not from a local variable the seam kept to
-    // itself.
+    // itself. Returned as-is below rather than re-read once `writeTx`
+    // returns — the same reasoning `showTaskWithin` states: a second,
+    // un-transacted read can return a concurrent writer's state instead of
+    // the one this call just wrote.
     const note = getNote(store, noteId);
     if (note === undefined) {
       throw new KatraException({
@@ -202,18 +210,8 @@ export function createNote(store: OpenStore, input: NewNote): Note {
       now,
     );
 
-    return noteId;
+    return note;
   });
-
-  const created = getNote(store, id);
-  if (created === undefined) {
-    throw new KatraException({
-      code: "not_found",
-      message: `note ${id} vanished immediately after being created`,
-      id,
-    });
-  }
-  return created;
 }
 
 /** Fetches a note by its exact id. */

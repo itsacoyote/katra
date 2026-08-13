@@ -77,6 +77,14 @@ export interface Move {
  * is the only caller during ordinary use: it wraps this in
  * `reportReadinessChange`'s mutate callback, then settles any claim and
  * appends the lifecycle event itself.
+ *
+ * Two guards a hand-built `Move` from a direct caller — the F5 loader chief
+ * among them — cannot skip: a `Move` that marks a task closed but targets a
+ * non-terminal lane would write `closed_at` onto a task the schema's own
+ * `CHECK` still calls active, since that constraint only forbids the
+ * converse (a terminal lane with no `closed_at`); and `taskId` naming nothing
+ * would otherwise commit a no-op `UPDATE` silently rather than telling the
+ * caller its id was wrong.
  */
 export function applyMoveWithin(
   store: OpenStore,
@@ -94,13 +102,28 @@ export function applyMoveWithin(
   }
   assertNotReadOnly(store.db, "applyMoveWithin");
 
+  if (move.markClosed && !isTerminal(move.lane)) {
+    throw new KatraException({
+      code: "internal",
+      message: `applyMoveWithin: a Move that marks closed must target a terminal lane, not ${move.lane}`,
+    });
+  }
+
   const updatedAt = ctx.updatedAt ?? ctx.at;
 
-  store.db
+  const info = store.db
     .prepare(
       "UPDATE tasks SET lane = ?, closed_at = ?, close_reason = ?, updated_at = ? WHERE id = ?",
     )
     .run(move.lane, move.markClosed ? ctx.at : null, move.reason, updatedAt, taskId);
+
+  if (info.changes === 0) {
+    throw new KatraException({
+      code: "not_found",
+      message: `no task matches "${taskId}"`,
+      id: taskId,
+    });
+  }
 }
 
 /**
@@ -223,7 +246,9 @@ export function cancelTask(store: OpenStore, idInput: string, reason?: string): 
 export function reopenTask(store: OpenStore, idInput: string, lane?: Lane): LifecycleResult {
   // Argument validation, so it fails before a write lock is taken. It depends
   // on nothing the database holds; the state guard below does, and lives
-  // inside the transaction.
+  // inside the transaction. Not a rule every write path follows uniformly —
+  // `createTaskWithin`/`createNoteWithin` validate under the lock instead,
+  // deliberately, and say why in their own docs.
   const target = lane ?? REOPEN_DEFAULT_LANE;
   if (isTerminal(target)) {
     // Otherwise reopen becomes a second path into a terminal lane, bypassing
