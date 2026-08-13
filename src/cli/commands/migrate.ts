@@ -28,7 +28,12 @@ import { extractBeadsExport } from "../../core/beads/extract.js";
 import type { LoadResult } from "../../core/beads/load.js";
 import { loadMigration } from "../../core/beads/load.js";
 import { planMigration } from "../../core/beads/transform.js";
-import type { MigrationEdgeRef, MigrationItemRef } from "../../core/beads/types.js";
+import type {
+  CommentRef,
+  MigrationEdgeRef,
+  MigrationItemRef,
+  ReportSection,
+} from "../../core/beads/types.js";
 import { nowIso } from "../../core/clock.js";
 import type { MigrationReport } from "../../core/contract.js";
 import { KatraException } from "../../core/errors.js";
@@ -43,13 +48,15 @@ const DEFAULT_FROM = ".beads/issues.jsonl";
  * Hard ceiling on `--from`'s size, refused before the file is even read.
  *
  * `extract.ts`'s own module docs note it materializes the whole file into
- * memory (the split line array plus the source string) — fine for an ordinary
- * export, but an unbounded read of a hostile or truncated file would otherwise
- * die deep inside V8 as `ERR_STRING_TOO_LONG`, surfacing as an `internal`
- * "katra broke" instead of the "your export is too big" refusal a caller can
- * actually act on (security scan).
+ * memory (the split line array plus the source string) — measured, a 128 MiB
+ * cap would still let that pipeline balloon to roughly 1.3 GB of heap before
+ * `planMigration` even starts, dying exactly the way this guard's own message
+ * promises to prevent. 32 MiB is ~70x this repository's own real export
+ * (`.beads/issues.jsonl`, 145 records) — generous headroom for a real
+ * project's history without reopening the same failure mode at a number that
+ * merely looks safer.
  */
-const MAX_FROM_BYTES = 128 * 1024 * 1024;
+const MAX_FROM_BYTES = 32 * 1024 * 1024;
 
 /**
  * Preview's stand-in for "who is running this migration". A preview never
@@ -81,18 +88,44 @@ function resolveFromPath(context: CliContext, from: string | undefined): string 
   return isAbsolute(raw) ? raw : resolve(context.cwd, raw);
 }
 
-/** Stats and reads the export, refusing a missing file or one over {@link MAX_FROM_BYTES}. */
+/**
+ * Stats and reads the export, refusing a missing file, a non-regular file
+ * (fifo, device, directory — `--from /dev/zero`/a named pipe would otherwise
+ * read forever or hang waiting on a writer, and a directory reaches
+ * `readFileSync` as an opaque `EISDIR` `internal` fault), or one over
+ * {@link MAX_FROM_BYTES}.
+ */
 function readExportFile(path: string): string {
   let stats: ReturnType<typeof statSync>;
   try {
     stats = statSync(path);
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new KatraException({
+        code: "not_found",
+        message:
+          `no beads export at ${path} — run \`bd export -o ${path}\` to create one, or point ` +
+          "--from at an existing export",
+        id: path,
+      });
+    }
+    // Anything other than "does not exist" — permission denied, a broken
+    // symlink, an I/O error — is a distinct refusal that names the errno
+    // rather than being folded into the same "go create one" hint.
     throw new KatraException({
-      code: "not_found",
-      message:
-        `no beads export at ${path} — run \`bd export -o ${path}\` to create one, or point ` +
-        "--from at an existing export",
-      id: path,
+      code: "validation",
+      message: `could not stat --from ${path}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
+      field: "from",
+      value: path,
+    });
+  }
+
+  if (!stats.isFile()) {
+    throw new KatraException({
+      code: "validation",
+      message: `${path} is not a regular file — --from needs a bd export written to disk`,
+      field: "from",
+      value: path,
     });
   }
 
@@ -120,9 +153,30 @@ function applyLoadResult(report: MigrationReport, result: LoadResult): Migration
 // one block per non-empty category, nothing printed for an empty one.
 // ---------------------------------------------------------------------------
 
-const itemRef = (item: MigrationItemRef): string => `  ${item.oldId}  ${oneLine(item.title)}`;
+// beads ids are export content, not minted ids — a raw oldId/commentId/path
+// entry can carry the same hostile bytes (ANSI escapes, embedded newlines) any
+// other export field can, and the preview report is what a caller reads
+// *before* deciding whether to run --apply at all.
+const id = (value: string): string => oneLine(value);
+
+const itemRef = (item: MigrationItemRef): string => `  ${id(item.oldId)}  ${oneLine(item.title)}`;
 const edgeRef = (edge: MigrationEdgeRef): string =>
-  `  ${edge.fromOldId} -> ${edge.toOldId}  (${oneLine(edge.type)})`;
+  `  ${id(edge.fromOldId)} -> ${id(edge.toOldId)}  (${oneLine(edge.type)})`;
+const commentRef = (comment: CommentRef): string =>
+  `  ${id(comment.oldId)}  ${oneLine(comment.title)}  comment ${id(comment.commentId)}`;
+
+/** The six sections whose items are plain {@link MigrationItemRef}s — one bespoke row each would be identical. */
+const ITEM_REF_SECTIONS: ReadonlyArray<{
+  readonly label: string;
+  readonly pick: (report: MigrationReport) => ReportSection<MigrationItemRef>;
+}> = [
+  { label: "dropped: owner", pick: (report) => report.droppedFields.owner },
+  { label: "dropped: created by", pick: (report) => report.droppedFields.createdBy },
+  { label: "dropped: estimated minutes", pick: (report) => report.droppedFields.estimatedMinutes },
+  { label: "dropped: external ref", pick: (report) => report.droppedFields.externalRef },
+  { label: "dropped: started at", pick: (report) => report.droppedFields.startedAt },
+  { label: "empty labels dropped", pick: (report) => report.emptyLabels },
+];
 
 function formatMigrationReport(report: MigrationReport): string {
   const blocks: string[] = [];
@@ -148,44 +202,22 @@ function formatMigrationReport(report: MigrationReport): string {
     );
   }
 
-  push(
-    "dropped: owner",
-    report.droppedFields.owner.count,
-    report.droppedFields.owner.items.map(itemRef),
-  );
-  push(
-    "dropped: created by",
-    report.droppedFields.createdBy.count,
-    report.droppedFields.createdBy.items.map(itemRef),
-  );
-  push(
-    "dropped: estimated minutes",
-    report.droppedFields.estimatedMinutes.count,
-    report.droppedFields.estimatedMinutes.items.map(itemRef),
-  );
-  push(
-    "dropped: external ref",
-    report.droppedFields.externalRef.count,
-    report.droppedFields.externalRef.items.map(itemRef),
-  );
-  push(
-    "dropped: started at",
-    report.droppedFields.startedAt.count,
-    report.droppedFields.startedAt.items.map(itemRef),
-  );
+  for (const { label, pick } of ITEM_REF_SECTIONS) {
+    const section = pick(report);
+    push(label, section.count, section.items.map(itemRef));
+  }
+
   push(
     "dropped: comment author (fell back to the migrating identity)",
     report.droppedFields.commentAuthor.count,
-    report.droppedFields.commentAuthor.items.map(
-      (comment) => `  ${comment.oldId}  ${oneLine(comment.title)}  comment ${comment.commentId}`,
-    ),
+    report.droppedFields.commentAuthor.items.map(commentRef),
   );
 
   push(
     "reparented onto nearest ancestor epic",
     report.reparented.count,
     report.reparented.items.map(
-      (item) => `  ${item.oldId}  ${oneLine(item.title)}  -> ${item.newParentOldId}`,
+      (item) => `  ${id(item.oldId)}  ${oneLine(item.title)}  -> ${id(item.newParentOldId)}`,
     ),
   );
 
@@ -200,9 +232,7 @@ function formatMigrationReport(report: MigrationReport): string {
   push(
     "comments converted to notes",
     report.commentsConverted.count,
-    report.commentsConverted.items.map(
-      (comment) => `  ${comment.oldId}  ${oneLine(comment.title)}  comment ${comment.commentId}`,
-    ),
+    report.commentsConverted.items.map(commentRef),
   );
 
   push(
@@ -210,7 +240,7 @@ function formatMigrationReport(report: MigrationReport): string {
     report.unmappedStatuses.count,
     report.unmappedStatuses.items.map(
       (unmapped) =>
-        `  ${unmapped.oldId}  ${oneLine(unmapped.title)}  status=${oneLine(unmapped.raw)}`,
+        `  ${id(unmapped.oldId)}  ${oneLine(unmapped.title)}  status=${oneLine(unmapped.raw)}`,
     ),
   );
   push(
@@ -218,7 +248,7 @@ function formatMigrationReport(report: MigrationReport): string {
     report.unmappedTypes.count,
     report.unmappedTypes.items.map(
       (unmapped) =>
-        `  ${unmapped.oldId}  ${oneLine(unmapped.title)}  issue_type=${oneLine(unmapped.raw)}`,
+        `  ${id(unmapped.oldId)}  ${oneLine(unmapped.title)}  issue_type=${oneLine(unmapped.raw)}`,
     ),
   );
 
@@ -233,7 +263,8 @@ function formatMigrationReport(report: MigrationReport): string {
     "parent cycles broken",
     report.parentCycles.count,
     report.parentCycles.items.map(
-      (cycle) => `  ${cycle.oldId}  ${oneLine(cycle.title)}  cycle: ${cycle.path.join(" -> ")}`,
+      (cycle) =>
+        `  ${id(cycle.oldId)}  ${oneLine(cycle.title)}  cycle: ${cycle.path.map(id).join(" -> ")}`,
     ),
   );
   push(
@@ -241,7 +272,7 @@ function formatMigrationReport(report: MigrationReport): string {
     report.blocksCycles.count,
     report.blocksCycles.items.map(
       (cycle) =>
-        `  ${cycle.fromOldId} -> ${cycle.toOldId}  (${oneLine(cycle.type)})  cycle: ${cycle.path.join(" -> ")}`,
+        `  ${id(cycle.fromOldId)} -> ${id(cycle.toOldId)}  (${oneLine(cycle.type)})  cycle: ${cycle.path.map(id).join(" -> ")}`,
     ),
   );
 
@@ -250,21 +281,21 @@ function formatMigrationReport(report: MigrationReport): string {
     report.invalidTimestamps.count,
     report.invalidTimestamps.items.map(
       (ts) =>
-        `  ${ts.oldId}  ${oneLine(ts.title)}  ${ts.field}: ${oneLine(ts.raw)} -> ${ts.fallback}`,
+        `  ${id(ts.oldId)}  ${oneLine(ts.title)}  ${ts.field}: ${oneLine(ts.raw)} -> ${ts.fallback}`,
     ),
   );
   push(
     "invalid items (empty title, skipped)",
     report.invalidItems.count,
-    report.invalidItems.items.map((item) => `  ${item.oldId}  "${oneLine(item.rawTitle)}"`),
+    report.invalidItems.items.map((item) => `  ${id(item.oldId)}  "${oneLine(item.rawTitle)}"`),
   );
   push(
     "invalid notes (blank body, skipped)",
     report.invalidNotes.count,
     report.invalidNotes.items.map(
       (note) =>
-        `  ${note.oldId}  ${oneLine(note.title)}  ${note.noteKind}` +
-        (note.commentId === undefined ? "" : `  comment ${note.commentId}`),
+        `  ${id(note.oldId)}  ${oneLine(note.title)}  ${note.noteKind}` +
+        (note.commentId === undefined ? "" : `  comment ${id(note.commentId)}`),
     ),
   );
   push(
@@ -272,10 +303,9 @@ function formatMigrationReport(report: MigrationReport): string {
     report.clampedValues.count,
     report.clampedValues.items.map(
       (clamped) =>
-        `  ${clamped.oldId}  ${oneLine(clamped.title)}  ${clamped.field}: ${String(clamped.raw)} -> ${String(clamped.clamped)}`,
+        `  ${id(clamped.oldId)}  ${oneLine(clamped.title)}  ${clamped.field}: ${String(clamped.raw)} -> ${String(clamped.clamped)}`,
     ),
   );
-  push("empty labels dropped", report.emptyLabels.count, report.emptyLabels.items.map(itemRef));
 
   blocks.push(
     report.applied

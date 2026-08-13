@@ -106,17 +106,21 @@ describe("katra migrate beads — preview", () => {
   });
 
   it("sanitizes report lines built from export content", async () => {
-    // A hostile title carrying a raw ANSI escape (ESC) and a bell (BEL) — the
-    // exact untrusted-content path a terminal would otherwise act on.
-    // String.fromCharCode, not a literal or escape sequence in this file's own
-    // source, so nothing resembling a real control character ever sits here.
-    // `owner` is set so the title actually reaches a rendered report line
-    // (droppedFields.owner).
+    // A hostile title carrying a raw ANSI escape (ESC) and a bell (BEL), and a
+    // hostile *id* carrying an ESC plus an embedded newline. Ids are export
+    // content too, not minted ids — a raw oldId is both a terminal
+    // escape-injection vector on its own and, via the embedded newline, a way
+    // to forge an extra physical line that impersonates a benign report line
+    // (the surface a human reads before ever deciding to run --apply).
+    // String.fromCharCode, not a literal or \n escape sequence spliced next to
+    // one, so nothing resembling a real control character sits in this file's
+    // own source.
     const esc = String.fromCharCode(27);
     const bel = String.fromCharCode(7);
     const hostileTitle = ["Evil", esc, "[31mTitle", bel].join("");
+    const hostileId = ["bd-hostile", esc, "[31m", "\ninjected: forged summary line"].join("");
     writeExport(repo.dir, ".beads/issues.jsonl", [
-      issueLine({ id: "bd-hostile", title: hostileTitle, owner: "legacy-owner" }),
+      issueLine({ id: hostileId, title: hostileTitle, owner: "legacy-owner" }),
     ]);
 
     const result = await runCli(["migrate", "beads"], { cwd: repo.dir });
@@ -125,6 +129,16 @@ describe("katra migrate beads — preview", () => {
     expect(result.stdout).toContain("bd-hostile");
     expect(result.stdout.includes(esc)).toBe(false);
     expect(result.stdout.includes(bel)).toBe(false);
+
+    // The forgery half: this fixture produces exactly one degrade section
+    // (the hostile owner), so a correctly sanitized report is exactly three
+    // blocks — the summary line, a "dropped: owner" section (its own header
+    // line plus one item line), and the closing line — six physical lines
+    // once the blank block-separator lines are counted. An unsanitized id's
+    // embedded newline would inject a seventh line that reads as legitimate
+    // report output but is actually forged from export content.
+    const lines = result.stdout.trim().split("\n");
+    expect(lines).toHaveLength(6);
   });
 });
 
