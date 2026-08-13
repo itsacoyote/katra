@@ -167,12 +167,11 @@ describe("F5 full-coverage fixture — preview", () => {
       },
     ]);
 
-    // Two entries from one planted bad value: mapIssue normalizes created_at
-    // directly, and assembleNotes independently re-normalizes the same raw
-    // created_at for note timestamps — both against the identical invalid
-    // string, so bf-bad-timestamp's single degradation surfaces as two
-    // report rows (see beads-full.md).
-    expect(report.invalidTimestamps.count).toBe(2);
+    // Exactly one entry from one planted bad value: mapIssue normalizes
+    // created_at once and threads the normalized value into assembleNotes
+    // (katra-9aw.49.10 fixed the historical double-count where assembleNotes
+    // independently re-normalized the same raw string — see beads-full.md).
+    expect(report.invalidTimestamps.count).toBe(1);
     expect(
       report.invalidTimestamps.items.every(
         (t) =>

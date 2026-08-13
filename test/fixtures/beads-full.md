@@ -37,7 +37,7 @@ point (`__proto__`) or an id beads owns (a comment's own `id`).
 | 14 | `duplicateEdges` | `bf-self-edge` (self-edge: `issue_id === depends_on_id`) + `bf-dup-edge-a`'s second identical `related` edge to `bf-dup-edge-b` | 2 | same |
 | 15 | `parentCycles` | `bf-cycle-a` ↔ `bf-cycle-b`, a 2-node `parent-child` cycle — each side's own ancestry walk discovers it independently, so it reports once per side | 2 | same |
 | 16 | `blocksCycles` | `bf-bc-a` → `bf-bc-b` → `bf-bc-c` → `bf-bc-a` (`blocks`); sorted by `(issue_id, depends_on_id)`, `bf-bc-c → bf-bc-a` is the edge that would close the loop and is the one dropped | 1 | same |
-| 17 | `invalidTimestamps` | `bf-bad-timestamp` (`created_at: "not-a-real-date"`) — see "The invalidTimestamps double-count", below, for why one bad value yields two report rows | 2 | same |
+| 17 | `invalidTimestamps` | `bf-bad-timestamp` (`created_at: "not-a-real-date"`) — see "The invalidTimestamps count", below | 1 | same |
 | 18 | `invalidItems` | `bf-empty-title` (title is `"   "`, empty after trim); `bf-dup-id`'s second occurrence (same id planted twice — first occurrence wins, deterministically, by input order); `bf-status-nonstring` (`status: 42`, a number — fails the shape gate before `mapStatus` ever runs) | 3 | same |
 | 19 | `invalidNotes` | `bf-comments-edge`'s `cec-blank` (comment `text` is `"   "`, blank after trim) | 1 | same |
 | 20 | `clampedValues` | `bf-bad-priority` (`priority: 99`, clamped to `4`) | 1 | same |
@@ -70,19 +70,18 @@ post-apply behavior through real commands.
 | Directionally asymmetric `blocks` edge (open task blocked by an already-closed prerequisite) | `bf-open-dependent` (open) → `bf-closed-prereq` (closed), mirroring a real finished dependency | "computes blocked-ness of a migrated blocked item from its edges, not a lane" — `bf-open-dependent` is *ready* despite carrying a real dependency edge, and `show` reports zero blockers; a flipped edge direction fails this loudly (see "Falsifiability", below) |
 | Cross-item chronological event interleaving | `bf-order-q` (created 2024-01-01, commented 2024-01-15), `bf-order-r` (created 2024-01-05), `bf-order-p` (created 2024-01-10) | "interleaves created, note-added and closed events chronologically across items in log" — `q`'s own history is not contiguous in the log (its `created` event sorts before `r`'s and `p`'s, its `note-added` event sorts after both) |
 
-## The `invalidTimestamps` double-count
+## The `invalidTimestamps` count
 
 `bf-bad-timestamp` plants exactly **one** bad value (`created_at:
-"not-a-real-date"`), but `report.invalidTimestamps.count` is **2**, not 1.
-This is existing, correct pipeline behavior, not a fixture bug:
-`mapIssue` (`transform.ts`) normalizes `issue.created_at` once directly, and
-then calls `assembleNotes` (`mapping.ts`), which **independently
-re-normalizes the same raw `created_at`** for its own note-timestamp
-purposes — regardless of whether the issue carries any notes at all. One bad
-raw value, read twice, reports twice. `bf-bad-timestamp` gives `updated_at`
-a clean, distinct value specifically so this record's degradation story
-stays "created_at is unparseable" rather than also pulling in an unrelated
-third entry.
+"not-a-real-date"`) and reports exactly **one** `invalidTimestamps` entry.
+Historically this read as 2: `assembleNotes` (`mapping.ts`) independently
+re-normalized the same raw `created_at` that `mapIssue` (`transform.ts`)
+had already normalized, so one bad value reported twice. katra-9aw.49.10
+fixed it — the normalized value is threaded into `assembleNotes`, and
+`test/core/beads-transform.test.ts` pins the exactly-once behavior by name.
+`bf-bad-timestamp` gives `updated_at` a clean, distinct value specifically
+so this record's degradation story stays "created_at is unparseable" rather
+than also pulling in an unrelated second entry.
 
 ## Ground truth
 
