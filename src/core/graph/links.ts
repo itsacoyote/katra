@@ -12,7 +12,7 @@
  * the time.
  */
 
-import { writeTx } from "../db/connection.js";
+import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import { KatraException } from "../errors.js";
 import { narrowLane, narrowLevel } from "../narrow.js";
 import type { OpenStore } from "../store.js";
@@ -41,6 +41,47 @@ function resolvePair(store: OpenStore, firstInput: string, secondInput: string):
 }
 
 /**
+ * The row-mutation core of `addLink`: validates and inserts the pair,
+ * stamping the caller's time.
+ *
+ * **Must be called inside an open transaction** — see `appendEvent`'s guard
+ * (`events/repo.ts`), which this mirrors. Writes no event: `addLink` never
+ * appended one either, so this is not a split so much as a seam that lets a
+ * caller — the F5 loader — supply a historical `createdAt` instead of
+ * inheriting `writeTx`'s own clock. `addLink` is the only caller during
+ * ordinary use; it wraps this in `writeTx` and passes the transaction's `now`.
+ */
+export function addLinkWithin(
+  store: OpenStore,
+  firstInput: string,
+  secondInput: string,
+  ctx: { readonly createdAt: string },
+): { a: string; b: string } {
+  if (!store.db.inTransaction) {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "addLinkWithin must be called inside an open transaction — a row that " +
+        "commits on its own can outlive the change it's part of",
+    });
+  }
+  assertNotReadOnly(store.db, "addLinkWithin");
+
+  // Resolved inside the transaction, as in `addDependency`: a concurrent
+  // delete between resolution and the INSERT raises a raw foreign-key
+  // violation — `INSERT OR IGNORE` does not suppress one — which reaches the
+  // caller as `internal` and exit 4, meaning "retry" when the task is gone
+  // for good.
+  const [a, b] = resolvePair(store, firstInput, secondInput);
+
+  store.db
+    .prepare("INSERT OR IGNORE INTO links (a_id, b_id, created_at) VALUES (?,?,?)")
+    .run(a, b, ctx.createdAt);
+
+  return { a, b };
+}
+
+/**
  * Links two tasks.
  *
  * Idempotent in both directions: the relationship a repeated call asserts is
@@ -54,20 +95,9 @@ export function addLink(
   firstInput: string,
   secondInput: string,
 ): { a: string; b: string } {
-  return writeTx(store.db, (now) => {
-    // Resolved inside the transaction, as in `addDependency`: a concurrent
-    // delete between resolution and the INSERT raises a raw foreign-key
-    // violation — `INSERT OR IGNORE` does not suppress one — which reaches the
-    // caller as `internal` and exit 4, meaning "retry" when the task is gone
-    // for good.
-    const [a, b] = resolvePair(store, firstInput, secondInput);
-
-    store.db
-      .prepare("INSERT OR IGNORE INTO links (a_id, b_id, created_at) VALUES (?,?,?)")
-      .run(a, b, now);
-
-    return { a, b };
-  });
+  return writeTx(store.db, (now) =>
+    addLinkWithin(store, firstInput, secondInput, { createdAt: now }),
+  );
 }
 
 /** Removes a link. Works from either direction, since the pair is one row. */

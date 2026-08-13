@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readTx } from "../../src/core/db/connection.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { isReady } from "../../src/core/graph/deps.js";
-import { addLink, listLinks, removeLink } from "../../src/core/graph/links.js";
+import { addLink, addLinkWithin, listLinks, removeLink } from "../../src/core/graph/links.js";
 import { showTask } from "../../src/core/tasks/repo.js";
 import { seedLink, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
@@ -65,6 +66,21 @@ describe("addLink", () => {
   it("reports an unknown id as not found", () => {
     const id = seedTask(fixture.store);
     expect(() => addLink(fixture.store, id, "kt-zzzzzz")).toThrowError(/no task matches/);
+  });
+});
+
+describe("addLinkWithin", () => {
+  it("throws when called inside a read transaction", () => {
+    // The other half of the transaction-required guard: `db.inTransaction` is
+    // also true inside a deferred read, so only `assertNotReadOnly` catches
+    // this — see its own docs (`db/connection.ts`) for why the plain
+    // `inTransaction` check alone cannot.
+    const a = seedTask(fixture.store);
+    const b = seedTask(fixture.store);
+
+    expect(() =>
+      readTx(fixture.store.db, () => addLinkWithin(fixture.store, a, b, { createdAt: seedTime() })),
+    ).toThrowError(/read transaction/);
   });
 });
 

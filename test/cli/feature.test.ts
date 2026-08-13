@@ -7,7 +7,7 @@
  * silently the moment a command is added.
  */
 
-import { chmodSync, mkdirSync } from "node:fs";
+import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Command } from "commander";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -43,6 +43,7 @@ const EXPECTED_COMMANDS = [
   "board",
   "claim",
   "release",
+  "migrate",
 ] as const;
 
 let repo: GitFixture;
@@ -57,7 +58,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all eighteen commands on the program", () => {
+  it("registers all nineteen commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -66,7 +67,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(18);
+    expect(registered).toHaveLength(19);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -98,6 +99,30 @@ describe("--json across every command", () => {
     const doomed = await add(["to be deleted"]);
     const linked = await add(["to be linked"]);
 
+    // A minimal, valid bd export so `migrate beads` (preview) below is a real
+    // end-to-end invocation like every other entry in this list, not one that
+    // only proves the not_found path.
+    mkdirSync(join(repo.dir, ".beads"), { recursive: true });
+    writeFileSync(
+      join(repo.dir, ".beads", "issues.jsonl"),
+      `${JSON.stringify({
+        _type: "issue",
+        id: "bd-1",
+        title: "an imported issue",
+        description: "",
+        status: "open",
+        priority: 2,
+        issue_type: "task",
+        owner: "",
+        created_at: "2026-01-01T00:00:00.000Z",
+        created_by: "",
+        updated_at: "2026-01-01T00:00:00.000Z",
+        dependency_count: 0,
+        dependent_count: 0,
+        comment_count: 0,
+      })}\n`,
+    );
+
     const invocations: Array<readonly string[]> = [
       ["init"],
       ["add", "another task"],
@@ -119,6 +144,7 @@ describe("--json across every command", () => {
       ["note", "list"],
       ["brief", epic],
       ["board", "--digest"],
+      ["migrate", "beads"],
     ];
 
     const seen = new Set<string>();

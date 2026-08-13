@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, and eighteen commands over them, including `brief` and `board` for restoring context at the start of a session. Search and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, and nineteen commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. Search and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -125,6 +125,7 @@ which is what a session opening in a fresh worktree wants to read first.
 | Command | What it does |
 | --- | --- |
 | `init` | Create the store for this repository |
+| `migrate beads` | Import an existing beads backlog — preview by default, `--apply` to write |
 | `add` · `show` · `list` | Create and read tasks; `list` filters by lane, kind, level, epic, tag, assignee, priority, and ready/blocked |
 | `update` | Change any mutable field, including reparenting |
 | `close` · `cancel` · `reopen` | Finish, abandon, or revive — and report what each released |
@@ -190,11 +191,11 @@ pnpm test       # vitest
 pnpm check      # lint + typecheck + test — what CI runs
 ```
 
-The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. The traceability docs map every acceptance criterion to the test that covers it, and record where coverage is genuinely limited rather than claiming a tick: [`f1`](docs/f1-traceability.md), [`f2`](docs/f2-traceability.md), [`f3`](docs/f3-traceability.md), [`f4`](docs/f4-traceability.md).
+The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. The traceability docs map every acceptance criterion to the test that covers it, and record where coverage is genuinely limited rather than claiming a tick: [`f1`](docs/f1-traceability.md), [`f2`](docs/f2-traceability.md), [`f3`](docs/f3-traceability.md), [`f4`](docs/f4-traceability.md), [`f5`](docs/f5-traceability.md).
 
 ## Migrating from beads
 
-katra ships a converter for projects already tracking work in [beads](https://github.com/steveyegge/beads). See [`docs/migrating-from-beads.md`](docs/migrating-from-beads.md) for the field mapping and what does and doesn't carry over. (Not implemented yet — the mapping is designed, the script is pending katra's schema.)
+Already tracking work in [beads](https://github.com/steveyegge/beads)? `katra migrate beads` converts your export in one shot — preview by default, `--apply` to write, and a report naming everything mapped, dropped, or degraded, nothing silent. See [`docs/migrating-from-beads.md`](docs/migrating-from-beads.md) for the field mapping and what does and doesn't carry over.
 
 ## Contributing
 

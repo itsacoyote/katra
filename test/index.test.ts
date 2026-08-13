@@ -81,6 +81,10 @@ describe("the public barrel", () => {
       // barrel losing the standalone export — as opposed to just a field
       // referencing it — is still this same compile error.
       katra.ClaimInfo,
+      // F5: the `katra migrate beads` document. Defined in beads/types.ts, not
+      // contract.ts, so it needs its own tuple entry the same way ClaimInfo
+      // does — nothing else in this tuple references it structurally.
+      katra.MigrationReport,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -89,8 +93,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 18;
-    expect(count).toBe(18);
+    const count: PublishedDocuments["length"] = 19;
+    expect(count).toBe(19);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {
@@ -171,6 +175,7 @@ describe("the public barrel", () => {
     // so a POSIX-looking expectation would fail there for no real reason.
     const seen = [...visited].map((file) => relative(root, file).replaceAll("\\", "/")).sort();
     expect(seen).toEqual([
+      "core/beads/types.ts",
       "core/claims/types.ts",
       "core/contract.ts",
       "core/enums.ts",

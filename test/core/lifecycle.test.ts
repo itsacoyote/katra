@@ -1,14 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { claimFor, claimTask } from "../../src/core/claims/repo.js";
+import { readTx, writeTx } from "../../src/core/db/connection.js";
 import type { EventType } from "../../src/core/enums.js";
 import { TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import { addDependency, isReady } from "../../src/core/graph/deps.js";
-import { cancelTask, closeTask, reopenTask } from "../../src/core/tasks/lifecycle.js";
+import type { LaneChange } from "../../src/core/tasks/lifecycle.js";
+import {
+  applyMoveWithin,
+  cancelTask,
+  closeTask,
+  reopenTask,
+} from "../../src/core/tasks/lifecycle.js";
 import { getTask } from "../../src/core/tasks/repo.js";
 import { runConcurrent } from "../helpers/concurrent.js";
-import { seedClaim, seedTask } from "../helpers/seed.js";
+import { seedClaim, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture, OTHER_IDENTITY, openAs } from "../helpers/store.js";
 
@@ -215,6 +222,117 @@ describe("reopenTask", () => {
     reopenTask(fixture.store, blocker);
 
     expect(isReady(fixture.store, dependent)).toBe(false);
+  });
+});
+
+describe("applyMoveWithin", () => {
+  it("applyMoveWithin moves the row to Done stamping the caller's at as closed_at and a distinct updatedAt, no event, no claim settlement", () => {
+    const id = seedTask(fixture.store);
+    seedClaim(fixture.store, { taskId: id, holder: "/repo/wt-ghost" });
+    const at = seedTime(3_000);
+    const updatedAt = seedTime(4_000);
+    const move: LaneChange = { lane: "Done", markClosed: true, reason: "shipped" };
+
+    expect(() => applyMoveWithin(fixture.store, id, move, { at })).toThrowError(
+      /inside an open transaction/,
+    );
+
+    writeTx(fixture.store.db, () => {
+      applyMoveWithin(fixture.store, id, move, { at, updatedAt });
+    });
+
+    const task = getTask(fixture.store, id);
+    expect(task?.lane).toBe("Done");
+    expect(task?.closedAt).toBe(at);
+    expect(task?.updatedAt).toBe(updatedAt);
+    expect(task?.updatedAt).not.toBe(task?.closedAt);
+    expect(task?.closeReason).toBe("shipped");
+    // The seam does none of transition's other work: a pre-existing claim is
+    // untouched, and no event was appended.
+    expect(claimFor(fixture.store, id)).not.toBeNull();
+    expect(listEvents(fixture.store, { entityId: id }).events).toEqual([]);
+  });
+
+  it("throws when called inside a read transaction", () => {
+    // The other half of the transaction-required guard: `db.inTransaction` is
+    // also true inside a deferred read, so only `assertNotReadOnly` catches
+    // this — see its own docs (`db/connection.ts`) for why the plain
+    // `inTransaction` check alone cannot.
+    const id = seedTask(fixture.store);
+    const move: LaneChange = { lane: "Done", markClosed: true, reason: null };
+
+    expect(() =>
+      readTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
+    ).toThrowError(/read transaction/);
+  });
+
+  it("defaults updated_at to ctx.at when updatedAt is omitted", () => {
+    const id = seedTask(fixture.store);
+    const at = seedTime(6_000);
+    const move: LaneChange = { lane: "Done", markClosed: true, reason: null };
+
+    writeTx(fixture.store.db, () => {
+      applyMoveWithin(fixture.store, id, move, { at });
+    });
+
+    expect(getTask(fixture.store, id)?.updatedAt).toBe(at);
+  });
+
+  it("throws not_found for an id that does not exist", () => {
+    const move: LaneChange = { lane: "Done", markClosed: true, reason: null };
+
+    expect(() =>
+      writeTx(fixture.store.db, () =>
+        applyMoveWithin(fixture.store, "kt-absent", move, { at: seedTime() }),
+      ),
+    ).toThrowError(/no task matches/);
+  });
+
+  it("throws internal when a Move marks closed into a non-terminal lane", () => {
+    // A hand-built Move — the F5 loader's own use of this seam — could close
+    // into a non-terminal lane; the schema's own CHECK only constrains the
+    // converse (a terminal lane with no closed_at), so nothing else stops
+    // this from writing closed_at onto a task the lane still calls active.
+    const id = seedTask(fixture.store);
+    const move: LaneChange = { lane: "In Progress", markClosed: true, reason: null };
+
+    expect(() =>
+      writeTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
+    ).toThrowError(/terminal lane/);
+  });
+
+  it("throws internal when a Move targets a terminal lane without marking closed", () => {
+    // The converse of the guard above: a Move reaching a terminal lane
+    // without markClosed would leave the row with no closed_at, which the
+    // schema's own CHECK also refuses (it demands one for a terminal lane) —
+    // a typed internal here instead of a raw CHECK-constraint dump.
+    const id = seedTask(fixture.store);
+    const move: LaneChange = { lane: "Done", markClosed: false, reason: null };
+
+    expect(() =>
+      writeTx(fixture.store.db, () => applyMoveWithin(fixture.store, id, move, { at: seedTime() })),
+    ).toThrowError(/markClosed/);
+  });
+});
+
+describe("transition", () => {
+  it("close, cancel and reopen still behave byte-identically through the seam", () => {
+    const closable = seedTask(fixture.store);
+    const { task: closed } = closeTask(fixture.store, closable, "shipped");
+    expect(closed.lane).toBe("Done");
+    expect(closed.closeReason).toBe("shipped");
+    expect(closed.closedAt).not.toBeNull();
+
+    const cancellable = seedTask(fixture.store);
+    const { task: cancelled } = cancelTask(fixture.store, cancellable, "dropped");
+    expect(cancelled.lane).toBe("Cancelled");
+    expect(cancelled.closeReason).toBe("dropped");
+    expect(cancelled.closedAt).not.toBeNull();
+
+    const { task: reopened } = reopenTask(fixture.store, cancellable);
+    expect(reopened.lane).toBe("Defined");
+    expect(reopened.closedAt).toBeNull();
+    expect(reopened.closeReason).toBeNull();
   });
 });
 

@@ -16,10 +16,11 @@
  * ```
  *
  * Nothing here may import from `store.ts`, `db/`, or any module that does.
- * `enums.ts`, `tasks/types.ts` and `claims/types.ts` are the only permitted
- * dependencies, and none of them touches the database.
+ * `enums.ts`, `tasks/types.ts`, `claims/types.ts` and `beads/types.ts` are the
+ * only permitted dependencies, and none of them touches the database.
  */
 
+import type { MigrationReport } from "./beads/types.js";
 import type { ClaimInfo } from "./claims/types.js";
 import type { Lane, NoteKind, Priority } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
@@ -40,7 +41,7 @@ export interface StoreWarning {
 }
 
 /**
- * Two types this file does not define, re-exported here so it stays the one
+ * Three types this file does not define, re-exported here so it stays the one
  * place to read the `--json` contract.
  *
  * `Blocker` is defined in `tasks/types.ts` because {@link TaskDetail} needs
@@ -50,8 +51,15 @@ export interface StoreWarning {
  * permitted dependencies (see the module docs above): that module has to
  * stay free of `store.ts`/`db/*` too, for the identical reason. It rides on
  * `TaskView.claim`, the {@link BriefResult} task arm, and `BoardTask.claim`.
+ *
+ * `MigrationReport` (F5) is defined in `beads/types.ts`, the fourth permitted
+ * dependency, for the same reason again — plus one more: `beads/types.ts`
+ * also declares `MigrationPlan`, `transform.ts`'s internal work order for
+ * `load.ts`. Declaring `MigrationReport` beside it, rather than here, keeps
+ * the plan and the report each other's neighbor and this file untouched by
+ * `transform.ts`/`load.ts`'s internals — only the report crosses back.
  */
-export type { Blocker, ClaimInfo };
+export type { Blocker, ClaimInfo, MigrationReport };
 
 /**
  * What `update` prints.

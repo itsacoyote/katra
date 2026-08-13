@@ -24,6 +24,7 @@ import { registerLifecycle } from "./commands/lifecycle.js";
 import { registerLink } from "./commands/link.js";
 import { registerList } from "./commands/list.js";
 import { registerLog } from "./commands/log.js";
+import { registerMigrate } from "./commands/migrate.js";
 import { registerNext } from "./commands/next.js";
 import { registerNote } from "./commands/note.js";
 import { registerRelease } from "./commands/release.js";
@@ -238,6 +239,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerBoard(program, context);
   registerClaim(program, context);
   registerRelease(program, context);
+  registerMigrate(program, context);
 
   return program;
 }

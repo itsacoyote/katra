@@ -46,6 +46,7 @@ export type {
   JsonDocument,
   LifecycleResult,
   LinkResult,
+  MigrationReport,
   NextResult,
   NoteList,
   StoreWarning,

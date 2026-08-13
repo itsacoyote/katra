@@ -15,7 +15,7 @@
 
 import { settleClaim } from "../claims/repo.js";
 import type { LifecycleResult } from "../contract.js";
-import { writeTx } from "../db/connection.js";
+import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import type { EventType, Lane } from "../enums.js";
 import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
@@ -39,7 +39,13 @@ function loadOrThrow(store: OpenStore, id: string, idInput: string): Task {
   return task;
 }
 
-/** What a transition decides to do, once it has seen the task's current state. */
+/**
+ * What a transition decides to do, once it has seen the task's current state.
+ *
+ * Module-private: nothing outside `transition`'s own three callers
+ * (`closeTask`/`cancelTask`/`reopenTask`) needs the full shape — a direct
+ * caller of {@link applyMoveWithin} only needs {@link LaneChange}, below.
+ */
 interface Move {
   readonly lane: Lane;
   readonly markClosed: boolean;
@@ -53,6 +59,99 @@ interface Move {
    * it happened to return the task to.
    */
   readonly event: EventType;
+}
+
+/**
+ * The three fields {@link applyMoveWithin} actually reads off a `Move` —
+ * never `event`, which exists purely for `transition`'s own `appendEvent`
+ * call after `applyMoveWithin` returns. Exported so a direct caller of
+ * `applyMoveWithin` — the F5 loader chief among them — can build one without
+ * going through `transition`'s task-shaped `plan` closures or fabricating an
+ * `event` value it has no use for.
+ */
+export type LaneChange = Pick<Move, "lane" | "markClosed" | "reason">;
+
+/**
+ * The row-mutation core of `transition`: applies one `Move` to a task's lane,
+ * stamping the caller's time rather than `writeTx`'s own clock.
+ *
+ * **Must be called inside an open transaction** — see `appendEvent`'s guard
+ * (`events/repo.ts`), which this mirrors. Stamps `updated_at = updatedAt ??
+ * at`, and `closed_at = at` when the move closes, clearing it on reopen —
+ * exactly the SQL `transition` always ran. **Does none of the rest of
+ * `transition`'s work**: no readiness comparison, no claim settlement, no
+ * event. Those three stay outside so the F5 loader — which calls this
+ * directly, with historical times, for every close/cancel/reopen it replays —
+ * controls them explicitly rather than inheriting a live-store side effect a
+ * fresh, claim-free store during load has no business triggering. `transition`
+ * is the only caller during ordinary use: it wraps this in
+ * `reportReadinessChange`'s mutate callback, then settles any claim and
+ * appends the lifecycle event itself.
+ *
+ * Takes {@link LaneChange} — `lane`, `markClosed`, `reason`, never `event` —
+ * since `applyMoveWithin` has no use for the verb; that one exists purely for
+ * `transition`'s own `appendEvent` call after this returns. `transition`'s
+ * own hand-built `Move` stays structurally compatible with the narrower
+ * `LaneChange` shape without a cast — only the excess-property check on an
+ * object *literal* would object, and `transition` passes a `Move`-typed
+ * variable.
+ *
+ * Three guards a hand-built `LaneChange` from a direct caller — the F5
+ * loader chief among them — cannot skip: one that marks a task closed but
+ * targets a non-terminal lane would write `closed_at` onto a task the
+ * schema's own `CHECK` still calls active; the converse — targeting a
+ * terminal lane without marking closed — would leave that same `CHECK`
+ * refusing the row for the opposite reason (a terminal lane demands a
+ * `closed_at`, and only `markClosed` ever supplies one), so it is refused
+ * here too, as a typed `internal` rather than a raw `CHECK`-constraint dump
+ * the caller would have to decode; and `taskId` naming nothing would
+ * otherwise commit a no-op `UPDATE` silently rather than telling the caller
+ * its id was wrong.
+ */
+export function applyMoveWithin(
+  store: OpenStore,
+  taskId: string,
+  move: LaneChange,
+  ctx: { readonly at: string; readonly updatedAt?: string },
+): void {
+  if (!store.db.inTransaction) {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "applyMoveWithin must be called inside an open transaction — a lane " +
+        "change that commits on its own can outlive the change it's part of",
+    });
+  }
+  assertNotReadOnly(store.db, "applyMoveWithin");
+
+  if (move.markClosed && !isTerminal(move.lane)) {
+    throw new KatraException({
+      code: "internal",
+      message: `applyMoveWithin: a Move that marks closed must target a terminal lane, not ${move.lane}`,
+    });
+  }
+  if (!move.markClosed && isTerminal(move.lane)) {
+    throw new KatraException({
+      code: "internal",
+      message: `applyMoveWithin: a Move targeting terminal lane ${move.lane} must markClosed — the row would otherwise carry a terminal lane with no closed_at`,
+    });
+  }
+
+  const updatedAt = ctx.updatedAt ?? ctx.at;
+
+  const info = store.db
+    .prepare(
+      "UPDATE tasks SET lane = ?, closed_at = ?, close_reason = ?, updated_at = ? WHERE id = ?",
+    )
+    .run(move.lane, move.markClosed ? ctx.at : null, move.reason, updatedAt, taskId);
+
+  if (info.changes === 0) {
+    throw new KatraException({
+      code: "not_found",
+      message: `no task matches "${taskId}"`,
+      id: taskId,
+    });
+  }
 }
 
 /**
@@ -95,14 +194,10 @@ function transition(
 
   return writeTx(store.db, (now) => {
     const task = loadOrThrow(store, id, idInput);
-    const { lane, markClosed, reason, event } = plan(task);
+    const move = plan(task);
 
     const { result, unblocked, reblocked } = reportReadinessChange(store, id, () => {
-      store.db
-        .prepare(
-          "UPDATE tasks SET lane = ?, closed_at = ?, close_reason = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(lane, markClosed ? now : null, reason, now, id);
+      applyMoveWithin(store, id, move, { at: now });
       return loadOrThrow(store, id, idInput);
     });
 
@@ -111,7 +206,7 @@ function transition(
     // (spec req 5). `markClosed` already draws exactly that line: `reopen` is
     // the one move that leaves it `false`, since reviving a task is not a
     // takeover.
-    if (markClosed) {
+    if (move.markClosed) {
       settleClaim(store, task, actor, worktree, now);
     }
 
@@ -122,13 +217,13 @@ function transition(
     appendEvent(
       store,
       {
-        type: event,
+        type: move.event,
         entityId: id,
         epicId: epicIdFor(task),
         actor,
         fromLane: task.lane,
-        toLane: lane,
-        reason,
+        toLane: move.lane,
+        reason: move.reason,
       },
       now,
     );
@@ -179,7 +274,9 @@ export function cancelTask(store: OpenStore, idInput: string, reason?: string): 
 export function reopenTask(store: OpenStore, idInput: string, lane?: Lane): LifecycleResult {
   // Argument validation, so it fails before a write lock is taken. It depends
   // on nothing the database holds; the state guard below does, and lives
-  // inside the transaction.
+  // inside the transaction. Not a rule every write path follows uniformly —
+  // `createTaskWithin`/`createNoteWithin` validate under the lock instead,
+  // deliberately, and say why in their own docs.
   const target = lane ?? REOPEN_DEFAULT_LANE;
   if (isTerminal(target)) {
     // Otherwise reopen becomes a second path into a terminal lane, bypassing

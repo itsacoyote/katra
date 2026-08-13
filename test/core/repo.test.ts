@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { readTx, writeTx } from "../../src/core/db/connection.js";
 import { isKatraException } from "../../src/core/errors.js";
+import { listEvents } from "../../src/core/events/repo.js";
 import { addDependency } from "../../src/core/graph/deps.js";
 import { closeTask } from "../../src/core/tasks/lifecycle.js";
 import { nextTask } from "../../src/core/tasks/next.js";
-import { createTask, getTask, showTask } from "../../src/core/tasks/repo.js";
-import { seedEpic, seedTask } from "../helpers/seed.js";
+import { createTask, createTaskWithin, getTask, showTask } from "../../src/core/tasks/repo.js";
+import { seedEpic, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -138,6 +140,81 @@ describe("createTask", () => {
       Array.from({ length: 300 }, (_u, i) => createTask(fixture.store, { title: `t${i}` }).id),
     );
     expect(ids.size).toBe(300);
+  });
+
+  it("outer createTask still stamps writeTx's now and appends the created event", () => {
+    const local = createStoreFixture({ actor: "someone @ /repo/x" });
+    try {
+      const task = createTask(local.store, { title: "wrapped" });
+
+      const events = listEvents(local.store, { entityId: task.id }).events;
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        type: "created",
+        entityId: task.id,
+        actor: "someone @ /repo/x",
+        title: "wrapped",
+        createdAt: task.createdAt,
+      });
+    } finally {
+      local.cleanup();
+    }
+  });
+});
+
+describe("createTaskWithin", () => {
+  it("createTaskWithin stamps the caller's createdAt and a distinct updatedAt on the row", () => {
+    const createdAt = seedTime();
+    const updatedAt = seedTime(5_000);
+
+    const id = writeTx(fixture.store.db, () =>
+      createTaskWithin(fixture.store, { title: "seam task" }, { createdAt, updatedAt }),
+    );
+
+    const task = getTask(fixture.store, id);
+    expect(task?.createdAt).toBe(createdAt);
+    expect(task?.updatedAt).toBe(updatedAt);
+    expect(task?.updatedAt).not.toBe(task?.createdAt);
+  });
+
+  it("createTaskWithin appends no event and throws outside a transaction", () => {
+    expect(() =>
+      createTaskWithin(fixture.store, { title: "no seam" }, { createdAt: seedTime() }),
+    ).toThrowError(/inside an open transaction/);
+
+    const id = writeTx(fixture.store.db, () =>
+      createTaskWithin(fixture.store, { title: "seamed" }, { createdAt: seedTime() }),
+    );
+
+    expect(listEvents(fixture.store, { entityId: id }).events).toEqual([]);
+  });
+
+  it("createTaskWithin throws when called inside a read transaction", () => {
+    // The other half of the transaction-required guard: `db.inTransaction` is
+    // also true inside a deferred read, so only `assertNotReadOnly` catches
+    // this — see its own docs (`db/connection.ts`) for why the plain
+    // `inTransaction` check above cannot.
+    expect(() =>
+      readTx(fixture.store.db, () =>
+        createTaskWithin(fixture.store, { title: "in a read" }, { createdAt: seedTime() }),
+      ),
+    ).toThrowError(/read transaction/);
+  });
+
+  it("createTaskWithin still enforces title validation and the terminal-lane guard", () => {
+    writeTx(fixture.store.db, () => {
+      expect(() =>
+        createTaskWithin(fixture.store, { title: "   " }, { createdAt: seedTime() }),
+      ).toThrowError(/needs a title/);
+
+      expect(() =>
+        createTaskWithin(
+          fixture.store,
+          { title: "born finished", lane: "Done" },
+          { createdAt: seedTime() },
+        ),
+      ).toThrowError(/katra close/);
+    });
   });
 });
 

@@ -11,7 +11,7 @@
  */
 
 import type { Blocker } from "../contract.js";
-import { writeTx } from "../db/connection.js";
+import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import { sqlEnum, TERMINAL_LANES } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { narrowLane } from "../narrow.js";
@@ -199,6 +199,70 @@ function cyclePath(store: OpenStore, taskId: string, dependsOnId: string): strin
 }
 
 /**
+ * The row-mutation core of `addDependency`: validates and inserts the edge,
+ * stamping the caller's time.
+ *
+ * **Must be called inside an open transaction** — see `appendEvent`'s guard
+ * (`events/repo.ts`), which this mirrors. Writes no event: `addDependency`
+ * never appended one either, so this is not a split so much as a seam that
+ * lets a caller — the F5 loader — supply a historical `createdAt` instead of
+ * inheriting `writeTx`'s own clock. `addDependency` is the only caller during
+ * ordinary use; it wraps this in `writeTx` and passes the transaction's `now`.
+ *
+ * The cycle check and the insert still share the caller's one transaction —
+ * see `addDependency`'s own docs for why that has to be one commit rather
+ * than two racing checks.
+ */
+export function addDependencyWithin(
+  store: OpenStore,
+  taskIdInput: string,
+  dependsOnInput: string,
+  ctx: { readonly createdAt: string },
+): { taskId: string; dependsOnId: string } {
+  if (!store.db.inTransaction) {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "addDependencyWithin must be called inside an open transaction — an " +
+        "edge that commits on its own can outlive the cycle check that approved it",
+    });
+  }
+  assertNotReadOnly(store.db, "addDependencyWithin");
+
+  // Resolved inside the transaction. Outside it, another worktree deleting
+  // either task before the INSERT turns this into a raw
+  // SQLITE_CONSTRAINT_FOREIGNKEY — `INSERT OR IGNORE` does not suppress a
+  // foreign-key violation — which surfaces as `internal` and exit 4, telling
+  // the caller to retry work that can never succeed. The truth is
+  // `not_found`, and it is final.
+  const taskId = requireId(store, taskIdInput);
+  const dependsOnId = requireId(store, dependsOnInput);
+
+  if (taskId === dependsOnId) {
+    throw new KatraException({
+      code: "validation",
+      message: `a task cannot depend on itself (${taskId})`,
+      field: "depends-on",
+      value: dependsOnId,
+    });
+  }
+
+  if (closesCycle(store, taskId, dependsOnId)) {
+    throw new KatraException({
+      code: "cycle",
+      message: `${taskId} cannot depend on ${dependsOnId}: that would close a dependency cycle`,
+      path: cyclePath(store, taskId, dependsOnId),
+    });
+  }
+
+  store.db
+    .prepare("INSERT OR IGNORE INTO deps (task_id, depends_on_id, created_at) VALUES (?,?,?)")
+    .run(taskId, dependsOnId, ctx.createdAt);
+
+  return { taskId, dependsOnId };
+}
+
+/**
  * Records that `taskIdInput` is blocked by `dependsOnInput`.
  *
  * The cycle check and the insert share **one immediate transaction**. Run as
@@ -215,39 +279,9 @@ export function addDependency(
   taskIdInput: string,
   dependsOnInput: string,
 ): { taskId: string; dependsOnId: string } {
-  return writeTx(store.db, (now) => {
-    // Resolved inside the transaction. Outside it, another worktree deleting
-    // either task before the INSERT turns this into a raw
-    // SQLITE_CONSTRAINT_FOREIGNKEY — `INSERT OR IGNORE` does not suppress a
-    // foreign-key violation — which surfaces as `internal` and exit 4, telling
-    // the caller to retry work that can never succeed. The truth is
-    // `not_found`, and it is final.
-    const taskId = requireId(store, taskIdInput);
-    const dependsOnId = requireId(store, dependsOnInput);
-
-    if (taskId === dependsOnId) {
-      throw new KatraException({
-        code: "validation",
-        message: `a task cannot depend on itself (${taskId})`,
-        field: "depends-on",
-        value: dependsOnId,
-      });
-    }
-
-    if (closesCycle(store, taskId, dependsOnId)) {
-      throw new KatraException({
-        code: "cycle",
-        message: `${taskId} cannot depend on ${dependsOnId}: that would close a dependency cycle`,
-        path: cyclePath(store, taskId, dependsOnId),
-      });
-    }
-
-    store.db
-      .prepare("INSERT OR IGNORE INTO deps (task_id, depends_on_id, created_at) VALUES (?,?,?)")
-      .run(taskId, dependsOnId, now);
-
-    return { taskId, dependsOnId };
-  });
+  return writeTx(store.db, (now) =>
+    addDependencyWithin(store, taskIdInput, dependsOnInput, { createdAt: now }),
+  );
 }
 
 /** Removes a dependency edge. Reports when there was nothing to remove. */

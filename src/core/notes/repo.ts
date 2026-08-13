@@ -17,7 +17,7 @@
  *   stream learns about notes.
  */
 
-import { writeTx } from "../db/connection.js";
+import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import type { Lane, NoteKind } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
@@ -103,6 +103,62 @@ function requireNoteTarget(store: OpenStore, input: string): string {
 }
 
 /**
+ * The row-mutation core of `createNote`: validates the body, resolves the
+ * target task, and inserts the note — stamping the caller's actor and time
+ * rather than `store.actor()` or `writeTx`'s own clock.
+ *
+ * **Must be called inside an open transaction** — see `appendEvent`'s guard
+ * (`events/repo.ts`), which this mirrors. Validation runs under that lock
+ * rather than before it, the same trade `createTaskWithin` takes and explains.
+ *
+ * `actor` injected is load-bearing here, not just a lock-window nicety: the
+ * F5 loader attaches a beads comment's own author to the note it becomes, an
+ * actor `store.actor()` could never produce since it always resolves to
+ * *this* process's identity. This is the opposite of `createTaskWithin`,
+ * which takes no `actor` at all — the asymmetry follows the schema: `notes`
+ * has a real `actor` column to stamp, `tasks` does not. **Writes no event** —
+ * the F5 loader inserts historical notes without a `note-added` event
+ * masquerading as live activity, appending its own events afterwards in true
+ * chronological order. `createNote` is the only caller during ordinary use:
+ * it wraps this in `writeTx`, then appends the `note-added` event itself
+ * from a fresh read of the row this seam just wrote.
+ */
+export function createNoteWithin(
+  store: OpenStore,
+  input: NewNote,
+  ctx: { readonly actor: string; readonly createdAt: string },
+): string {
+  if (!store.db.inTransaction) {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "createNoteWithin must be called inside an open transaction — a note " +
+        "that commits on its own can outlive the change it's part of",
+    });
+  }
+  assertNotReadOnly(store.db, "createNoteWithin");
+
+  const body = requireBody(input.body);
+  const kind = input.kind === undefined ? undefined : narrowNoteKind(input.kind);
+
+  // Resolved *inside* the transaction, like `createTask` does for a parent
+  // epic: outside it, another worktree could delete the task in the window
+  // before the INSERT and the foreign key would fire as a raw
+  // SQLITE_CONSTRAINT_FOREIGNKEY under the untyped `internal` code, rather
+  // than as a refusal naming the task.
+  const taskId = requireNoteTarget(store, input.taskId);
+
+  return insertWithRetry((candidate) => {
+    store.db
+      .prepare(
+        `INSERT INTO notes (id, task_id, kind, body, actor, created_at)
+         VALUES (?,?,?,?,?,?)`,
+      )
+      .run(candidate, taskId, kind ?? "general", body, ctx.actor, ctx.createdAt);
+  }, NOTE_ID_PREFIX);
+}
+
+/**
  * Creates a note and records that it happened.
  *
  * The note, its `note-added` event and the task's `updated_at` share one
@@ -110,43 +166,40 @@ function requireNoteTarget(store: OpenStore, input: string): string {
  * not written.
  */
 export function createNote(store: OpenStore, input: NewNote): Note {
-  const body = requireBody(input.body);
-  const kind = input.kind === undefined ? undefined : narrowNoteKind(input.kind);
   // Before the transaction: resolving the actor spawns two git subprocesses,
   // and under `BEGIN IMMEDIATE` that holds the write lock across both.
   const actor = store.actor();
 
-  const id = writeTx(store.db, (now) => {
-    // Resolved *inside* the transaction, like `createTask` does for a parent
-    // epic: outside it, another worktree could delete the task in the window
-    // before the INSERT and the foreign key would fire as a raw
-    // SQLITE_CONSTRAINT_FOREIGNKEY under the untyped `internal` code, rather
-    // than as a refusal naming the task.
-    // One lookup, not two: `requireNoteTarget` resolves against `tasks` inside
-    // this same transaction, so a second existence check here could not fail.
-    const task = getTask(store, requireNoteTarget(store, input.taskId));
+  return writeTx(store.db, (now) => {
+    const noteId = createNoteWithin(store, input, { actor, createdAt: now });
+
+    // Read back rather than carried out of the seam: `createNoteWithin`'s
+    // return type is just the minted id, so the task it attached to comes
+    // from the row it just wrote, not from a local variable the seam kept to
+    // itself. Returned as-is below rather than re-read once `writeTx`
+    // returns — the same reasoning `showTaskWithin` states: a second,
+    // un-transacted read can return a concurrent writer's state instead of
+    // the one this call just wrote.
+    const note = getNote(store, noteId);
+    if (note === undefined) {
+      throw new KatraException({
+        code: "internal",
+        message: `note ${noteId} vanished immediately after being created`,
+      });
+    }
+    const task = getTask(store, note.taskId);
     if (task === undefined) {
       throw new KatraException({
         code: "internal",
-        message: `task ${input.taskId} disappeared between being resolved and being read`,
+        message: `task ${note.taskId} disappeared between being noted and being read`,
       });
     }
-    const taskId = task.id;
-
-    const noteId = insertWithRetry((candidate) => {
-      store.db
-        .prepare(
-          `INSERT INTO notes (id, task_id, kind, body, actor, created_at)
-           VALUES (?,?,?,?,?,?)`,
-        )
-        .run(candidate, taskId, kind ?? "general", body, actor, now);
-    }, NOTE_ID_PREFIX);
 
     appendEvent(
       store,
       {
         type: "note-added",
-        entityId: taskId,
+        entityId: note.taskId,
         epicId: epicIdFor(task),
         actor,
         // The note's id, so the event points at what was added. It dangles
@@ -157,18 +210,8 @@ export function createNote(store: OpenStore, input: NewNote): Note {
       now,
     );
 
-    return noteId;
+    return note;
   });
-
-  const created = getNote(store, id);
-  if (created === undefined) {
-    throw new KatraException({
-      code: "not_found",
-      message: `note ${id} vanished immediately after being created`,
-      id,
-    });
-  }
-  return created;
 }
 
 /** Fetches a note by its exact id. */
