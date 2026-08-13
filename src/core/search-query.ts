@@ -39,12 +39,17 @@ const BASE36 = /^[0-9a-z]+$/;
  *
  * Truncating rather than refusing: past this cap the query silently
  * degrades to its first {@link MAX_TOKENS} terms instead of erroring or
- * hanging — a search that is narrower than what was typed, not a usage
- * error. Refusing a long paste outright is a worse experience than
- * searching on its first 32 words, and hanging is worse still. 32 is
- * generous for anything that reads as a search query (ordinary queries are
- * a handful of words) and stays well inside the cheap end of the measured
- * cost curve.
+ * hanging. Every token is one more AND-ed constraint, so dropping the
+ * trailing ones makes the match BROADER, not narrower — a truncated query
+ * can match rows the full, untruncated query would have excluded (measured
+ * directly: the capped form matched a row the uncapped equivalent did not).
+ * That is a deliberate fail-open trade, not a usage error: refusing a long
+ * paste outright is a worse experience than searching on its first 32
+ * words, and hanging is worse still — but it is fail-open, and any caller
+ * reasoning about this as a security boundary needs that read the right way
+ * round. 32 is generous for anything that reads as a search query (ordinary
+ * queries are a handful of words) and stays well inside the cheap end of
+ * the measured cost curve.
  */
 export const MAX_TOKENS = 32;
 

@@ -120,6 +120,12 @@ describe("matchExpression", () => {
       // on a plain space is exact here because none of the synthetic
       // tok<N> tokens contains a space or a quote to be doubled.
       expect(expression.split(" ")).toHaveLength(MAX_TOKENS);
+
+      // The cap must not silently strip the trailing prefix star along with
+      // the discarded tokens -- a future slice/map reorder could keep the
+      // count right while losing the star on the (new) last kept token.
+      expect(expression.endsWith(`"tok${MAX_TOKENS - 1}"*`)).toBe(true);
+
       expect(() => matchCount(db, expression)).not.toThrow();
     } finally {
       db.close();
