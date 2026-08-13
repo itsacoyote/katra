@@ -28,10 +28,39 @@ import { ID_PREFIX, MIN_PREFIX_LENGTH } from "./id-format.js";
 const BASE36 = /^[0-9a-z]+$/;
 
 /**
+ * Hard cap on how many tokens {@link matchExpression} builds a query from.
+ *
+ * FTS5 MATCH cost is driven by token COUNT, not token length — measured
+ * directly against a throwaway table: cost stays roughly linear for a
+ * while, then gets markedly worse; 100k tokens took around 35 seconds and
+ * 500k did not finish in a reasonable time. An agent pasting a large block
+ * of text as a "query" (a whole file, a stack trace) is a real shape for
+ * this feature to see, and a read command should not be able to hang on it.
+ *
+ * Truncating rather than refusing: past this cap the query silently
+ * degrades to its first {@link MAX_TOKENS} terms instead of erroring or
+ * hanging — a search that is narrower than what was typed, not a usage
+ * error. Refusing a long paste outright is a worse experience than
+ * searching on its first 32 words, and hanging is worse still. 32 is
+ * generous for anything that reads as a search query (ordinary queries are
+ * a handful of words) and stays well inside the cheap end of the measured
+ * cost curve.
+ */
+export const MAX_TOKENS = 32;
+
+/**
  * Builds a safe FTS5 MATCH expression from raw, untrusted query text.
  *
  * Scheme (probe-verified, katra-9aw.54 risk notes):
- *   1. Split on whitespace; drop empty tokens.
+ *   1. Replace any NUL character (U+0000) with a space, then split on
+ *      whitespace; drop empty tokens. FTS5 reads each phrase as a
+ *      NUL-terminated C string, so a NUL left inside a quoted token
+ *      truncates the phrase mid-string and throws "unterminated string" —
+ *      probe-verified. A NUL cannot arrive via a CLI argv, but this
+ *      function is also reachable as a library call and through the MCP
+ *      surface, where a JSON string encodes a NUL without any trouble —
+ *      so it is treated as a separator, exactly like ordinary whitespace,
+ *      rather than stripped or rejected outright.
  *   2. Phrase-quote EACH token individually: wrap it in double quotes,
  *      doubling any embedded double quote (`"` becomes `""`, FTS5's escape
  *      for a literal quote inside a phrase).
@@ -42,6 +71,8 @@ const BASE36 = /^[0-9a-z]+$/;
  *   4. Append `*` directly after the FINAL token's closing quote (outside
  *      it, not inside) for a trailing prefix match — "mig" also finds
  *      "migration".
+ *   5. Keep at most the first {@link MAX_TOKENS} tokens — see its docstring
+ *      for why this truncates rather than refuses.
  *
  * Quoting is per-token, never whole-query. Quoting the entire query as one
  * phrase turns step 3's implicit AND into an adjacency requirement instead —
@@ -79,7 +110,11 @@ const BASE36 = /^[0-9a-z]+$/;
  * belongs to the caller, not here — this function never throws.
  */
 export function matchExpression(text: string): string | null {
-  const tokens = text.split(/\s+/).filter((token) => token.length > 0);
+  const tokens = text
+    .replaceAll("\u0000", " ")
+    .split(/\s+/)
+    .filter((token) => token.length > 0)
+    .slice(0, MAX_TOKENS);
   if (tokens.length === 0) return null;
 
   const phrases = tokens.map((token, index) => {

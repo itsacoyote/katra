@@ -1,7 +1,7 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import { ID_PREFIX, MIN_PREFIX_LENGTH } from "../../src/core/id-format.js";
-import { idFragment, matchExpression } from "../../src/core/search-query.js";
+import { idFragment, MAX_TOKENS, matchExpression } from "../../src/core/search-query.js";
 
 type DB = Database.Database;
 
@@ -62,6 +62,22 @@ const HOSTILE_CORPUS: readonly string[] = [
   "日本語 テスト",
   "mix 日本語 and text with a-hyphen",
   "col: value",
+  // Embedded NUL mid-token: pre-fix, this stays inside one bareword-quoted
+  // token and FTS5's NUL-terminated C-string handling truncates the phrase
+  // mid-string ("unterminated string"). Post-fix it is a separator, so this
+  // becomes the ordinary two-token "auth" / "mig"* case.
+  "auth\u0000mig",
+  // A lone NUL: same crash pre-fix. Post-fix it is treated as whitespace,
+  // like the all-whitespace case, and collapses to null -- a legitimate
+  // no-search outcome, not something the loop below executes.
+  "\u0000",
+  // A bare double quote as the FINAL token exercises the `""* ` path: the
+  // token's own content doubles to nothing, producing an empty phrase
+  // immediately followed by the prefix star.
+  'auth "',
+  // A lone (unpaired) UTF-16 surrogate: not valid on its own in UTF-8, and
+  // exercises the boundary between "safe to quote" and "safe to bind".
+  "\ud800",
 ];
 
 describe("matchExpression", () => {
@@ -69,13 +85,42 @@ describe("matchExpression", () => {
     const db = ftsTable();
     try {
       for (const input of HOSTILE_CORPUS) {
-        const expression = matchExpression(input);
-        expect(expression, `expected an expression for ${JSON.stringify(input)}`).not.toBeNull();
+        let expression: string | null = null;
         expect(
-          () => matchCount(db, unwrap(expression)),
+          () => {
+            expression = matchExpression(input);
+          },
+          `matchExpression threw building for ${JSON.stringify(input)}`,
+        ).not.toThrow();
+
+        // A lone NUL collapses to null -- treated as whitespace by the fix
+        // for the embedded-NUL crash below -- which is a legitimate
+        // "nothing to search on" outcome, not something to execute.
+        if (expression === null) continue;
+
+        expect(
+          () => matchCount(db, expression as string),
           `MATCH threw for ${JSON.stringify(input)} -> ${JSON.stringify(expression)}`,
         ).not.toThrow();
       }
+    } finally {
+      db.close();
+    }
+  });
+
+  it("caps an oversized query to MAX_TOKENS terms", () => {
+    const db = ftsTable();
+    try {
+      seed(db, "filler row unrelated to any generated token");
+
+      const manyTokens = Array.from({ length: MAX_TOKENS * 2 }, (_, i) => `tok${i}`).join(" ");
+      const expression = unwrap(matchExpression(manyTokens));
+
+      // Cleanest assertable form of the cap: quoted-phrase count. Splitting
+      // on a plain space is exact here because none of the synthetic
+      // tok<N> tokens contains a space or a quote to be doubled.
+      expect(expression.split(" ")).toHaveLength(MAX_TOKENS);
+      expect(() => matchCount(db, expression)).not.toThrow();
     } finally {
       db.close();
     }
