@@ -10,8 +10,14 @@ import type { Migration } from "../migrate.js";
 import { migration0001 } from "./0001-init.js";
 import { migration0002 } from "./0002-events-and-notes.js";
 import { migration0003 } from "./0003-claims-and-presence.js";
+import { migration0004 } from "./0004-search-index.js";
 
-export const MIGRATIONS: readonly Migration[] = [migration0001, migration0002, migration0003];
+export const MIGRATIONS: readonly Migration[] = [
+  migration0001,
+  migration0002,
+  migration0003,
+  migration0004,
+];
 
 export { buildInitDdl, DEFAULT_SCHEMA_SETS, type SchemaSets } from "./0001-init.js";
 export {
@@ -24,3 +30,4 @@ export {
   type ClaimsAndPresenceSets,
   DEFAULT_CLAIMS_AND_PRESENCE_SETS,
 } from "./0003-claims-and-presence.js";
+export { buildSearchIndexDdl } from "./0004-search-index.js";

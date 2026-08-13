@@ -97,7 +97,7 @@ describe("initial schema", () => {
     expect(MIGRATIONS[0]?.name).toBe("init");
     // Ordered, and every version distinct: `migrate` filters and sorts by
     // version, so a duplicate or a gap would silently skip a step.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4]);
   });
 
   it("matches the committed schema byte for byte", () => {
@@ -779,8 +779,13 @@ describe("migration 0003 — claims and presence", () => {
     );
 
     expect(readSchemaVersion(db)).toBe(2);
-    expect(migrate(db, MIGRATIONS)).toBe(1);
-    expect(readSchemaVersion(db)).toBe(3);
+    // MIGRATIONS now carries migration 0004 too, so a v2 store applying the
+    // full list runs TWO steps (0003's rebuild, then 0004's index) and lands
+    // on v4 — the same unscoped-MIGRATIONS trap 0002's freshV2()/v1Store()
+    // comment names, sprung here because this test was never scoped to a
+    // slice the way those were.
+    expect(migrate(db, MIGRATIONS)).toBe(2);
+    expect(readSchemaVersion(db)).toBe(4);
 
     expect(db.prepare("SELECT title FROM tasks WHERE id='kt-aaaaaa'").get()).toEqual({
       title: "survives the rebuild",
@@ -791,29 +796,6 @@ describe("migration 0003 — claims and presence", () => {
     expect(db.prepare("SELECT body FROM notes WHERE id='nt-aaaaaa'").get()).toEqual({
       body: "a note",
     });
-    db.close();
-  });
-
-  it("brings a fresh store straight to version 3", () => {
-    const db = new Database(":memory:");
-    expect(readSchemaVersion(db)).toBe(0);
-    expect(migrate(db, MIGRATIONS)).toBe(3);
-    expect(readSchemaVersion(db)).toBe(3);
-
-    const names = db
-      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
-      .all()
-      .map((row) => (row as { name: string }).name);
-    expect(names).toEqual([
-      "claims",
-      "deps",
-      "events",
-      "links",
-      "notes",
-      "presence",
-      "tags",
-      "tasks",
-    ]);
     db.close();
   });
 
@@ -952,6 +934,246 @@ describe("migration 0003 — claims and presence", () => {
 
     expect(db.prepare("SELECT * FROM presence").all()).toEqual([
       { worktree: "/repo/wt-a", branch: "feature/x", last_seen: "2026-01-01T00:05:00.000Z" },
+    ]);
+    db.close();
+  });
+});
+
+describe("migration 0004 — search index", () => {
+  /** A store at exactly v3, as an installation before this feature would have. */
+  function v3Store(): DB {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, MIGRATIONS.slice(0, 3));
+    return db;
+  }
+
+  function freshV4(): DB {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, MIGRATIONS);
+    return db;
+  }
+
+  /** Inserts a note with raw SQL, scoped to this describe block like 0002's own helper. */
+  function insertNote(db: DB, row: Record<string, unknown> = {}): void {
+    const full = {
+      id: "nt-aaaaaa",
+      task_id: "kt-aaaaaa",
+      body: "a note",
+      actor: "main @ /repo",
+      created_at: TS,
+      ...row,
+    };
+    const cols = Object.keys(full);
+    db.prepare(
+      `INSERT INTO notes (${cols.join(",")}) VALUES (${cols.map(() => "?").join(",")})`,
+    ).run(...Object.values(full));
+  }
+
+  /** Whether `term` currently matches a row in one of the two FTS5 indexes. */
+  function matches(db: DB, table: "tasks_fts" | "notes_fts", term: string): boolean {
+    const row = db.prepare(`SELECT COUNT(*) c FROM ${table} WHERE ${table} MATCH ?`).get(term) as {
+      c: number;
+    };
+    return row.c > 0;
+  }
+
+  it("matches the pinned v4 schema fixture", () => {
+    // Same golden-fixture reasoning as v1-v3: 0004-search-index.ts's DDL is
+    // fixed structural text (no Sets object — see that file's own docstring
+    // for why, unlike 0001-0003), so the risk this test guards is an editor
+    // silently changing the shipped migration after some store has already
+    // applied it, not enum drift.
+    const golden = readFileSync(
+      fileURLToPath(new URL("../fixtures/schema-v4.sql", import.meta.url)),
+      "utf8",
+    );
+    expect(MIGRATIONS[3]?.sql).toBe(golden);
+    expect(MIGRATIONS[3]?.version).toBe(4);
+
+    // Acceptance criterion 1's "earlier fixtures untouched": adding a step
+    // must not edit an earlier one — an installed store already ran steps
+    // 1-3 and will never run them again. Checked here rather than as a
+    // fourth standalone test, to stay inside the seven named tests.
+    for (const [index, name] of [
+      [0, "schema-v1.sql"],
+      [1, "schema-v2.sql"],
+      [2, "schema-v3.sql"],
+    ] as const) {
+      const earlier = readFileSync(
+        fileURLToPath(new URL(`../fixtures/${name}`, import.meta.url)),
+        "utf8",
+      );
+      expect(MIGRATIONS[index]?.sql).toBe(earlier);
+    }
+  });
+
+  it("upgrades a v3 store to v4 backfilling existing tasks and notes into the index", () => {
+    const db = v3Store();
+    rawInsert(db, baseTask({ title: "predates the index", description: "was already stored" }));
+    insertNote(db, { body: "the note text itself" });
+
+    expect(readSchemaVersion(db)).toBe(3);
+    expect(migrate(db, MIGRATIONS)).toBe(1);
+    expect(readSchemaVersion(db)).toBe(4);
+
+    // Acceptance criterion 2: pre-existing task/note text is matchable
+    // immediately, with no extra step. Raw MATCH queries against the index
+    // migration 0004 just built and backfilled — the search commands that
+    // will eventually read this don't exist yet.
+    expect(matches(db, "tasks_fts", "predates")).toBe(true);
+    expect(matches(db, "tasks_fts", "already")).toBe(true);
+    expect(matches(db, "notes_fts", "itself")).toBe(true);
+    db.close();
+  });
+
+  it("brings a fresh store straight to version 4", () => {
+    const db = new Database(":memory:");
+    expect(readSchemaVersion(db)).toBe(0);
+    expect(migrate(db, MIGRATIONS)).toBe(4);
+    expect(readSchemaVersion(db)).toBe(4);
+
+    const names = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")
+      .all()
+      .map((row) => (row as { name: string }).name);
+    // The 8 ordinary tables plus the 10 FTS5 shadow rows: each
+    // external-content table registers itself plus 4 shadow tables
+    // (_data/_idx/_docsize/_config, no _content — external content stores
+    // nothing of its own), times two tables (probe-verified 2026-08-13).
+    expect(names).toEqual([
+      "claims",
+      "deps",
+      "events",
+      "links",
+      "notes",
+      "notes_fts",
+      "notes_fts_config",
+      "notes_fts_data",
+      "notes_fts_docsize",
+      "notes_fts_idx",
+      "presence",
+      "tags",
+      "tasks",
+      "tasks_fts",
+      "tasks_fts_config",
+      "tasks_fts_data",
+      "tasks_fts_docsize",
+      "tasks_fts_idx",
+    ]);
+    db.close();
+  });
+
+  it("keeps the index in sync through task insert, title update, description update and delete", () => {
+    const db = freshV4();
+    rawInsert(
+      db,
+      baseTask({
+        id: "kt-idx001",
+        title: "aardvark migration",
+        description: "initial description",
+      }),
+    );
+
+    // Insert.
+    expect(matches(db, "tasks_fts", "aardvark")).toBe(true);
+
+    // Title update: the old term is gone, the new one is found.
+    db.prepare("UPDATE tasks SET title = ? WHERE id = ?").run("bumblebee migration", "kt-idx001");
+    expect(matches(db, "tasks_fts", "aardvark")).toBe(false);
+    expect(matches(db, "tasks_fts", "bumblebee")).toBe(true);
+
+    // Description update: same find-it/lose-it shape, the other column.
+    db.prepare("UPDATE tasks SET description = ? WHERE id = ?").run(
+      "revised description",
+      "kt-idx001",
+    );
+    expect(matches(db, "tasks_fts", "initial")).toBe(false);
+    expect(matches(db, "tasks_fts", "revised")).toBe(true);
+
+    // Delete: both terms are gone.
+    db.prepare("DELETE FROM tasks WHERE id = ?").run("kt-idx001");
+    expect(matches(db, "tasks_fts", "bumblebee")).toBe(false);
+    expect(matches(db, "tasks_fts", "revised")).toBe(false);
+    db.close();
+  });
+
+  it("keeps the index in sync through note insert and task-delete cascade", () => {
+    const db = freshV4();
+    rawInsert(db, baseTask({ id: "kt-idx002" }));
+    insertNote(db, { id: "nt-idx001", task_id: "kt-idx002", body: "a cascading handoff" });
+
+    expect(matches(db, "notes_fts", "cascading")).toBe(true);
+
+    // `notes.task_id` cascades ON DELETE CASCADE (migration 0002). The pin:
+    // that cascade fires `notes_fts_ad` exactly like a direct note delete
+    // would (pre-resolved by probe, epic risk notes 2026-08-13). This has to
+    // be a MATCH probe, never `integrity-check` — plan-review's control run
+    // proved `integrity-check` reports a stale posting as clean, so it
+    // cannot stand in for this assertion, and a stale posting here would
+    // eventually collide with a reused rowid (no AUTOINCREMENT) and corrupt
+    // a future note's snippet.
+    db.prepare("DELETE FROM tasks WHERE id = ?").run("kt-idx002");
+    expect(db.prepare("SELECT COUNT(*) c FROM notes").get()).toEqual({ c: 0 });
+    expect(matches(db, "notes_fts", "cascading")).toBe(false);
+    db.close();
+  });
+
+  it("does not reindex on a lane-only update", () => {
+    const db = freshV4();
+    rawInsert(db, baseTask({ id: "kt-idx003", title: "close no-op title" }));
+
+    // Mechanism: total_changes() counts every row write to every real table
+    // since the connection opened — including the shadow tables an FTS5
+    // trigger's delete+insert protocol writes to. A lane/closed_at update
+    // (the shape a `close` or `cancel` write takes) touches only `tasks`
+    // itself if the AU trigger's `OF title, description` scope holds, so a
+    // delta of exactly 1 (the UPDATE's own row) proves the trigger did not
+    // fire. Probe-verified: an otherwise-identical update that touches
+    // `title` instead produces a delta greater than 1 here, because it
+    // writes through to the shadow tables too.
+    const before = (db.prepare("SELECT total_changes() c").get() as { c: number }).c;
+    db.prepare("UPDATE tasks SET lane = 'Done', closed_at = ? WHERE id = ?").run(TS, "kt-idx003");
+    const after = (db.prepare("SELECT total_changes() c").get() as { c: number }).c;
+
+    expect(after - before).toBe(1);
+    // Functional corroboration of the same claim: the original title is
+    // still immediately findable, unperturbed.
+    expect(matches(db, "tasks_fts", "close")).toBe(true);
+    db.close();
+  });
+
+  it("creates every table and trigger the index needs", () => {
+    const db = freshV4();
+    // Not a LIKE '%_fts%' filter: LIKE's `_` is a single-character wildcard,
+    // which would also match names that merely happen to have any character
+    // where `_fts` sits — a plain JS substring check has no such trap.
+    const rows = db
+      .prepare("SELECT type, name FROM sqlite_master ORDER BY type, name")
+      .all() as Array<{ type: string; name: string }>;
+    const fts = rows.filter((row) => row.name.includes("fts"));
+    const byType = (type: string) => fts.filter((row) => row.type === type).map((row) => row.name);
+
+    expect(byType("table")).toEqual([
+      "notes_fts",
+      "notes_fts_config",
+      "notes_fts_data",
+      "notes_fts_docsize",
+      "notes_fts_idx",
+      "tasks_fts",
+      "tasks_fts_config",
+      "tasks_fts_data",
+      "tasks_fts_docsize",
+      "tasks_fts_idx",
+    ]);
+    expect(byType("trigger")).toEqual([
+      "notes_fts_ad",
+      "notes_fts_ai",
+      "notes_fts_au",
+      "tasks_fts_ad",
+      "tasks_fts_ai",
+      "tasks_fts_au",
     ]);
     db.close();
   });
