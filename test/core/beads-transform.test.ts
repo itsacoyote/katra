@@ -226,6 +226,21 @@ describe("planMigration", () => {
     expect(pairs.some((pair) => pair.has("X") && pair.has("W"))).toBe(true);
   });
 
+  it("routes an unrecognized edge type to danglingEdges instead of dropping it silently", () => {
+    // "duplicates" is not one of the four documented types (parent-child,
+    // blocks, discovered-from, related) — routeEdgesByType's fallback arm,
+    // previously unhit by any test here.
+    const x = makeIssue({ id: "X", dependencies: [edge("X", "Y", "duplicates")] });
+    const y = makeIssue({ id: "Y" });
+
+    const { plan, report } = planMigration(makeExtract([x, y]), IDENTITY, FALLBACK);
+
+    expect(plan.edges).toHaveLength(0);
+    expect(report.danglingEdges.items).toEqual([
+      { fromOldId: "X", toOldId: "Y", type: "duplicates" },
+    ]);
+  });
+
   it("collapses link pairs regardless of type or direction, reporting the losers as duplicates", () => {
     // related(X,Y), discovered-from(X,Y) and related(Y,X) are the same
     // symmetric relationship declared three times — classifyGenericEdges's
@@ -309,6 +324,33 @@ describe("planMigration", () => {
     expect(deps.some((d) => d.kind === "dependency" && d.taskOldId === "c-task")).toBe(false);
   });
 
+  it("plans two non-cyclic blocks prerequisites as two dependency edges with zero blocksCycles", () => {
+    // One issue blocked by two different, unrelated prerequisites — neither
+    // depends on X or on each other. Exercises breakBlocksCycles' sort
+    // tiebreak (both candidates share issue_id "X", ordered by
+    // depends_on_id) and its adjacency-accumulation branch (the second
+    // edge's taskOldId already has an entry from the first) — both
+    // previously unhit, since every other blocks test here uses at most one
+    // edge per issue_id.
+    const x = makeIssue({
+      id: "X",
+      dependencies: [edge("X", "P1", "blocks"), edge("X", "P2", "blocks")],
+    });
+    const p1 = makeIssue({ id: "P1" });
+    const p2 = makeIssue({ id: "P2" });
+
+    const { plan, report } = planMigration(makeExtract([x, p1, p2]), IDENTITY, FALLBACK);
+
+    expect(report.blocksCycles.count).toBe(0);
+    const deps = plan.edges.filter((e) => e.kind === "dependency");
+    expect(deps).toHaveLength(2);
+    expect(deps.every((d) => d.kind === "dependency" && d.taskOldId === "X")).toBe(true);
+    expect(deps.map((d) => (d.kind === "dependency" ? d.dependsOnOldId : null)).sort()).toEqual([
+      "P1",
+      "P2",
+    ]);
+  });
+
   it("skips and reports items with empty-after-trim titles and notes with blank bodies", () => {
     const blank = makeIssue({ id: "BLANK", title: "   " });
     const withBlankNote = makeIssue({ id: "HAS-NOTE", title: "Real title", notes: "   " });
@@ -363,6 +405,54 @@ describe("planMigration", () => {
       { oldId: "BAD-DESC", rawTitle: "Issue BAD-DESC", reason: "unusable field type" },
     ]);
   });
+
+  // One case per BeadsIssue field hasValidShape verifies that no other test
+  // in this file exercises directly (status/owner/description above already
+  // have their own dedicated tests). Same hostile-shape pattern as those —
+  // a hostile export can carry any JSON type in any field — collapsed into
+  // one table since the assertion shape is identical every time.
+  const hostileShapeCases: ReadonlyArray<{
+    readonly field: string;
+    readonly overrides: Record<string, unknown>;
+  }> = [
+    { field: "issue_type", overrides: { issue_type: 42 } },
+    { field: "priority", overrides: { priority: "high" } },
+    { field: "created_by", overrides: { created_by: 42 } },
+    { field: "created_at", overrides: { created_at: 42 } },
+    { field: "updated_at", overrides: { updated_at: 42 } },
+    { field: "closed_at", overrides: { closed_at: 42 } },
+    { field: "external_ref", overrides: { external_ref: 42 } },
+    { field: "started_at", overrides: { started_at: 42 } },
+    { field: "assignee", overrides: { assignee: 42 } },
+    { field: "close_reason", overrides: { close_reason: 42 } },
+    {
+      field: "dependencies (element missing a required key)",
+      overrides: { dependencies: [{ issue_id: "X", type: "blocks", created_at: FALLBACK }] },
+    },
+    {
+      field: "comments (element with a non-string author)",
+      overrides: {
+        comments: [{ id: "c1", issue_id: "X", text: "hi", created_at: FALLBACK, author: 42 }],
+      },
+    },
+    { field: "labels (element that isn't a string)", overrides: { labels: ["ok-label", 42] } },
+  ];
+
+  it.each(hostileShapeCases)(
+    "routes a hostile $field to invalidItems instead of throwing",
+    ({ field, overrides }) => {
+      const oldId = `HOSTILE-${field}`;
+      const hostile = { ...makeIssue({ id: oldId }), ...overrides } as unknown as BeadsIssue;
+
+      expect(() => planMigration(makeExtract([hostile]), IDENTITY, FALLBACK)).not.toThrow();
+
+      const { plan, report } = planMigration(makeExtract([hostile]), IDENTITY, FALLBACK);
+      expect(plan.items.some((item) => item.oldId === oldId)).toBe(false);
+      expect(report.invalidItems.items).toEqual([
+        { oldId, rawTitle: `Issue ${oldId}`, reason: "unusable field type" },
+      ]);
+    },
+  );
 
   it("clamps and reports out-of-range priorities", () => {
     const issue = makeIssue({ id: "P", priority: 99 });

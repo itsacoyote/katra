@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
-import type { EventLog, MigrationReport, TaskList } from "../../src/core/contract.js";
+import type { BoardResult, EventLog, MigrationReport, TaskList } from "../../src/core/contract.js";
 import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
 import type { TaskView } from "../../src/core/tasks/types.js";
 import { runCli } from "../helpers/cli.js";
@@ -406,6 +406,18 @@ describe("F5 full-coverage fixture — apply and post-apply behavior", () => {
     const shownDependent = await runCli(["show", openDependentId, "--json"], { cwd: repo.dir });
     const dependentView = shownDependent.json() as TaskView;
     expect(dependentView.blockers).toEqual([]);
+
+    // The spec's AC names next/board, not list, as how an agent observes
+    // this — board is the one that actually exercises it here: next is
+    // scoped to the Planned lane (NEXT_LANE), which no migrated item ever
+    // lands in, so it would never see this task at all. board's blocked
+    // section is store-wide and lane-agnostic.
+    const board = await runCli(["board", "--json"], { cwd: repo.dir });
+    expect(board.exitCode).toBe(EXIT.ok);
+    const boardResult = board.json() as BoardResult;
+    expect(boardResult.blocked.tasks.map((t) => t.id)).toContain(blockedId);
+    expect(boardResult.counts.blocked).toBeGreaterThan(0);
+    expect(boardResult.ready.tasks.map((t) => t.id)).not.toContain(blockedId);
   });
 
   it("finds migrated items by their beads:<oldId> tag", async () => {

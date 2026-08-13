@@ -6,6 +6,12 @@
  * load) are covered by `test/core/beads-*.test.ts`; these tests are about the
  * CLI's own contract — store handling, exit codes, `--json`, and sanitized
  * rendering — not about re-proving the transform's classification logic.
+ *
+ * `readExportFile`'s `MAX_FROM_BYTES` (32 MiB) size-cap path is deliberately
+ * accepted-untested here rather than writing a 32 MiB fixture file per test
+ * run: it is a plain `stats.size > MAX_FROM_BYTES` stat-based guard, and it
+ * was exercised manually during the security review that set the cap, with
+ * measured evidence (a real oversized export refused before being read).
  */
 
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -103,6 +109,18 @@ describe("katra migrate beads — preview", () => {
     expect(result.exitCode).toBe(EXIT.user);
     expect(result.stderr).toContain(missing);
     expect(result.stderr).toMatch(/bd export/);
+  });
+
+  it("exits 1 with 'not a regular file' when --from points at a directory", async () => {
+    // readExportFile's isFile() guard exists precisely so this reaches a
+    // clean refusal instead of readFileSync's opaque EISDIR fault.
+    const dirPath = join(repo.dir, "a-directory");
+    mkdirSync(dirPath);
+
+    const result = await runCli(["migrate", "beads", "--from", dirPath], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/not a regular file/);
   });
 
   it("sanitizes report lines built from export content", async () => {
