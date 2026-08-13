@@ -1,8 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { writeTx } from "../../src/core/db/connection.js";
 import { LANES, TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
+import { listEvents } from "../../src/core/events/repo.js";
 import {
   addDependency,
+  addDependencyWithin,
   isReady,
   listBlockers,
   listDependencies,
@@ -10,6 +13,7 @@ import {
   READINESS_VIEW,
   removeDependency,
 } from "../../src/core/graph/deps.js";
+import { addLinkWithin } from "../../src/core/graph/links.js";
 import { runConcurrent } from "../helpers/concurrent.js";
 import { seedDep, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
@@ -393,5 +397,44 @@ describe("cycle detection cost", () => {
       if (error.detail.code !== "cycle") throw new Error("expected a cycle error");
       expect(error.detail.path).toEqual([c, a, b, c]);
     }
+  });
+});
+
+describe("addDependencyWithin and addLinkWithin", () => {
+  it("addDependencyWithin and addLinkWithin write with the caller's time, no events", () => {
+    const a = seedTask(fixture.store);
+    const b = seedTask(fixture.store);
+    const c = seedTask(fixture.store);
+    const createdAt = seedTime(2_000);
+
+    // Both throw outside a transaction, mirroring appendEvent's own guard.
+    expect(() => addDependencyWithin(fixture.store, a, b, { createdAt })).toThrowError(
+      /inside an open transaction/,
+    );
+    expect(() => addLinkWithin(fixture.store, a, c, { createdAt })).toThrowError(
+      /inside an open transaction/,
+    );
+
+    const [depResult, linkResult] = writeTx(
+      fixture.store.db,
+      () =>
+        [
+          addDependencyWithin(fixture.store, a, b, { createdAt }),
+          addLinkWithin(fixture.store, a, c, { createdAt }),
+        ] as const,
+    );
+
+    const depRow = fixture.store.db
+      .prepare("SELECT created_at FROM deps WHERE task_id = ? AND depends_on_id = ?")
+      .get(depResult.taskId, depResult.dependsOnId) as { created_at: string };
+    const linkRow = fixture.store.db
+      .prepare("SELECT created_at FROM links WHERE a_id = ? AND b_id = ?")
+      .get(linkResult.a, linkResult.b) as { created_at: string };
+
+    expect(depRow.created_at).toBe(createdAt);
+    expect(linkRow.created_at).toBe(createdAt);
+    // Neither path has ever appended an event — this seam only changes where
+    // the timestamp comes from.
+    expect(listEvents(fixture.store).events).toEqual([]);
   });
 });

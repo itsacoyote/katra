@@ -9,7 +9,7 @@
  */
 
 import type { TaskList } from "../contract.js";
-import { writeTx } from "../db/connection.js";
+import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import type { Kind, Lane, Level, Priority } from "../enums.js";
 import { isTerminal, PRIORITY_DEFAULT, sqlEnum, TERMINAL_LANES } from "../enums.js";
 import { KatraException } from "../errors.js";
@@ -124,13 +124,38 @@ export function requireEpicId(store: OpenStore, input: string): string {
 }
 
 /**
- * Creates a task or epic and returns it.
+ * The row-mutation core of `createTask`: validates the input, resolves the
+ * parent, and inserts the task and its tags — stamping the caller's actor and
+ * time rather than `store.actor()` or `writeTx`'s own clock.
  *
- * The task row and its tags share one timestamp and one transaction, so items
- * written together never differ by a millisecond and a failure part-way leaves
- * nothing behind.
+ * **Must be called inside an open transaction** — see `appendEvent`'s guard
+ * (`events/repo.ts`), which this mirrors. `actor` is injected rather than
+ * resolved here: resolving it spawns git subprocesses, and doing that under
+ * the write lock this function runs inside would widen the lock window (see
+ * `createTask`'s own note on that below) — and the F5 loader needs to stamp
+ * migrated tasks with a foreign actor `store.actor()` could never produce.
+ * `updatedAt` defaults to `createdAt`, matching every task `createTask` has
+ * ever written. **Writes no event** — the F5 loader inserts historical tasks
+ * without a `created` event masquerading as live activity, appending its own
+ * events afterwards in true chronological order. `createTask` is the only
+ * caller during ordinary use: it wraps this in `writeTx`, then appends the
+ * `created` event itself from a fresh read of the row this seam just wrote.
  */
-export function createTask(store: OpenStore, input: NewTask): Task {
+export function createTaskWithin(
+  store: OpenStore,
+  input: NewTask,
+  ctx: { readonly actor: string; readonly createdAt: string; readonly updatedAt?: string },
+): string {
+  if (!store.db.inTransaction) {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "createTaskWithin must be called inside an open transaction — a task " +
+        "that commits on its own can outlive the change it's part of",
+    });
+  }
+  assertNotReadOnly(store.db, "createTaskWithin");
+
   const title = input.title.trim();
   if (title === "") {
     throw new KatraException({
@@ -161,6 +186,58 @@ export function createTask(store: OpenStore, input: NewTask): Task {
     });
   }
 
+  // Resolved inside the transaction, so a partial parent id is accepted and
+  // a bad one is refused by name rather than by the trigger backing the same
+  // rule. Resolved *outside* it, another worktree could delete the epic in
+  // the window before the INSERT — the delete is allowed, since the epic has
+  // no children yet — and the foreign key would fire as a raw
+  // SQLITE_CONSTRAINT_FOREIGNKEY reported under the untyped "internal" code.
+  const parentId =
+    input.parentId === undefined || input.parentId === null
+      ? null
+      : requireEpicId(store, input.parentId);
+
+  const createdAt = ctx.createdAt;
+  const updatedAt = ctx.updatedAt ?? ctx.createdAt;
+
+  return insertWithRetry((candidate) => {
+    store.db
+      .prepare(
+        `INSERT INTO tasks
+           (id, level, kind, title, description, lane, priority, assignee,
+            parent_id, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+      )
+      .run(
+        candidate,
+        level,
+        kind,
+        title,
+        input.description ?? null,
+        lane,
+        priority,
+        input.assignee ?? null,
+        parentId,
+        createdAt,
+        updatedAt,
+      );
+
+    const addTag = store.db.prepare("INSERT OR IGNORE INTO tags (task_id, tag) VALUES (?,?)");
+    for (const tag of input.tags ?? []) {
+      const trimmed = tag.trim();
+      if (trimmed !== "") addTag.run(candidate, trimmed);
+    }
+  });
+}
+
+/**
+ * Creates a task or epic and returns it.
+ *
+ * The task row and its tags share one timestamp and one transaction, so items
+ * written together never differ by a millisecond and a failure part-way leaves
+ * nothing behind.
+ */
+export function createTask(store: OpenStore, input: NewTask): Task {
   // Resolved *before* the transaction opens. The resolver is lazy, so the
   // first call in a process is where two git subprocesses actually spawn —
   // and inside `writeTx` that happens with the exclusive write lock held,
@@ -170,49 +247,22 @@ export function createTask(store: OpenStore, input: NewTask): Task {
   const actor = store.actor();
 
   const id = writeTx(store.db, (now) => {
-    // Resolved inside the transaction, so a partial parent id is accepted and
-    // a bad one is refused by name rather than by the trigger backing the same
-    // rule. Resolved *outside* it, another worktree could delete the epic in
-    // the window before the INSERT — the delete is allowed, since the epic has
-    // no children yet — and the foreign key would fire as a raw
-    // SQLITE_CONSTRAINT_FOREIGNKEY reported under the untyped "internal" code.
-    const parentId =
-      input.parentId === undefined || input.parentId === null
-        ? null
-        : requireEpicId(store, input.parentId);
+    const created = createTaskWithin(store, input, { actor, createdAt: now });
 
-    const created = insertWithRetry((candidate) => {
-      store.db
-        .prepare(
-          `INSERT INTO tasks
-             (id, level, kind, title, description, lane, priority, assignee,
-              parent_id, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-        )
-        .run(
-          candidate,
-          level,
-          kind,
-          title,
-          input.description ?? null,
-          lane,
-          priority,
-          input.assignee ?? null,
-          parentId,
-          now,
-          now,
-        );
+    // Read back rather than carried out of the seam: `createTaskWithin`'s
+    // return type is just the minted id, so the title/level/parent it
+    // resolved come from the row it just wrote, not from local variables the
+    // seam kept to itself.
+    const task = getTask(store, created);
+    if (task === undefined) {
+      throw new KatraException({
+        code: "internal",
+        message: `task ${created} vanished immediately after being created`,
+      });
+    }
 
-      const addTag = store.db.prepare("INSERT OR IGNORE INTO tags (task_id, tag) VALUES (?,?)");
-      for (const tag of input.tags ?? []) {
-        const trimmed = tag.trim();
-        if (trimmed !== "") addTag.run(candidate, trimmed);
-      }
-    });
-
-    // After `insertWithRetry`, not inside its callback: the callback is retried
-    // on a primary-key collision, and an append that ever raised one would make
-    // the retry re-run the task insert too.
+    // After `createTaskWithin`, not inside it: a retried insert would make the
+    // retry re-run an append that ever raised.
     //
     // The title is stamped onto the event because a `created` event outlives
     // its task (ADR-008) — once the row is deleted, no join can recover what it
@@ -222,9 +272,9 @@ export function createTask(store: OpenStore, input: NewTask): Task {
       {
         type: "created",
         entityId: created,
-        epicId: epicIdFor({ id: created, level, parentId }),
+        epicId: epicIdFor(task),
         actor,
-        title,
+        title: task.title,
       },
       now,
     );

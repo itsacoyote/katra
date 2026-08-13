@@ -1,14 +1,21 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { claimFor, claimTask } from "../../src/core/claims/repo.js";
+import { writeTx } from "../../src/core/db/connection.js";
 import type { EventType } from "../../src/core/enums.js";
 import { TERMINAL_LANES } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import { addDependency, isReady } from "../../src/core/graph/deps.js";
-import { cancelTask, closeTask, reopenTask } from "../../src/core/tasks/lifecycle.js";
+import type { Move } from "../../src/core/tasks/lifecycle.js";
+import {
+  applyMoveWithin,
+  cancelTask,
+  closeTask,
+  reopenTask,
+} from "../../src/core/tasks/lifecycle.js";
 import { getTask } from "../../src/core/tasks/repo.js";
 import { runConcurrent } from "../helpers/concurrent.js";
-import { seedClaim, seedTask } from "../helpers/seed.js";
+import { seedClaim, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture, OTHER_IDENTITY, openAs } from "../helpers/store.js";
 
@@ -215,6 +222,56 @@ describe("reopenTask", () => {
     reopenTask(fixture.store, blocker);
 
     expect(isReady(fixture.store, dependent)).toBe(false);
+  });
+});
+
+describe("applyMoveWithin", () => {
+  it("applyMoveWithin moves the row to Done stamping the caller's at as closed_at and a distinct updatedAt, no event, no claim settlement", () => {
+    const id = seedTask(fixture.store);
+    seedClaim(fixture.store, { taskId: id, holder: "/repo/wt-ghost" });
+    const at = seedTime(3_000);
+    const updatedAt = seedTime(4_000);
+    const move: Move = { lane: "Done", markClosed: true, reason: "shipped", event: "closed" };
+
+    expect(() => applyMoveWithin(fixture.store, id, move, { at })).toThrowError(
+      /inside an open transaction/,
+    );
+
+    writeTx(fixture.store.db, () => {
+      applyMoveWithin(fixture.store, id, move, { at, updatedAt });
+    });
+
+    const task = getTask(fixture.store, id);
+    expect(task?.lane).toBe("Done");
+    expect(task?.closedAt).toBe(at);
+    expect(task?.updatedAt).toBe(updatedAt);
+    expect(task?.updatedAt).not.toBe(task?.closedAt);
+    expect(task?.closeReason).toBe("shipped");
+    // The seam does none of transition's other work: a pre-existing claim is
+    // untouched, and no event was appended.
+    expect(claimFor(fixture.store, id)).not.toBeNull();
+    expect(listEvents(fixture.store, { entityId: id }).events).toEqual([]);
+  });
+});
+
+describe("transition through the seam", () => {
+  it("transition close, cancel and reopen still behave byte-identically through the seam", () => {
+    const closable = seedTask(fixture.store);
+    const { task: closed } = closeTask(fixture.store, closable, "shipped");
+    expect(closed.lane).toBe("Done");
+    expect(closed.closeReason).toBe("shipped");
+    expect(closed.closedAt).not.toBeNull();
+
+    const cancellable = seedTask(fixture.store);
+    const { task: cancelled } = cancelTask(fixture.store, cancellable, "dropped");
+    expect(cancelled.lane).toBe("Cancelled");
+    expect(cancelled.closeReason).toBe("dropped");
+    expect(cancelled.closedAt).not.toBeNull();
+
+    const { task: reopened } = reopenTask(fixture.store, cancellable);
+    expect(reopened.lane).toBe("Defined");
+    expect(reopened.closedAt).toBeNull();
+    expect(reopened.closeReason).toBeNull();
   });
 });
 

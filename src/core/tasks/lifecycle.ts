@@ -15,7 +15,7 @@
 
 import { settleClaim } from "../claims/repo.js";
 import type { LifecycleResult } from "../contract.js";
-import { writeTx } from "../db/connection.js";
+import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import type { EventType, Lane } from "../enums.js";
 import { isTerminal } from "../enums.js";
 import { KatraException } from "../errors.js";
@@ -39,8 +39,14 @@ function loadOrThrow(store: OpenStore, id: string, idInput: string): Task {
   return task;
 }
 
-/** What a transition decides to do, once it has seen the task's current state. */
-interface Move {
+/**
+ * What a transition decides to do, once it has seen the task's current state.
+ *
+ * Exported so a caller of {@link applyMoveWithin} — the F5 loader chief among
+ * them — can build one directly, without going through `plan`'s task-shaped
+ * closures.
+ */
+export interface Move {
   readonly lane: Lane;
   readonly markClosed: boolean;
   readonly reason: string | null;
@@ -53,6 +59,48 @@ interface Move {
    * it happened to return the task to.
    */
   readonly event: EventType;
+}
+
+/**
+ * The row-mutation core of `transition`: applies one `Move` to a task's lane,
+ * stamping the caller's time rather than `writeTx`'s own clock.
+ *
+ * **Must be called inside an open transaction** — see `appendEvent`'s guard
+ * (`events/repo.ts`), which this mirrors. Stamps `updated_at = updatedAt ??
+ * at`, and `closed_at = at` when the move closes, clearing it on reopen —
+ * exactly the SQL `transition` always ran. **Does none of the rest of
+ * `transition`'s work**: no readiness comparison, no claim settlement, no
+ * event. Those three stay outside so the F5 loader — which calls this
+ * directly, with historical times, for every close/cancel/reopen it replays —
+ * controls them explicitly rather than inheriting a live-store side effect a
+ * fresh, claim-free store during load has no business triggering. `transition`
+ * is the only caller during ordinary use: it wraps this in
+ * `reportReadinessChange`'s mutate callback, then settles any claim and
+ * appends the lifecycle event itself.
+ */
+export function applyMoveWithin(
+  store: OpenStore,
+  taskId: string,
+  move: Move,
+  ctx: { readonly at: string; readonly updatedAt?: string },
+): void {
+  if (!store.db.inTransaction) {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "applyMoveWithin must be called inside an open transaction — a lane " +
+        "change that commits on its own can outlive the change it's part of",
+    });
+  }
+  assertNotReadOnly(store.db, "applyMoveWithin");
+
+  const updatedAt = ctx.updatedAt ?? ctx.at;
+
+  store.db
+    .prepare(
+      "UPDATE tasks SET lane = ?, closed_at = ?, close_reason = ?, updated_at = ? WHERE id = ?",
+    )
+    .run(move.lane, move.markClosed ? ctx.at : null, move.reason, updatedAt, taskId);
 }
 
 /**
@@ -95,14 +143,10 @@ function transition(
 
   return writeTx(store.db, (now) => {
     const task = loadOrThrow(store, id, idInput);
-    const { lane, markClosed, reason, event } = plan(task);
+    const move = plan(task);
 
     const { result, unblocked, reblocked } = reportReadinessChange(store, id, () => {
-      store.db
-        .prepare(
-          "UPDATE tasks SET lane = ?, closed_at = ?, close_reason = ?, updated_at = ? WHERE id = ?",
-        )
-        .run(lane, markClosed ? now : null, reason, now, id);
+      applyMoveWithin(store, id, move, { at: now });
       return loadOrThrow(store, id, idInput);
     });
 
@@ -111,7 +155,7 @@ function transition(
     // (spec req 5). `markClosed` already draws exactly that line: `reopen` is
     // the one move that leaves it `false`, since reviving a task is not a
     // takeover.
-    if (markClosed) {
+    if (move.markClosed) {
       settleClaim(store, task, actor, worktree, now);
     }
 
@@ -122,13 +166,13 @@ function transition(
     appendEvent(
       store,
       {
-        type: event,
+        type: move.event,
         entityId: id,
         epicId: epicIdFor(task),
         actor,
         fromLane: task.lane,
-        toLane: lane,
-        reason,
+        toLane: move.lane,
+        reason: move.reason,
       },
       now,
     );

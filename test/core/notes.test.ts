@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { writeTx } from "../../src/core/db/connection.js";
 import { isKatraException } from "../../src/core/errors.js";
+import { listEvents } from "../../src/core/events/repo.js";
 import {
   countNotesByKind,
   createNote,
+  createNoteWithin,
   getNote,
   latestHandoff,
   latestNoteInScope,
   listNotes,
 } from "../../src/core/notes/repo.js";
-import { seedEpic, seedTask } from "../helpers/seed.js";
+import { seedEpic, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -135,6 +138,34 @@ describe("createNote", () => {
       .prepare("SELECT created_at FROM events WHERE type='note-added'")
       .get() as { created_at: string };
     expect(event.created_at).toBe(note.createdAt);
+  });
+});
+
+describe("createNoteWithin", () => {
+  it("createNoteWithin stamps the injected actor and historical time, no event", () => {
+    const task = seedTask(fixture.store);
+    const createdAt = seedTime(1_000);
+
+    expect(() =>
+      createNoteWithin(
+        fixture.store,
+        { taskId: task, body: "seam note" },
+        { actor: "someone-else", createdAt },
+      ),
+    ).toThrowError(/inside an open transaction/);
+
+    const noteId = writeTx(fixture.store.db, () =>
+      createNoteWithin(
+        fixture.store,
+        { taskId: task, body: "seam note" },
+        { actor: "someone-else", createdAt },
+      ),
+    );
+
+    const note = getNote(fixture.store, noteId);
+    expect(note?.actor).toBe("someone-else");
+    expect(note?.createdAt).toBe(createdAt);
+    expect(listEvents(fixture.store, { entityId: task }).events).toEqual([]);
   });
 });
 
