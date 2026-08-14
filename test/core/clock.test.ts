@@ -122,9 +122,28 @@ describe("parseWhen", () => {
       "2026-08-03T09:05:00Z", // second-precision — not katra's canonical width
       "08/03/2026",
       "2026-08-03T09:05:00.00Z", // 2-digit ms, not the canonical 3
+      "2026-13-01", // month 13 — the Date.parse-returns-NaN refusal path
+      "2026-13-01T00:00:00.000Z",
     ]) {
       expect(() => parseWhen(bad, now), bad).toThrowError(/relative duration|absolute timestamp/);
     }
+  });
+
+  it("refuses a calendar day that does not exist, even though Date.parse would silently roll it forward", () => {
+    // Date.parse does not refuse an out-of-range day, it rolls it into the
+    // following month: "2026-02-30" parses to March 2nd, "2026-04-31" to May
+    // 1st (roundTripsCalendarDay's docstring has the probe evidence). The
+    // shape gate alone cannot catch this — both inputs match BARE_DATE_PATTERN
+    // exactly, and the rolled-over result is a valid instant, not NaN.
+    for (const bad of ["2026-02-30", "2026-04-31"]) {
+      expect(() => parseWhen(bad, now), bad).toThrowError(/relative duration|absolute timestamp/);
+    }
+
+    // Real calendar dates, including a leap day, still accept — the guard
+    // rejects only inputs whose parsed instant lands on a different day than
+    // the one typed.
+    expect(parseWhen("2026-02-28", now)).toBe("2026-02-28T00:00:00.000Z");
+    expect(parseWhen("2028-02-29", now)).toBe("2028-02-29T00:00:00.000Z");
   });
 
   it("refuses garbage input, naming the accepted forms", () => {

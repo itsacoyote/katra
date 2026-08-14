@@ -166,6 +166,34 @@ export const WHEN_ACCEPTED_FORMS =
   "a relative duration (2w, 3d, 12h, 30m) or an absolute timestamp " +
   "(YYYY-MM-DDTHH:MM:SS.sssZ or YYYY-MM-DD)";
 
+/**
+ * True when `ms`'s UTC calendar date matches the year/month/day literally
+ * written in `input` — the first ten characters of either absolute form
+ * {@link parseWhen} accepts (`YYYY-MM-DD`, always at that fixed offset in
+ * both {@link CANONICAL_TIMESTAMP_PATTERN} and {@link BARE_DATE_PATTERN}).
+ *
+ * `Date.parse` does not refuse an out-of-range day, it silently **rolls it
+ * into the following month**: `"2026-02-30"` parses to March 2nd, and
+ * `"2026-04-31"` parses to May 1st (probe-verified) — exactly the
+ * same-input-different-meaning leniency this module exists to keep out of a
+ * stored timestamp ({@link CANONICAL_TIMESTAMP_PATTERN}'s own docs cover the
+ * identical `Date.parse` leniency for *shape*; this is the calendar-validity
+ * counterpart). The shape gate alone cannot catch it: `"2026-02-30"` matches
+ * {@link BARE_DATE_PATTERN} exactly, and the rolled-over result is a
+ * perfectly valid instant, not `NaN`. This is the second, narrower gate that
+ * runs after `Date.parse` succeeds: the parsed instant's own calendar date
+ * has to still be the one that was typed, or the day never existed and the
+ * input refuses.
+ */
+function roundTripsCalendarDay(input: string, ms: number): boolean {
+  const date = new Date(ms);
+  return (
+    date.getUTCFullYear() === Number(input.slice(0, 4)) &&
+    date.getUTCMonth() + 1 === Number(input.slice(5, 7)) &&
+    date.getUTCDate() === Number(input.slice(8, 10))
+  );
+}
+
 function refuseWhen(input: string): never {
   throw new KatraException({
     code: "validation",
@@ -190,7 +218,10 @@ function refuseWhen(input: string): never {
  *   {@link CANONICAL_TIMESTAMP_PATTERN} or {@link BARE_DATE_PATTERN}'s strict
  *   gate before `Date.parse` ever runs — no `Date.parse` leniency, no
  *   expanded years, no locale grammar; see {@link CANONICAL_TIMESTAMP_PATTERN}'s
- *   docstring for why that matters.
+ *   docstring for why that matters. A day that passes the shape gate but does
+ *   not exist on the calendar — `2026-02-30`, `2026-04-31` — still refuses:
+ *   {@link roundTripsCalendarDay} catches the rollover `Date.parse` would
+ *   otherwise apply silently (its own docstring has the probe evidence).
  *
  * `now` is the caller's own clock reading (typically {@link nowIso}'s
  * output), threaded through rather than read internally — this function is
@@ -219,7 +250,7 @@ export function parseWhen(input: string, now: string): string {
   if (CANONICAL_TIMESTAMP_PATTERN.test(input) || BARE_DATE_PATTERN.test(input)) {
     const dateText = BARE_DATE_PATTERN.test(input) ? `${input}T00:00:00.000Z` : input;
     const ms = Date.parse(dateText);
-    if (!Number.isNaN(ms)) return toIso(new Date(ms));
+    if (!Number.isNaN(ms) && roundTripsCalendarDay(input, ms)) return toIso(new Date(ms));
     refuseWhen(input);
   }
 

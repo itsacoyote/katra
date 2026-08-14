@@ -56,6 +56,12 @@ in migration 0004 alongside a one-time backfill of existing rows.
   table, and must recreate them and rebuild the index in that same step. A
   future `VACUUM` (none exists today) would need the same treatment, since it
   can renumber the implicit rowids `content_rowid='rowid'` depends on.
+- The default `unicode61` tokenizer carries two known limits, accepted rather
+  than worked around: it treats emoji as separators, not indexed content, so
+  an emoji-only query never finds anything; and it does not word-segment CJK
+  text (a whole run of Han/Kana/Hangul characters is one token), so a CJK
+  title is still findable by prefix but not by an internal sub-word the way a
+  space-delimited language is.
 
 ## Alternatives considered
 

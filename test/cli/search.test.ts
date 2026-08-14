@@ -71,6 +71,92 @@ describe("katra search", () => {
     expect(capped.stdout).not.toMatch(/no matches/);
   });
 
+  it("renders visible rows plus the search-shaped hint when more matches exist than --limit shows", async () => {
+    // QA gap: the ordinary truncated render — rows present *and* a trailing
+    // hint — executed zero times in the suite; every existing truncation
+    // test emptied the result to zero rows instead. Also pins that search's
+    // hint is the rank-shaped one, never recent/stale's chronological one —
+    // the two RAISE_*_LIMIT_LINE constants (format.ts) can't be swapped.
+    const a = await add(["zephyrus alpha"]);
+    const b = await add(["zephyrus beta"]);
+    await add(["zephyrus gamma"]);
+
+    const text = await runCli(["search", "zephyrus", "--limit", "2"], { cwd: repo.dir });
+    expect(text.exitCode).toBe(EXIT.ok);
+    const rows = text.stdout.split("\n").filter((line) => line.startsWith("kt-"));
+    expect(rows).toHaveLength(2);
+    expect(rows[0]).toContain(a);
+    expect(rows[1]).toContain(b);
+    expect(text.stdout).toContain("see more matches");
+    expect(text.stdout).not.toContain("see further back");
+
+    const document = (
+      await runCli(["search", "zephyrus", "--limit", "2", "--json"], { cwd: repo.dir })
+    ).json() as SearchResult;
+    expect(document.truncated).toBe(true);
+    expect(document.hits).toHaveLength(2);
+  });
+
+  it("wires --kind/--level/--epic/--tag through to real filters, and refuses a bogus --kind at the boundary", async () => {
+    // QA gap: none of these four flags was exercised through the real CLI —
+    // a routing swap between any two of them survived the suite.
+    const epic = await add(["a griffin epic", "--level", "epic"]);
+    const otherEpic = await add(["another epic", "--level", "epic"]);
+
+    const match = await add([
+      "griffin child task",
+      "--kind",
+      "fix",
+      "--parent",
+      epic,
+      "--tag",
+      "urgent",
+    ]);
+    const other = await add([
+      "griffin sibling task",
+      "--kind",
+      "feat",
+      "--parent",
+      otherEpic,
+      "--tag",
+      "low",
+    ]);
+
+    const kindIds = (
+      (
+        await runCli(["search", "--kind", "fix", "--json"], { cwd: repo.dir })
+      ).json() as SearchResult
+    ).hits.map((hit) => hit.id);
+    expect(kindIds).toContain(match);
+    expect(kindIds).not.toContain(other);
+
+    const levelIds = (
+      (
+        await runCli(["search", "--level", "epic", "--json"], { cwd: repo.dir })
+      ).json() as SearchResult
+    ).hits.map((hit) => hit.id);
+    expect(levelIds).toContain(epic);
+    expect(levelIds).not.toContain(match);
+
+    const epicIds = (
+      (await runCli(["search", "--epic", epic, "--json"], { cwd: repo.dir })).json() as SearchResult
+    ).hits.map((hit) => hit.id);
+    expect(epicIds).toContain(match);
+    expect(epicIds).not.toContain(other);
+
+    const tagIds = (
+      (
+        await runCli(["search", "--tag", "urgent", "--json"], { cwd: repo.dir })
+      ).json() as SearchResult
+    ).hits.map((hit) => hit.id);
+    expect(tagIds).toContain(match);
+    expect(tagIds).not.toContain(other);
+
+    const bogusKind = await runCli(["search", "--kind", "bogus"], { cwd: repo.dir });
+    expect(bogusKind.exitCode).toBe(EXIT.user);
+    expect(bogusKind.stderr).toContain("kind");
+  });
+
   it("exits usage when neither query nor filters are given", async () => {
     const bare = await runCli(["search"], { cwd: repo.dir });
     expect(bare.exitCode).toBe(EXIT.usage);
