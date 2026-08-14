@@ -190,9 +190,18 @@ const SNIPPET_MAX_TOKENS = 8;
  * matched (probe-verified) — the mechanism that makes {@link TASK_BRANCH_SQL}
  * safe to leave column-unscoped in its own `MATCH` while still snippeting the
  * one field that hit.
+ *
+ * The three marker constants are fixed module literals, not user input — but
+ * they still end up inside single-quoted SQL string literals, and this is
+ * otherwise the one value-in-SQL-literal site in the codebase that skips
+ * `enums.ts`'s `sqlEnum` idiom of doubling embedded quotes (security scan
+ * LOW). None of the three markers contains a quote today; doubling them
+ * anyway costs nothing and means a future marker change can't silently
+ * reopen this.
  */
 function snippetSql(table: string): string {
-  return `snippet(${table}, -1, '${SNIPPET_MARK_START}', '${SNIPPET_MARK_END}', '${SNIPPET_ELLIPSIS}', ${SNIPPET_MAX_TOKENS})`;
+  const quoteLiteral = (marker: string): string => marker.replaceAll("'", "''");
+  return `snippet(${table}, -1, '${quoteLiteral(SNIPPET_MARK_START)}', '${quoteLiteral(SNIPPET_MARK_END)}', '${quoteLiteral(SNIPPET_ELLIPSIS)}', ${SNIPPET_MAX_TOKENS})`;
 }
 
 /** Every branch below shares this column shape, in this order — the `UNION ALL`'s implicit contract. */

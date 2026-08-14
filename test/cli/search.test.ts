@@ -108,6 +108,15 @@ describe("katra search", () => {
     expect(hostile.stdout).not.toContain(ESC);
     expect(hostile.stdout).not.toContain(BIDI);
     expect(hostile.stdout).toContain("gibberish123");
+
+    // The echo is clamped like every other rendered field (security scan
+    // LOW): an unbounded query pasted in would otherwise print as one
+    // unbroken line the same length as the paste.
+    const longQuery = "z".repeat(500);
+    const long = await runCli(["search", longQuery], { cwd: repo.dir });
+    expect(long.exitCode).toBe(EXIT.ok);
+    expect(long.stdout.length).toBeLessThan(100);
+    expect(long.stdout).toContain("…");
   });
 
   it("bounds a giant single-token note body to a fixed-width snippet line", async () => {

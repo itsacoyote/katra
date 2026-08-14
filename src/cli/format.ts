@@ -889,7 +889,15 @@ export function formatSearch(result: SearchResult): string {
     // (`SearchResult.query`'s docs), but an empty echo for a genuine
     // filter-only search would read as "no matches for nothing" — so a blank
     // query gets the same plain phrasing `formatTaskList` uses instead.
-    return result.query === "" ? "no matches" : `no matches for ${oneLine(result.query)}`;
+    //
+    // The non-empty echo is clamped like every other rendered field in this
+    // file (security scan LOW): the query is stored, untrusted input with no
+    // length bound of its own, and every sibling render already caps what it
+    // prints — an unclamped echo here was the one place that bound was
+    // missing.
+    return result.query === ""
+      ? "no matches"
+      : `no matches for ${clamp(oneLine(result.query), TITLE_WIDTH)}`;
   }
 
   const width = (pick: (hit: SearchResult["hits"][number]) => string): number =>
