@@ -280,6 +280,21 @@ function describeEvent(event: LoggedEvent): string {
 const TITLE_WIDTH = 44;
 
 /**
+ * How much room `search`'s snippet line gets before it is cut.
+ *
+ * Wider than {@link TITLE_WIDTH} on purpose — the snippet owns its own
+ * indented line, not a shared row, so it can afford more room than a column
+ * squeezed between an id and a lane. It still needs a bound: FTS5's
+ * `snippet()` caps its excerpt at {@link SNIPPET_MAX_TOKENS} *tokens*
+ * (`search.ts`), not characters, and a single token has no length limit of
+ * its own — a note body that is one 800,000-character run with no whitespace
+ * (probe-verified) produces a "snippet" of the same length, unclamped. This
+ * is the render-side bound that stops that from reaching a terminal as one
+ * unbroken line; `--json` still carries `snippet` verbatim.
+ */
+const SNIPPET_WIDTH = 200;
+
+/**
  * Cuts a title to `width`, marking the cut with an ellipsis.
  *
  * Measured in code points, via `capText`, not in UTF-16 code units. The
@@ -340,6 +355,14 @@ export function padTo(text: string, width: number): string {
 }
 
 /**
+ * The bound-cut-it-short line every `--limit`-bounded read shares:
+ * `formatEventLog`, `formatSearch`, `formatRecent` and `formatStale` all
+ * over-fetch by one and report the cut the identical way. One spelling
+ * rather than four near-identical literals drifting from each other.
+ */
+const RAISE_LIMIT_LINE = "  … more; raise --limit to see further back";
+
+/**
  * The event stream, newest first, one physical line per event.
  *
  * The actor column appears only when the log holds more than one — in a
@@ -351,7 +374,7 @@ export function formatEventLog(events: readonly LoggedEvent[], truncated: boolea
   // total — reporting "nothing has happened yet" there would be a claim of
   // completeness in exactly the case the flag exists to prevent.
   if (events.length === 0) {
-    return truncated ? "  … more; raise --limit to see further back" : "nothing has happened yet";
+    return truncated ? RAISE_LIMIT_LINE : "nothing has happened yet";
   }
 
   const width = (pick: (event: LoggedEvent) => string): number => columnWidth(events, pick);
@@ -394,7 +417,7 @@ export function formatEventLog(events: readonly LoggedEvent[], truncated: boolea
 
   // A bound that cannot report itself is indistinguishable from the end of the
   // history — and this is the read a session digest is built on.
-  return truncated ? `${rows}\n  … more; raise --limit to see further back` : rows;
+  return truncated ? `${rows}\n${RAISE_LIMIT_LINE}` : rows;
 }
 
 /**
@@ -812,15 +835,6 @@ export function formatBoard(board: BoardResult, now: string = nowIso()): string 
 }
 
 /**
- * The bound-cut-it-short line `search`/`recent`/`stale` share — the same
- * wording `formatEventLog` already uses for the identical shape (an
- * over-fetched, `--limit`-bounded read). One spelling rather than three
- * near-identical literals, since all three formatters below are new in this
- * change and would otherwise drift from each other before they ever ship.
- */
-const RAISE_LIMIT_LINE = "  … more; raise --limit to see further back";
-
-/**
  * `search`'s results: one aligned row per hit, an indented sanitized snippet
  * line beneath it when there is one to show.
  *
@@ -828,11 +842,17 @@ const RAISE_LIMIT_LINE = "  … more; raise --limit to see further back";
  * `epic`, `formatTaskList`'s own convention for a hit at that level) — plus
  * the clamped title. `snippet` is FTS5's raw output (`search.ts`'s docs: not
  * sanitized until render), so it goes through {@link oneLine} here exactly
- * like every other stored-text surface in this file; `--json` carries it
- * verbatim. The note-match marker is prefixed to the snippet line rather than
- * the row above it, because the row's own columns describe the *task*, and
- * "this hit came from a note, not the task's own text" is a fact about the
- * snippet, not the task.
+ * like every other stored-text surface in this file, then {@link clamp} to
+ * {@link SNIPPET_WIDTH} — FTS5 bounds its excerpt by token count, not
+ * character count, so one pathological token can otherwise produce an
+ * unbounded line ({@link SNIPPET_WIDTH}'s docs). `--json` carries `snippet`
+ * verbatim regardless. The note-match marker is prefixed to the snippet line
+ * rather than the row above it, because the row's own columns describe the
+ * *task*, and "this hit came from a note, not the task's own text" is a fact
+ * about the snippet, not the task — and, like the marker text `snippet()`
+ * itself embeds, this prefix is display-best-effort only: see `SearchHit`'s
+ * `snippet` field docs (contract.ts) for why `matchedIn` is the field a
+ * consumer should actually trust.
  *
  * An id-only match or a filter-only-path hit carries no snippet at all
  * (`SearchHit`'s docs) — those rows print with no second line.
@@ -862,7 +882,7 @@ export function formatSearch(result: SearchResult): string {
 
     if (hit.snippet === null) return [header];
     const provenance = hit.matchedIn === "note" ? "note match — " : "";
-    return [header, `    ${provenance}${oneLine(hit.snippet)}`];
+    return [header, `    ${provenance}${clamp(oneLine(hit.snippet), SNIPPET_WIDTH)}`];
   });
 
   return result.truncated ? [...rows, RAISE_LIMIT_LINE].join("\n") : rows.join("\n");

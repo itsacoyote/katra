@@ -81,6 +81,47 @@ describe("katra search", () => {
       await runCli(["search", "!!!", "--json"], { cwd: repo.dir })
     ).json() as SearchResult;
     expect(document.hits).toEqual([]);
+
+    // The query itself is stored, untrusted input, and the "no matches for
+    // <query>" line echoes it straight back — that echo has to go through
+    // the same oneLine discipline as every other rendered field, not just
+    // titles and snippets.
+    const ESC = String.fromCharCode(0x1b);
+    const BIDI = String.fromCharCode(0x202e);
+    const hostileQuery = `${ESC}[31m${BIDI}gibberish123`;
+
+    const hostile = await runCli(["search", hostileQuery], { cwd: repo.dir });
+    expect(hostile.exitCode).toBe(EXIT.ok);
+    expect(hostile.stdout).toContain("no matches for");
+    expect(hostile.stdout).not.toContain(ESC);
+    expect(hostile.stdout).not.toContain(BIDI);
+    expect(hostile.stdout).toContain("gibberish123");
+  });
+
+  it("bounds a giant single-token note body to a fixed-width snippet line", async () => {
+    // FTS5's own excerpt cap (`SNIPPET_MAX_TOKENS`, search.ts) is by token
+    // count, not character count — a note body that is one unbroken run of
+    // word characters is still "one token", so `snippet()` returns the whole
+    // thing verbatim (probe-verified: a 2000-character single token comes
+    // back as a 2010-character snippet, brackets included).
+    const task = await add(["a task with a giant note"]);
+    await note(task, `zephyrus${"x".repeat(2000)}`);
+
+    const text = await runCli(["search", "zephyrus"], { cwd: repo.dir });
+
+    expect(text.exitCode).toBe(EXIT.ok);
+    const snippetLine = text.stdout.split("\n").find((line) => line.includes("note match —"));
+    expect(snippetLine).toBeDefined();
+    expect(snippetLine?.length).toBeLessThan(250);
+    expect(snippetLine).toContain("…");
+    expect(snippetLine).toContain("zephyrus");
+
+    const document = (
+      await runCli(["search", "zephyrus", "--json"], { cwd: repo.dir })
+    ).json() as SearchResult;
+    const hit = document.hits.find((candidate) => candidate.id === task);
+    // --json stays verbatim — the clamp is a render concern only.
+    expect(hit?.snippet?.length).toBeGreaterThan(1000);
   });
 
   it("sanitizes hostile stored titles and snippets in search output", async () => {

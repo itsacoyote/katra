@@ -513,6 +513,18 @@ export interface SearchHit extends ActivityHit {
    * verbatim per policy; the markers are display-best-effort and can collide
    * with identical literal characters already in the stored text, so they
    * carry no structural meaning a consumer should parse.
+   *
+   * The same holds for the CLI's own text-mode addition on top of this
+   * field: `formatSearch` (`cli/format.ts`) prefixes a note hit's rendered
+   * snippet line with a literal `note match — ` marker. Stored text — a
+   * title, a description, a note body — is exactly as free to *start with*
+   * that same literal as it is to contain `snippet()`'s own `[`/`]`
+   * brackets, so the prefix is display-best-effort too, not a signal a
+   * consumer can trust to distinguish a real note hit from a task hit whose
+   * stored text happens to spoof it. `matchedIn` below is the actual,
+   * structured answer to "did this come from a note or the task itself" —
+   * it is derived from which branch of the query matched, never from parsing
+   * rendered text, and it is what a caller should read instead.
    */
   readonly snippet: string | null;
   /**
