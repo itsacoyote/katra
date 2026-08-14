@@ -527,7 +527,11 @@ export interface SearchHit extends ActivityHit {
   /**
    * Where the winning row's text lived — spec req 3's provenance marker,
    * nothing more. `"task"` for a title/description hit and for an id-only
-   * match; `"note"` only when the winning row came from a note body.
+   * match; `"note"` only when the winning row came from a note body. Also
+   * `"task"` on the filter-only path, where nothing actually matched by text
+   * or id at all — the value has no provenance to report there, and `"task"`
+   * is the same default an id-only match already uses rather than a third,
+   * unions-widening state.
    */
   readonly matchedIn: "task" | "note";
   /** True when this entity matched the id-fragment branch — see this interface's docs. */
@@ -536,7 +540,16 @@ export interface SearchHit extends ActivityHit {
 
 /** What `search` prints. */
 export interface SearchResult {
-  /** The query text as given, echoed so a caller need not thread it through separately. Empty for a filter-only search. */
+  /**
+   * Echoed as given; empty when no query was supplied.
+   *
+   * A caller need not thread the query text through separately to know what
+   * produced these hits. A whitespace-only query still routes to the
+   * filter-only path (`search.ts`'s `readSearch`: `matchExpression` returns
+   * `null` for it, the one input FTS5's `MATCH` throws on) but is echoed
+   * verbatim here regardless — this field reports what was *asked*, not
+   * which path answered it.
+   */
   readonly query: string;
   readonly hits: readonly SearchHit[];
   readonly truncated: boolean;

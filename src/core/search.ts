@@ -130,20 +130,20 @@
  * rollup query together.
  */
 
-import { activityJoin, DEFAULT_ACTIVITY_LIMIT } from "./activity.js";
+import {
+  ACTIVITY_COLUMNS,
+  type ActivityRow,
+  activityCutoff,
+  activityJoin,
+  DEFAULT_ACTIVITY_LIMIT,
+  rowToHit,
+} from "./activity.js";
 import type { SearchHit, SearchResult } from "./contract.js";
 import { readTx } from "./db/connection.js";
 import type { Kind, Lane, Level } from "./enums.js";
 import { KatraException } from "./errors.js";
 import { ID_PREFIX } from "./id-format.js";
-import {
-  narrowKind,
-  narrowLane,
-  narrowLevel,
-  narrowNullableText,
-  narrowPriority,
-  narrowText,
-} from "./narrow.js";
+import { narrowNullableText } from "./narrow.js";
 import { idFragment, matchExpression } from "./search-query.js";
 import type { OpenStore } from "./store.js";
 import { requireEpicId } from "./tasks/repo.js";
@@ -213,10 +213,6 @@ const NOTE_BRANCH_SQL = `SELECT n.task_id AS entity_id, 1 AS tier, bm25(notes_ft
     JOIN notes n ON n.rowid = notes_fts.rowid
    WHERE notes_fts MATCH ?`;
 
-/** The `SELECT` list both paths' final query shares — {@link SearchRow}'s exact column names. */
-const OUTPUT_COLUMNS = `t.id AS id, t.title AS title, t.level AS level, t.lane AS lane,
-       t.kind AS kind, t.priority AS priority, t.parent_id AS epic_id, a.last_activity AS last_activity`;
-
 /**
  * A list of `AND`-joinable SQL conditions and the parameters they bind, in
  * text order.
@@ -259,31 +255,31 @@ function buildFilterConditions(store: OpenStore, options: SearchOptions): Filter
     sql.push("EXISTS (SELECT 1 FROM tags g WHERE g.task_id = t.id AND g.tag = ?)");
     params.push(options.tag);
   }
-  // parseWhen's pinned boundary (clock.ts): strictly before/after, `<`/`>`,
-  // never `<=`/`>=` — an activity landing exactly on the cutoff is outside
-  // both windows, not inside either.
+  // activityCutoff's pinned boundary (activity.ts, mirroring clock.ts's
+  // parseWhen): strictly before/after, `<`/`>`, never `<=`/`>=` — an
+  // activity landing exactly on the cutoff is outside both windows, not
+  // inside either. Reused rather than duplicated inline, so `--updated-after`
+  // isn't a third hand-written spelling of the same boundary rule.
   if (options.updatedBefore !== undefined) {
-    sql.push("a.last_activity < ?");
-    params.push(options.updatedBefore);
+    const cutoff = activityCutoff(options.updatedBefore, "before");
+    sql.push(cutoff.sql);
+    params.push(...cutoff.params);
   }
   if (options.updatedAfter !== undefined) {
-    sql.push("a.last_activity > ?");
-    params.push(options.updatedAfter);
+    const cutoff = activityCutoff(options.updatedAfter, "after");
+    sql.push(cutoff.sql);
+    params.push(...cutoff.params);
   }
 
   return { sql, params };
 }
 
-/** The raw shape both paths' final query returns — {@link OUTPUT_COLUMNS} plus each path's hit-specific columns. */
-interface SearchRow {
-  readonly id: unknown;
-  readonly title: unknown;
-  readonly level: unknown;
-  readonly lane: unknown;
-  readonly kind: unknown;
-  readonly priority: unknown;
-  readonly epic_id: unknown;
-  readonly last_activity: unknown;
+/**
+ * The raw shape both paths' final query returns — `activity.ts`'s
+ * {@link ActivityRow} (the seven columns {@link ACTIVITY_COLUMNS} selects)
+ * plus this module's own hit-specific columns.
+ */
+interface SearchRow extends ActivityRow {
   readonly snippet: unknown;
   readonly score: unknown;
   readonly matched_in: unknown;
@@ -320,17 +316,17 @@ function narrowNullableScore(value: unknown): number | null {
   return invalidColumn("score", value);
 }
 
-/** Maps one row into a domain object, narrowing every column — `activity.ts`'s `rowToHit`, extended with the hit-specific fields. */
+/**
+ * Maps one row into a domain object.
+ *
+ * Reuses `activity.ts`'s {@link rowToHit} for the seven fields `SearchHit`
+ * shares with `ActivityHit` — id, title, level, lane, kind, priority, epicId,
+ * lastActivity — rather than restating their narrowing a second time, and
+ * narrows only this module's own four additions on top.
+ */
 function rowToSearchHit(row: SearchRow): SearchHit {
   return {
-    id: narrowText(row.id, "id"),
-    title: narrowText(row.title, "title"),
-    level: narrowLevel(row.level),
-    lane: narrowLane(row.lane),
-    kind: narrowKind(row.kind),
-    priority: narrowPriority(row.priority),
-    epicId: narrowNullableText(row.epic_id, "epic_id"),
-    lastActivity: narrowNullableText(row.last_activity, "last_activity"),
+    ...rowToHit(row),
     snippet: narrowNullableText(row.snippet, "snippet"),
     score: narrowNullableScore(row.score),
     matchedIn: narrowMatchedIn(row.matched_in),
@@ -385,7 +381,7 @@ ranked AS (
          ROW_NUMBER() OVER (PARTITION BY entity_id ORDER BY tier, score, src_rowid) AS rn
     FROM matches
 )
-SELECT ${OUTPUT_COLUMNS},
+SELECT ${ACTIVITY_COLUMNS},
        r.snippet AS snippet, r.score AS score, r.matched_in AS matched_in, r.id_match_any AS id_match
   FROM ranked r
   JOIN tasks t ON t.id = r.entity_id
@@ -420,7 +416,7 @@ function filterPathRows(store: OpenStore, filters: FilterConditions, limit: numb
   const where = filters.sql.length === 0 ? "" : `WHERE ${filters.sql.join(" AND ")}`;
 
   const sql = `
-    SELECT ${OUTPUT_COLUMNS},
+    SELECT ${ACTIVITY_COLUMNS},
            NULL AS snippet, NULL AS score, 'task' AS matched_in, 0 AS id_match
       FROM tasks t
       ${join.sql}

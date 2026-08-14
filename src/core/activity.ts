@@ -83,10 +83,19 @@ export function activityJoin({ outer }: { outer: boolean }): Conditions {
 }
 
 /**
- * "Strictly older than `cutoff`", against {@link activityJoin}'s
- * `a.last_activity` — T2's pinned boundary semantics applied at the read
- * layer: the boundary instant itself is not stale, only what comes strictly
- * before it.
+ * "Strictly older than" or "strictly newer than" `cutoff`, against
+ * {@link activityJoin}'s `a.last_activity` — T2's pinned boundary semantics
+ * applied at the read layer: the boundary instant itself belongs to
+ * *neither* window, only what comes strictly before or strictly after it
+ * does (`clock.ts`'s `parseWhen`: "Callers compare with `<`, never `<=`" —
+ * mirrored here as `>`, never `>=`, for the `"after"` direction, so an
+ * activity landing exactly on the cutoff is outside both, not inside
+ * either).
+ *
+ * `direction` defaults to `"before"` — every caller until search's
+ * `--updated-after` (T5) only ever needed that side, so widening this rather
+ * than adding a second, near-identical function gives the mirrored `>` form
+ * an owner instead of a third spelling of the same boundary rule.
  *
  * `cutoff` arrives already in katra's canonical timestamp format. Nothing
  * here parses it — T2's `parseWhen`/`narrowWhen` are the CLI-facing parser;
@@ -99,15 +108,23 @@ export function activityJoin({ outer }: { outer: boolean }): Conditions {
  * `cutoff` has to sit at the matching position in the final params array —
  * the positional-binding trap `board.ts`'s `section` documents.
  */
-export function activityCutoff(cutoff: string): Conditions {
-  return { sql: "a.last_activity < ?", params: [cutoff] };
+export function activityCutoff(
+  cutoff: string,
+  direction: "before" | "after" = "before",
+): Conditions {
+  return { sql: `a.last_activity ${direction === "before" ? "<" : ">"} ?`, params: [cutoff] };
 }
 
 /** How many rows a read returns when the caller does not say. */
 export const DEFAULT_ACTIVITY_LIMIT = 20;
 
-/** The raw shape SQLite hands back for an activity row. */
-interface ActivityRow {
+/**
+ * The raw shape SQLite hands back for an activity row — exported so
+ * `search.ts` (T5) can extend it with its own hit-specific columns
+ * (`SearchRow extends ActivityRow`) rather than re-declaring the same seven
+ * field names a second time.
+ */
+export interface ActivityRow {
   readonly id: unknown;
   readonly title: unknown;
   readonly level: unknown;
@@ -118,8 +135,15 @@ interface ActivityRow {
   readonly last_activity: unknown;
 }
 
-/** Maps one row into a domain object, narrowing every column. */
-function rowToHit(row: ActivityRow): ActivityHit {
+/**
+ * Maps one row into a domain object, narrowing every column.
+ *
+ * Exported for the same reason as {@link ActivityRow}: `search.ts`'s
+ * `SearchHit` extends `ActivityHit`, and its own row-mapper spreads this
+ * function's result rather than re-narrowing the seven fields the two
+ * shapes share.
+ */
+export function rowToHit(row: ActivityRow): ActivityHit {
   return {
     id: narrowText(row.id, "id"),
     title: narrowText(row.title, "title"),
@@ -132,8 +156,13 @@ function rowToHit(row: ActivityRow): ActivityHit {
   };
 }
 
-/** The `SELECT` list every read in this module shares. */
-const ACTIVITY_COLUMNS = `t.id AS id, t.title AS title, t.level AS level, t.lane AS lane,
+/**
+ * The `SELECT` list every read in this module shares — exported so
+ * `search.ts` (T5) composes its own `SELECT` from the identical column list
+ * plus its hit-specific columns, rather than a second, easily-drifting copy
+ * of these exact seven aliases.
+ */
+export const ACTIVITY_COLUMNS = `t.id AS id, t.title AS title, t.level AS level, t.lane AS lane,
        t.kind AS kind, t.priority AS priority, t.parent_id AS epic_id,
        a.last_activity AS last_activity`;
 

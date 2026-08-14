@@ -30,6 +30,9 @@ describe("the text path — rollup and tiers", () => {
     const descriptionHit = readSearch(fixture.store, { query: "zephyrus" });
     expect(idsOf(descriptionHit.hits)).toEqual([byDescription]);
     expect(descriptionHit.hits[0]?.matchedIn).toBe("task");
+    // Pins the auto-column selection (colIndex -1): the match is only in
+    // description, and the snippet must come from that column, not title.
+    expect(descriptionHit.hits[0]?.snippet).toBe("a lone [zephyrus] mention");
 
     const noteHit = readSearch(fixture.store, { query: "quokka" });
     expect(idsOf(noteHit.hits)).toEqual([byNote]);
@@ -90,6 +93,27 @@ describe("the text path — rollup and tiers", () => {
     expect(result.hits[0]?.snippet?.length).toBeGreaterThan(0);
   });
 
+  it("orders same-tier hits best-bm25-first", () => {
+    // Same tier (both tasks_fts/tier 0) so the tiebreak under test is
+    // score ASC, not tier ASC: a short, dense title scores better (more
+    // negative) than a long, padded one with the same single occurrence.
+    const dense = seedTask(fixture.store, { title: "kraken", description: "" });
+    const padded = seedTask(fixture.store, {
+      title:
+        "a very long padded title that mentions kraken only once among a lot of extra words to dilute the relevance score significantly",
+      description: "",
+    });
+
+    const result = readSearch(fixture.store, { query: "kraken" });
+
+    expect(idsOf(result.hits)).toEqual([dense, padded]);
+    const denseHit = result.hits.find((h) => h.id === dense);
+    const paddedHit = result.hits.find((h) => h.id === padded);
+    // bm25 is more-negative-is-better; ASC ordering means the better
+    // (smaller/more negative) score sorts first.
+    expect(denseHit?.score).toBeLessThan(paddedHit?.score as number);
+  });
+
   it("finds a task whose terms are split across title and description", () => {
     // The recall case that kills a column-scoped MATCH design: "auth" lives
     // only in the title, "migration" only in the description, and the query
@@ -133,10 +157,51 @@ describe("the text path — rollup and tiers", () => {
     const result = readSearch(fixture.store, { query: "gadget" });
     const hits = result.hits.filter((h) => h.id === task);
     expect(hits).toHaveLength(1);
-    // The earlier-inserted (smaller rowid) note wins the tie — the pinned
-    // `src_rowid` tiebreak, not insertion order by coincidence.
+    // The earlier-inserted (smaller rowid) note wins the tie. This *alone*
+    // does not distinguish "the pinned `src_rowid` tiebreak decided it" from
+    // "SQLite's scan just happened to visit rows in insertion order and
+    // nothing broke the tie at all" — with only two rows and no `ORDER BY`
+    // forcing a different visitation order, both explanations predict the
+    // same observed winner, and a behavioral assertion here cannot tell them
+    // apart (confirmed directly: dropping the `src_rowid` term from the
+    // partition `ORDER BY` still passed this assertion, unchanged, across
+    // repeated runs). The structural assertion below is what actually pins
+    // the tiebreak; this one only pins the (correct, but weaker) outcome.
     expect(hits[0]?.snippet).toContain("one");
     expect(hits[0]?.snippet).not.toContain("four");
+  });
+
+  it("pins the rollup's ORDER BY clauses structurally, not just their observed outcome", () => {
+    // Per the note above: no fixture can behaviorally distinguish "ranked by
+    // src_rowid" from "coincidentally matches scan order" under this schema
+    // — reversing the tiebreak direction (src_rowid DESC) does falsify the
+    // behavioral test above, but simply *dropping* the term does not, so a
+    // silent removal of the tiebreak term is not guaranteed to be caught by
+    // any observable-output test. This test instead pins the exact SQL text
+    // the rollup issues, following the same prepare-spy idiom the
+    // FTS-elimination test above uses to inspect the real, generated
+    // statement rather than a hand-maintained copy of it.
+    seedTask(fixture.store, { title: "structural pin seed" });
+
+    const spy = vi.spyOn(Database.prototype, "prepare");
+    let textPathCall: unknown[] | undefined;
+    try {
+      readSearch(fixture.store, { query: "seed" });
+      textPathCall = spy.mock.calls.find(
+        (call) => typeof call[0] === "string" && call[0].includes("WITH matches"),
+      );
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(
+      textPathCall,
+      "expected the text-path rollup SELECT to have been prepared",
+    ).toBeDefined();
+    const sql = textPathCall?.[0] as string;
+
+    expect(sql).toContain("ORDER BY tier, score, src_rowid) AS rn");
+    expect(sql).toContain("ORDER BY r.id_match_any DESC, r.tier ASC, r.score ASC, r.src_rowid ASC");
   });
 
   it("ranks a task's own description hit above another task's note-only hit and reports task, not note", () => {
@@ -204,6 +269,40 @@ describe("the id-fragment branch", () => {
     // id-only row carries none.
     expect(hit?.snippet).not.toBeNull();
     expect(hit?.matchedIn).toBe("task");
+  });
+
+  it("ranks a dual id-and-text match above a text-only competitor even when the dual's own text score is worse", () => {
+    // The outer-ORDER-BY regression case, distinct from the any-row-property
+    // test above: it is not enough for `idMatch` to *report* true on the
+    // winning row — the id_match_any DESC term the outer ORDER BY reads has
+    // to actually be what decides the ranking. Rig it so the naive
+    // alternative (ordering by the winning row's own, per-row `id_match`
+    // instead of the any-row aggregate) would get this wrong: `dual`'s own
+    // text hit is deliberately the *weaker* bm25 score of the two, so if
+    // ranking fell through to tier/score because both rows' raw `id_match`
+    // tied at 0, `textOnly` (the better bm25) would sort first — the wrong
+    // order.
+    const dual = seedTask(fixture.store, {
+      id: "kt-7mnopq",
+      title:
+        "an extremely long padded title with the word 7mnopq appearing only once among many many words to dilute relevance score significantly for this test case",
+    });
+    const textOnly = seedTask(fixture.store, { title: "7mnopqzz" });
+
+    const result = readSearch(fixture.store, { query: "7mnopq" });
+
+    const dualHit = result.hits.find((h) => h.id === dual);
+    const textOnlyHit = result.hits.find((h) => h.id === textOnly);
+    expect(dualHit).toBeDefined();
+    expect(textOnlyHit).toBeDefined();
+    // Confirm the rigged precondition rather than assuming it: dual's own
+    // text-branch score really is worse (less negative) than the
+    // competitor's, so the assertion below is not accidentally vacuous.
+    expect(dualHit?.score).toBeGreaterThan(textOnlyHit?.score as number);
+
+    expect(idsOf(result.hits)).toEqual([dual, textOnly]);
+    expect(dualHit?.idMatch).toBe(true);
+    expect(textOnlyHit?.idMatch).toBe(false);
   });
 });
 
@@ -330,6 +429,21 @@ describe("filters compose onto both paths", () => {
     });
     expectNarrows(fixture.store, { level: "epic" }, epicHit, match, "griffin");
     expectNarrows(fixture.store, { level: "task" }, match, epicHit, "griffin");
+  });
+
+  it("puts an activity exactly on the cutoff outside both updatedBefore and updatedAfter windows", () => {
+    // activityCutoff's pinned boundary (activity.ts, mirroring clock.ts's
+    // parseWhen): strictly before/after, never inclusive. An activity
+    // landing exactly on the cutoff instant belongs to neither window.
+    const cutoff = seedTime(5000);
+    const boundary = seedTask(fixture.store, { title: "boundary task" });
+    seedEvent(fixture.store, { entityId: boundary, createdAt: cutoff });
+
+    const before = readSearch(fixture.store, { updatedBefore: cutoff });
+    const after = readSearch(fixture.store, { updatedAfter: cutoff });
+
+    expect(idsOf(before.hits)).not.toContain(boundary);
+    expect(idsOf(after.hits)).not.toContain(boundary);
   });
 });
 
