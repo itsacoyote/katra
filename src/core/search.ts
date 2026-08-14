@@ -452,10 +452,16 @@ export function readSearch(store: OpenStore, options: SearchOptions = {}): Searc
     let rows: SearchRow[];
     if (query !== undefined) {
       const expr = matchExpression(query);
+      // idFragment gets the trimmed query: matchExpression already splits on
+      // whitespace, so a padded query builds the same MATCH expression
+      // either way, but idFragment tests the WHOLE string against BASE36 in
+      // one shot — an untrimmed trailing space ("kt-9x ") fails that test
+      // outright and silently drops the id branch a bare "kt-9x" would have
+      // gotten.
       rows =
         expr === null
           ? filterPathRows(store, filters, limit)
-          : textPathRows(store, expr, idFragment(query), filters, limit);
+          : textPathRows(store, expr, idFragment(query.trim()), filters, limit);
     } else {
       rows = filterPathRows(store, filters, limit);
     }

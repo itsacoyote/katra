@@ -135,10 +135,22 @@ export function matchExpression(text: string): string | null {
  * lookup, not a validation of a real, existing id.
  *
  * Strips a leading `kt-` if present, then requires every remaining character
- * to be in {@link BASE36} and the remaining length to be at least
- * {@link MIN_PREFIX_LENGTH}. Case-sensitive throughout: `generateId` never
- * produces uppercase, so `9F` and `KT-9n` are not plausible fragments — they
- * classify as ordinary search text instead.
+ * to be in {@link BASE36} and the remaining length to be at least a minimum
+ * that depends on whether the prefix was there: {@link MIN_PREFIX_LENGTH}
+ * with an explicit `kt-`, one character more without it (senior review
+ * MEDIUM). An explicit `kt-` is a declared intent — the caller typed the
+ * prefix on purpose, so `tasks/ids.ts`'s own floor is the right one to trust.
+ * Bare input carries no such signal, and at exactly
+ * {@link MIN_PREFIX_LENGTH} that costs recall for almost nothing: an
+ * ordinary two-letter word ("db", "to", "an", ...) is a base36 string too,
+ * and on a few-hundred-item base36 id space a plain two-letter search term
+ * routinely collides with some task's actual id prefix — hijacking rank
+ * position 1 with a snippet-less id-branch row instead of the text match the
+ * query actually meant. One more required character cuts that collision rate
+ * sharply while barely narrowing what a genuine bare fragment search can do.
+ * Case-sensitive throughout: `generateId` never produces uppercase, so `9F`
+ * and `KT-9n` are not plausible fragments — they classify as ordinary search
+ * text instead.
  *
  * Id lookup never goes through FTS5 MATCH: an id like `kt-9nfn9v` either
  * crashes bareword MATCH on the hyphen or, quoted, tokenizes into noise (the
@@ -152,8 +164,10 @@ export function matchExpression(text: string): string | null {
  * when `text` is not plausibly an id.
  */
 export function idFragment(text: string): string | null {
-  const stripped = text.startsWith(ID_PREFIX) ? text.slice(ID_PREFIX.length) : text;
-  if (stripped.length < MIN_PREFIX_LENGTH) return null;
+  const hasPrefix = text.startsWith(ID_PREFIX);
+  const stripped = hasPrefix ? text.slice(ID_PREFIX.length) : text;
+  const minLength = hasPrefix ? MIN_PREFIX_LENGTH : MIN_PREFIX_LENGTH + 1;
+  if (stripped.length < minLength) return null;
   if (!BASE36.test(stripped)) return null;
   return stripped;
 }

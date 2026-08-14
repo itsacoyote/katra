@@ -355,12 +355,25 @@ export function padTo(text: string, width: number): string {
 }
 
 /**
- * The bound-cut-it-short line every `--limit`-bounded read shares:
- * `formatEventLog`, `formatSearch`, `formatRecent` and `formatStale` all
+ * The bound-cut-it-short line the three chronological, `--limit`-bounded
+ * reads share: `formatEventLog`, `formatRecent` and `formatStale` all
  * over-fetch by one and report the cut the identical way. One spelling
- * rather than four near-identical literals drifting from each other.
+ * rather than three near-identical literals drifting from each other.
+ *
+ * `formatSearch` does **not** reuse this one — see
+ * {@link RAISE_SEARCH_LIMIT_LINE}.
  */
 const RAISE_LIMIT_LINE = "  … more; raise --limit to see further back";
+
+/**
+ * {@link RAISE_LIMIT_LINE}'s sibling for `formatSearch` alone (senior review
+ * MEDIUM). `RAISE_LIMIT_LINE`'s wording — "see further back" — is
+ * chronological: right for `log`/`recent`/`stale`, which all walk the event
+ * stream in time order and truncate a *time window*. `search`'s bound
+ * truncates a *relevance ranking* instead; there is no "further back" to see,
+ * only more matches outside the top `--limit`.
+ */
+const RAISE_SEARCH_LIMIT_LINE = "  … more; raise --limit to see more matches";
 
 /**
  * The event stream, newest first, one physical line per event.
@@ -838,6 +851,13 @@ export function formatBoard(board: BoardResult, now: string = nowIso()): string 
  * `search`'s results: one aligned row per hit, an indented sanitized snippet
  * line beneath it when there is one to show.
  *
+ * Empty has two readings, same shape as {@link formatRecent}/
+ * {@link formatStale}: a genuine zero-hit search reads "no matches" (or "no
+ * matches for `<query>`"), but `--limit 0` can cut a non-empty ranking down
+ * to zero rows, and that case reads {@link RAISE_SEARCH_LIMIT_LINE} instead
+ * — silence there would claim completeness in exactly the case the flag
+ * exists to prevent.
+ *
  * Columns mirror {@link formatTaskList} — id, priority, lane, kind (or
  * `epic`, `formatTaskList`'s own convention for a hit at that level) — plus
  * the clamped title. `snippet` is FTS5's raw output (`search.ts`'s docs: not
@@ -859,6 +879,12 @@ export function formatBoard(board: BoardResult, now: string = nowIso()): string 
  */
 export function formatSearch(result: SearchResult): string {
   if (result.hits.length === 0) {
+    // `--limit 0` can cut a genuinely non-empty ranking down to zero rows
+    // (req 11) — the same shape formatEventLog/formatRecent/formatStale
+    // already guard against, and search was the one place it went
+    // unguarded: "no matches" would be a false claim of completeness in
+    // exactly the case the flag exists to prevent (senior review MEDIUM).
+    if (result.truncated) return RAISE_SEARCH_LIMIT_LINE;
     // The query is echoed even when it routed through the filter-only path
     // (`SearchResult.query`'s docs), but an empty echo for a genuine
     // filter-only search would read as "no matches for nothing" — so a blank

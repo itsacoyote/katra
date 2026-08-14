@@ -231,15 +231,25 @@ describe("idFragment", () => {
     expect(idFragment("kt-9")).toBeNull();
     expect(MIN_PREFIX_LENGTH).toBeGreaterThan(1);
 
+    // The split minimum (senior review MEDIUM): an explicit kt- prefix is a
+    // declared intent and keeps MIN_PREFIX_LENGTH; bare input needs one
+    // character more, or an ordinary two-letter word ("db", "to", ...)
+    // classifies as a plausible id fragment and hijacks rank position 1 with
+    // a snippet-less row on an unrelated text search.
+    expect(idFragment("kt-9x")).toBe("9x");
+    expect(idFragment("db")).toBeNull();
+    expect(idFragment("9xs")).toBe("9xs");
+
     // Uppercase: generateId never produces it, so it is not a plausible
     // fragment — and the kt- prefix match itself is case-sensitive.
     expect(idFragment("9F")).toBeNull();
     expect(idFragment("KT-9n")).toBeNull();
 
     // base36 boundary characters: digits and letters at both ends accepted.
-    expect(idFragment("09")).toBe("09");
-    expect(idFragment("az")).toBe("az");
-    expect(idFragment("zz")).toBe("zz");
+    // Three-char bare fragments, since bare input needs MIN_PREFIX_LENGTH + 1.
+    expect(idFragment("090")).toBe("090");
+    expect(idFragment("aza")).toBe("aza");
+    expect(idFragment("zzz")).toBe("zzz");
 
     // Non-base36 characters anywhere in the fragment reject the whole thing.
     expect(idFragment("9n-f")).toBeNull();

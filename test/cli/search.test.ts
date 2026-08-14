@@ -59,6 +59,18 @@ describe("katra search", () => {
     expect(document.truncated).toBe(false);
   });
 
+  it("reports truncation, not a false 'no matches', when --limit 0 empties a non-empty search", async () => {
+    // recent.test.ts's own regression, mirrored: `--limit 0` cuts a
+    // genuinely non-empty ranking down to zero rows (req 11), and printing
+    // "no matches" there would be a false claim of completeness in exactly
+    // the case the flag exists to prevent (senior review MEDIUM).
+    await add(["zephyrus mentioned here"]);
+
+    const capped = await runCli(["search", "zephyrus", "--limit", "0"], { cwd: repo.dir });
+    expect(capped.stdout).toMatch(/raise --limit/);
+    expect(capped.stdout).not.toMatch(/no matches/);
+  });
+
   it("exits usage when neither query nor filters are given", async () => {
     const bare = await runCli(["search"], { cwd: repo.dir });
     expect(bare.exitCode).toBe(EXIT.usage);

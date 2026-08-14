@@ -250,6 +250,21 @@ describe("the id-fragment branch", () => {
     expect(result.hits.find((h) => h.id === textMatch)?.idMatch).toBe(false);
   });
 
+  it("still ranks the id hit first when the query is padded with whitespace", () => {
+    // idFragment tests the whole string against BASE36 in one shot, so an
+    // untrimmed trailing space fails that test outright — readSearch has to
+    // trim before classifying, or a padded query silently loses its id
+    // branch (senior review LOW).
+    const idMatch = seedTask(fixture.store, { id: "kt-9zzzzz", title: "unrelated title" });
+    const textMatch = seedTask(fixture.store, { title: "ticket 9zzzzzed renamed" });
+
+    const result = readSearch(fixture.store, { query: "9zzzzz " });
+
+    const ids = idsOf(result.hits);
+    expect(ids.indexOf(idMatch)).toBeLessThan(ids.indexOf(textMatch));
+    expect(result.hits.find((h) => h.id === idMatch)?.idMatch).toBe(true);
+  });
+
   it("keeps idMatch true for a task matching both by id and by text", () => {
     // The any-row-property regression case: this task matches BOTH the id
     // branch (its own id starts with the fragment) and the text branch (the
@@ -482,8 +497,8 @@ describe("hostile input and bounds", () => {
     "日本語 テスト",
     "mix 日本語 and text with a-hyphen",
     "col: value",
-    "auth mig",
-    " ",
+    "auth\u0000mig",
+    "\u0000",
     'auth "',
     "\ud800",
     "",
