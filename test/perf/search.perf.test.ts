@@ -70,6 +70,30 @@ const STAMP = "2026-01-01T00:00:00.000Z";
 const STALE_CUTOFF = "2026-06-01T00:00:00.000Z";
 const LANES = ["Defined", "Researching", "Planned", "In Progress", "In Review", "Done"];
 
+/**
+ * The id generators and the three raw prepared statements both seed
+ * functions below write through — identical in each, since both bypass
+ * `createTask`/`createNote` for the same reason `board.perf.test.ts`'s own
+ * `seedLargeStore` does (real writes at these row counts would measure the
+ * write path, not the read this file is about). Only each seed's loop body
+ * — the shape of what it writes, not the mechanics of writing it — differs.
+ */
+function preparedInserts(store: OpenStore) {
+  return {
+    taskId: (n: number): string => `kt-${n.toString(36).padStart(6, "0")}`,
+    noteId: (n: number): string => `nt-${n.toString(36).padStart(6, "0")}`,
+    task: store.db.prepare(
+      "INSERT INTO tasks (id,level,kind,title,description,lane,priority,created_at,updated_at,closed_at) VALUES (?,'task','feat',?,?,?,?,?,?,?)",
+    ),
+    note: store.db.prepare(
+      "INSERT INTO notes (id,task_id,kind,body,actor,created_at) VALUES (?,?,?,?,?,?)",
+    ),
+    event: store.db.prepare(
+      "INSERT INTO events (type,entity_id,actor,created_at) VALUES ('created',?,?,?)",
+    ),
+  };
+}
+
 // --- Run (a): the req-11 receipt --------------------------------------------
 
 const REAL_TASKS = 150;
@@ -86,17 +110,7 @@ function seedRealisticStore(): OpenStore {
   const { store } = openStore(repo.dir, { createIfMissing: true, actor: () => "perf @ /perf" });
   cleanups.push(() => store.close());
 
-  const taskId = (n: number): string => `kt-${n.toString(36).padStart(6, "0")}`;
-  const noteId = (n: number): string => `nt-${n.toString(36).padStart(6, "0")}`;
-  const task = store.db.prepare(
-    "INSERT INTO tasks (id,level,kind,title,description,lane,priority,created_at,updated_at,closed_at) VALUES (?,'task','feat',?,?,?,?,?,?,?)",
-  );
-  const note = store.db.prepare(
-    "INSERT INTO notes (id,task_id,kind,body,actor,created_at) VALUES (?,?,?,?,?,?)",
-  );
-  const event = store.db.prepare(
-    "INSERT INTO events (type,entity_id,actor,created_at) VALUES ('created',?,?,?)",
-  );
+  const { taskId, noteId, task, note, event } = preparedInserts(store);
 
   store.db.transaction(() => {
     for (let i = 0; i < REAL_TASKS; i++) {
@@ -155,17 +169,7 @@ function seedHostileStore(): OpenStore {
   const { store } = openStore(repo.dir, { createIfMissing: true, actor: () => "perf @ /perf" });
   cleanups.push(() => store.close());
 
-  const taskId = (n: number): string => `kt-${n.toString(36).padStart(6, "0")}`;
-  const noteId = (n: number): string => `nt-${n.toString(36).padStart(6, "0")}`;
-  const task = store.db.prepare(
-    "INSERT INTO tasks (id,level,kind,title,description,lane,priority,created_at,updated_at,closed_at) VALUES (?,'task','feat',?,?,?,?,?,?,?)",
-  );
-  const note = store.db.prepare(
-    "INSERT INTO notes (id,task_id,kind,body,actor,created_at) VALUES (?,?,?,?,?,?)",
-  );
-  const event = store.db.prepare(
-    "INSERT INTO events (type,entity_id,actor,created_at) VALUES ('created',?,?,?)",
-  );
+  const { taskId, noteId, task, note, event } = preparedInserts(store);
 
   store.db.transaction(() => {
     for (let i = 0; i < HOSTILE_TASKS; i++) {
