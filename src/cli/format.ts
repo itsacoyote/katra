@@ -911,7 +911,7 @@ export function formatSearch(result: SearchResult): string {
     return [header, `    ${provenance}${clamp(oneLine(hit.snippet), SNIPPET_WIDTH)}`];
   });
 
-  return result.truncated ? [...rows, RAISE_LIMIT_LINE].join("\n") : rows.join("\n");
+  return result.truncated ? [...rows, RAISE_SEARCH_LIMIT_LINE].join("\n") : rows.join("\n");
 }
 
 /**
