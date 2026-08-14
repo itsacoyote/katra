@@ -531,7 +531,7 @@ export interface SearchHit extends ActivityHit {
    * `"task"` on the filter-only path, where nothing actually matched by text
    * or id at all — the value has no provenance to report there, and `"task"`
    * is the same default an id-only match already uses rather than a third,
-   * unions-widening state.
+   * union-widening state.
    */
   readonly matchedIn: "task" | "note";
   /** True when this entity matched the id-fragment branch — see this interface's docs. */

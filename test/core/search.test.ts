@@ -200,8 +200,10 @@ describe("the text path — rollup and tiers", () => {
     ).toBeDefined();
     const sql = textPathCall?.[0] as string;
 
-    expect(sql).toContain("ORDER BY tier, score, src_rowid) AS rn");
-    expect(sql).toContain("ORDER BY r.id_match_any DESC, r.tier ASC, r.score ASC, r.src_rowid ASC");
+    expect(sql).toMatch(/ORDER\s+BY\s+tier,\s*score,\s*src_rowid\)\s*AS\s+rn/);
+    expect(sql).toMatch(
+      /ORDER\s+BY\s+r\.id_match_any\s+DESC,\s*r\.tier\s+ASC,\s*r\.score\s+ASC,\s*r\.src_rowid\s+ASC/,
+    );
   });
 
   it("ranks a task's own description hit above another task's note-only hit and reports task, not note", () => {
@@ -366,6 +368,12 @@ describe("the filter-only path", () => {
     }>;
     const detail = plan.map((row) => row.detail).join(" ");
     expect(detail).not.toMatch(/tasks_fts|notes_fts/);
+
+    // Structural pin, same reason as the rollup's own ORDER BY assertions
+    // below: the tie group here is event-less tasks (all sharing NULL
+    // last_event_id), so a behavioral fixture cannot distinguish "ordered by
+    // t.rowid" from "happened to visit rows in insertion order" either.
+    expect(sql).toMatch(/ORDER\s+BY\s+a\.last_event_id\s+DESC,\s*t\.rowid/);
   });
 });
 
