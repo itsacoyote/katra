@@ -127,10 +127,10 @@ describe("katra search", () => {
   it("sanitizes hostile stored titles and snippets in search output", async () => {
     // Built by codepoint — an invisible literal in test source is unreviewable
     // (board.test.ts's precedent).
-    const ESC = "";
+    const ESC = String.fromCharCode(0x1b);
     const ALM = String.fromCharCode(0x061c);
     const LS = String.fromCharCode(0x2028);
-    const BIDI = "‮";
+    const BIDI = String.fromCharCode(0x202e);
     const title = `zephyrus ${ESC}[31m${BIDI}${ALM}${LS}hostile`;
 
     const task = await add([title]);
