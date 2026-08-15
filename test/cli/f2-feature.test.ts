@@ -112,7 +112,7 @@ describe("migrating a v1 store under contention", () => {
     const setup = await runCli(["init"], { cwd: repo.dir });
     expect(setup.exitCode).toBe(EXIT.ok);
 
-    // Rewind to v1: drop what 0002, 0003 and 0004 added and reset the
+    // Rewind to v1: drop what 0002 through 0005 added and reset the
     // version, so the store is exactly what an installation from before this
     // feature has. The six FTS triggers and the two FTS5 virtual tables have
     // to go too, not just the ordinary tables: `init` already brought this
@@ -152,6 +152,8 @@ describe("migrating a v1 store under contention", () => {
     // from the concurrent block below, ~60s later.
     expect(tables).not.toContain("tasks_fts");
     expect(tables).not.toContain("notes_fts");
+    expect(tables).not.toContain("refs");
+    expect(tables).not.toContain("task_refs");
     rewind.close();
 
     const outcomes = await runConcurrent<{ version: number; created: boolean }>({

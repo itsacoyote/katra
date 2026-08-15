@@ -1200,7 +1200,9 @@ describe("migration 0005 — refs", () => {
   function freshV5(): DB {
     const db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
-    migrate(db, MIGRATIONS);
+    // Scoped even though 5 is currently the top: freshV2/V3/V4 each drifted
+    // silently when the next migration landed, and each earned a trap comment.
+    migrate(db, MIGRATIONS.slice(0, 5));
     return db;
   }
 
@@ -1249,9 +1251,18 @@ describe("migration 0005 — refs", () => {
     expect(MIGRATIONS[1]?.sql).toBe(v2Golden);
     expect(MIGRATIONS[2]?.sql).toBe(v3Golden);
 
-    const checkOf = (sql: string): string => sql.match(/type IN \(([^)]*)\)/)?.[1] ?? "";
-    expect(checkOf(v2Golden)).not.toBe("");
-    expect(checkOf(v2Golden)).toBe(checkOf(v3Golden));
+    // The convergence claim, asserted against live stores rather than the two
+    // fixtures (which render from the same array in the same process and so
+    // could never disagree): a v4 store upgraded through 0005 must hold the
+    // byte-identical events definition a fresh install gets.
+    const upgraded = v4Store();
+    migrate(upgraded, MIGRATIONS.slice(0, 5));
+    const eventsSqlOf = (db: DB): unknown =>
+      db.prepare("SELECT sql FROM sqlite_master WHERE name = 'events'").get();
+    const fresh = freshV5();
+    expect(eventsSqlOf(upgraded)).toEqual(eventsSqlOf(fresh));
+    upgraded.close();
+    fresh.close();
   });
 
   it("upgrades a v4 store preserving tasks, notes and events with literal ids", () => {
