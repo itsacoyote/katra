@@ -37,17 +37,17 @@
  * picks one, so a unique-key conflict here is never a signal to try again
  * with a different value, only a signal that the row already exists.
  *
- * `RefInput`/`RefResult` are declared here rather than in `refs/types.ts`
- * (out of scope for this task — write-fenced to `repo.ts` and its test) or
- * `contract.ts` (T5's file, not yet landed on this branch). Both `ParsedRef`
- * and `ExplicitRef` (`types.ts`) already satisfy `RefInput` structurally, so
- * neither caller needs a cast. T5 is expected to fold `RefResult` into
- * `contract.ts` alongside `LinkResult`; the shape here — `action:
- * "linked" | "already-linked" | "unlinked"`, `taskId`, `ref: Ref` — is written
- * to match what T5's task body already commits to, so that move should be a
- * re-export, not a redesign.
+ * `RefInput` is declared here rather than in `refs/types.ts` or `contract.ts`:
+ * it is this module's own internal input shape for `linkRef`/`linkRefWithin`,
+ * never published — `contract.ts` re-exports only what a `--json` document
+ * carries. `RefResult` **is** published, so it lives in `contract.ts`
+ * alongside `LinkResult` (F7 T5) and is imported back from there; the shape
+ * is unchanged from what this module declared before that move — `action:
+ * "linked" | "already-linked" | "unlinked"`, `taskId`, `ref: Ref` — so every
+ * caller here needed no change beyond the import.
  */
 
+import type { RefResult } from "../contract.js";
 import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
@@ -70,16 +70,6 @@ export interface RefInput {
   readonly provider: string;
   readonly externalId: string;
   readonly url: string | null;
-}
-
-/**
- * What `linkRef`/`unlinkRef` return. See the module doc for why this is
- * declared here rather than in `contract.ts`.
- */
-export interface RefResult {
-  readonly action: "linked" | "already-linked" | "unlinked";
-  readonly taskId: string;
-  readonly ref: Ref;
 }
 
 /** The raw shape SQLite hands back for a `refs` row. */

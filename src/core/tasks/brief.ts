@@ -26,6 +26,7 @@ import { LANES } from "../enums.js";
 import { listEvents } from "../events/repo.js";
 import type { NoteScope } from "../notes/repo.js";
 import { countNotesByKind, latestNoteInScope } from "../notes/repo.js";
+import { listRefs } from "../refs/repo.js";
 import type { OpenStore } from "../store.js";
 import { capText } from "../text.js";
 import { requireId } from "./ids.js";
@@ -220,6 +221,12 @@ export function briefEntity(
     // with a dependency is an ordinary thing the schema permits.
     blockers: detail.blockers,
     blocking: detail.blocking,
+    // `listRefs(store, id)` — this entity's own linked refs, never `scope`.
+    // `scope` widens to an epic's children on purpose, for notes/activity;
+    // refs deliberately do not follow it (see `BriefResult.refs`'s module
+    // docs in `contract.ts` for why a child's ref rolling up into its epic
+    // would be the wrong read).
+    refs: listRefs(store, id),
   };
 
   if (isEpic) {

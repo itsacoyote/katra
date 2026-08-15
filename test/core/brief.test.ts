@@ -339,6 +339,71 @@ describe("the two shapes are different, not nested", () => {
   });
 });
 
+describe("briefEntity's refs (F7 T5)", () => {
+  it("carries refs on the task arm", async () => {
+    const { linkRef } = await import("../../src/core/refs/repo.js");
+    const task = seedTask(fixture.store, { title: "a task" });
+    linkRef(fixture.store, task, {
+      provider: "github",
+      externalId: "owner/repo#12",
+      url: "https://github.com/owner/repo/pull/12",
+    });
+
+    const brief = briefEntity(fixture.store, task);
+
+    expect(brief.refs.map((ref) => ref.externalId)).toEqual(["owner/repo#12"]);
+  });
+
+  it("carries refs on the epic arm", async () => {
+    const { linkRef } = await import("../../src/core/refs/repo.js");
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    linkRef(fixture.store, epic, { provider: "linear", externalId: "ENG-451", url: null });
+
+    const brief = briefEntity(fixture.store, epic);
+
+    expect(brief.refs).toEqual([
+      {
+        provider: "linear",
+        externalId: "ENG-451",
+        url: null,
+        cachedStatus: null,
+        cachedTitle: null,
+        syncedAt: null,
+      },
+    ]);
+  });
+
+  it("shows an epic's own refs, not its children's (pin)", async () => {
+    // `handoff`/`noteCounts`/`activity` widen to an epic's whole subtree —
+    // refs deliberately do not. A ref pasted against a specific child PR is
+    // not the epic's, and rolling it up would make two children's refs
+    // indistinguishable on the epic's own summary.
+    const { linkRef } = await import("../../src/core/refs/repo.js");
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    const child = seedTask(fixture.store, { parentId: epic, title: "a child" });
+    linkRef(fixture.store, epic, {
+      provider: "github",
+      externalId: "owner/repo#1",
+      url: "https://github.com/owner/repo/pull/1",
+    });
+    linkRef(fixture.store, child, {
+      provider: "github",
+      externalId: "owner/repo#2",
+      url: "https://github.com/owner/repo/pull/2",
+    });
+
+    const brief = briefEntity(fixture.store, epic);
+
+    expect(brief.refs.map((ref) => ref.externalId)).toEqual(["owner/repo#1"]);
+  });
+
+  it("says refs: [] rather than omitting the field when none are linked", () => {
+    const task = seedTask(fixture.store);
+
+    expect(briefEntity(fixture.store, task).refs).toEqual([]);
+  });
+});
+
 describe("the notes line counts each handoff once", () => {
   it("does not say both '1 handoff' and '1 more handoff'", async () => {
     // The state a concurrent write produces: `briefEntity` reads the handoff
@@ -439,5 +504,63 @@ describe("viewTask's claim (F4)", () => {
 
     expect(viewTask(fixture.store, claimed).claim?.holder).toBe("/repo/wt-holder");
     expect(viewTask(fixture.store, unclaimed).claim).toBeNull();
+  });
+});
+
+describe("viewTask's refs (F7 T5)", () => {
+  it("carries refs with url null for a bare linear ref", async () => {
+    const { viewTask } = await import("../../src/core/tasks/view.js");
+    const { linkRef } = await import("../../src/core/refs/repo.js");
+    const task = seedTask(fixture.store, { title: "linear-linked" });
+    linkRef(fixture.store, task, { provider: "linear", externalId: "ENG-451", url: null });
+
+    const view = viewTask(fixture.store, task);
+
+    expect(view.refs).toEqual([
+      {
+        provider: "linear",
+        externalId: "ENG-451",
+        url: null,
+        cachedStatus: null,
+        cachedTitle: null,
+        syncedAt: null,
+      },
+    ]);
+  });
+
+  it("serializes refs: [] for a task with none linked", async () => {
+    const { viewTask } = await import("../../src/core/tasks/view.js");
+    const task = seedTask(fixture.store);
+
+    expect(viewTask(fixture.store, task).refs).toEqual([]);
+  });
+});
+
+describe("update's TaskDetail stays lean, unlike show's TaskView (F7 T5 pin)", () => {
+  it("does not carry refs on the object update returns", async () => {
+    // `showTaskWithin` (`tasks/repo.ts`) is what `update` returns from inside
+    // its write transaction, and `view.ts`'s own module docs say a ref lookup
+    // is exactly the extra query that path must not pay for content it never
+    // prints — the same reasoning that already keeps notes/activity/claim off
+    // TaskDetail. This is the negative half of that contract: show's TaskView
+    // carries the same task's refs at the same moment, so a regression that
+    // widened TaskDetail would only show up here, not in the viewTask tests
+    // above.
+    const { updateTask } = await import("../../src/core/tasks/update.js");
+    const { viewTask } = await import("../../src/core/tasks/view.js");
+    const { linkRef } = await import("../../src/core/refs/repo.js");
+    const task = seedTask(fixture.store, { title: "has a ref" });
+    linkRef(fixture.store, task, {
+      provider: "github",
+      externalId: "owner/repo#12",
+      url: "https://github.com/owner/repo/pull/12",
+    });
+
+    const updated = updateTask(fixture.store, task, { priority: 0 });
+
+    expect(Object.hasOwn(updated, "refs")).toBe(false);
+    // Not a coincidence of the fixture — the same task really does have a
+    // ref, visible through `show`.
+    expect(viewTask(fixture.store, task).refs).toHaveLength(1);
   });
 });

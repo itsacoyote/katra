@@ -51,6 +51,8 @@ export type {
   NextResult,
   NoteList,
   RecentResult,
+  Ref,
+  RefResult,
   SearchHit,
   SearchResult,
   StaleResult,
@@ -111,7 +113,8 @@ export {
 // The note model: what `note add` and `note list` print.
 export type { NewNote, Note, NoteFilters } from "./core/notes/types.js";
 // The task model. `add` prints a Task, `update` a TaskDetail, and `show` a
-// TaskView — the detail plus the notes and activity F2 added. Publishing only
-// the first two left `show --json` with no correct type to read it as.
+// TaskView — the detail plus the notes, activity (F2) and refs (F7) added.
+// Publishing only the first two left `show --json` with no correct type to
+// read it as.
 export type { Task, TaskDetail, TaskSummary, TaskView } from "./core/tasks/types.js";
 export { VERSION } from "./version.js";

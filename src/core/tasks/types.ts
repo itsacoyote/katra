@@ -14,6 +14,7 @@ import type { ClaimInfo } from "../claims/types.js";
 import type { Kind, Lane, Level, Priority } from "../enums.js";
 import type { LoggedEvent } from "../events/types.js";
 import type { Note } from "../notes/types.js";
+import type { Ref } from "../refs/types.js";
 
 /** A task or epic, as stored. */
 export interface Task {
@@ -124,6 +125,20 @@ export interface TaskView extends TaskDetail {
    * {@link BriefResult}'s `claim` avoids by omission (see there).
    */
   readonly claim: ClaimInfo | null;
+  /**
+   * External references linked to this task — a GitHub PR, a Linear issue —
+   * in link order (F7).
+   *
+   * On {@link TaskView}, not {@link TaskDetail}, for the identical reason
+   * `claim` is: a ref lookup is exactly the extra query `showTaskWithin`'s own
+   * docs (and `update`'s) say must not be paid for content never printed.
+   * `viewTask` (`show`) fills this one; `TaskDetail`'s callers, `update`
+   * chief among them, stay untouched.
+   *
+   * Never empty because it does not apply — `[]` on a task with none linked,
+   * the same ordinary absent-data reading `claim: null` documents above.
+   */
+  readonly refs: readonly Ref[];
 }
 
 /**
