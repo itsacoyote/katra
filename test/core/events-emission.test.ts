@@ -311,7 +311,16 @@ describe("the stream as a whole", () => {
     // note-added belongs to notes, not a task path. claimed/released are
     // declared by migration 0003 but not emitted until F4's claim/release
     // commands land (T4, T9) — this narrows back to EVENT_TYPES once they do.
-    const notYetWired = new Set(["note-added", "claimed", "released"]);
+    // ref-linked/ref-unlinked are declared by migration 0005 but not emitted
+    // here either: they come from ref add/remove (T6), not from any task
+    // write path this test drives.
+    const notYetWired = new Set([
+      "note-added",
+      "claimed",
+      "released",
+      "ref-linked",
+      "ref-unlinked",
+    ]);
     expect([...emitted].sort()).toEqual([...EVENT_TYPES].filter((t) => !notYetWired.has(t)).sort());
   });
 

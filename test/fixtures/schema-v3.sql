@@ -36,7 +36,7 @@ CREATE TABLE presence (
 -- there is no foreign key for the rebuild to trip.
 CREATE TABLE events_new (
   id          INTEGER PRIMARY KEY,
-  type        TEXT NOT NULL CHECK (type IN ('created','claimed','released','status-changed','note-added','closed','cancelled','reopened','deleted')),
+  type        TEXT NOT NULL CHECK (type IN ('created','claimed','released','status-changed','note-added','closed','cancelled','reopened','deleted','ref-linked','ref-unlinked')),
   entity_id   TEXT NOT NULL,
   epic_id     TEXT,
   actor       TEXT NOT NULL,

@@ -314,13 +314,14 @@ describe("F6 migration story — search survives the v3 -> v4 upgrade (AC 9)", (
     ).run(...Object.values(full));
   }
 
-  it("finds pre-existing v3 task and note content through the real search command the moment the store opens at v4, with no manual step", async () => {
+  it("finds pre-existing v3 task and note content through the real search command the moment the store opens at the current version, with no manual step", async () => {
     const repo = createGitRepo();
     try {
       // Built by hand, deliberately never through `katra init`: init would
-      // bring a fresh store straight to v4 (MIGRATIONS' latest), and this
-      // test's whole point is what happens when a v3 store is opened
-      // *normally* afterwards, not what a fresh store looks like.
+      // bring a fresh store straight to MIGRATIONS' latest (5, now that
+      // migration 0005 exists), and this test's whole point is what happens
+      // when a v3 store is opened *normally* afterwards, not what a fresh
+      // store looks like.
       const storeDir = join(repo.dir, ".git", STORE_DIR_NAME);
       const dbPath = join(storeDir, DB_FILE_NAME);
       mkdirSync(storeDir, { recursive: true });
@@ -351,8 +352,12 @@ describe("F6 migration story — search survives the v3 -> v4 upgrade (AC 9)", (
       expect(noteDoc.hits[0]?.matchedIn).toBe("note");
 
       // The upgrade actually happened, not merely "search worked anyway".
+      // This store was built by hand at v3 above and opened through an
+      // ordinary `search` command, which migrates it to whatever this
+      // build's newest step is — 5 now that migration 0005 exists, not the
+      // 4 this asserted before it landed.
       const rawAfter = openDatabase(dbPath);
-      expect(readSchemaVersion(rawAfter)).toBe(4);
+      expect(readSchemaVersion(rawAfter)).toBe(5);
       rawAfter.close();
     } finally {
       repo.cleanup();
