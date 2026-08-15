@@ -1,5 +1,11 @@
 # @itsacoyote/katra
 
+## 0.1.1
+
+### Patch Changes
+
+- [#16](https://github.com/itsacoyote/katra/pull/16) [`c1b0017`](https://github.com/itsacoyote/katra/commit/c1b00170c9e005bb539c9d257491f8d6b87a631f) Thanks [@itsacoyote](https://github.com/itsacoyote)! - `katra --version` reads its answer from package.json at load time instead of a hardcoded constant, so a release can no longer ship a CLI that reports the previous version.
+
 ## 0.1.0
 
 ### Minor Changes
