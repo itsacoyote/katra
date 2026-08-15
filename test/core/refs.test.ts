@@ -183,13 +183,24 @@ describe("linkRef", () => {
     // one rollback-able unit, not two or three separately committed ones.
     const task = seedTask(fixture.store);
 
+    // Captured inside the transaction, before the rollback: proves the writes
+    // actually landed, so the empty state below is a rollback and not a
+    // linkRef that never wrote at all (the vacuity delete.test.ts's own
+    // atomicity test had before its fix).
+    let midTx: { refs: number; taskRefs: number; events: number } | undefined;
     expect(() =>
       fixture.store.db.transaction(() => {
         linkRef(fixture.store, task, GITHUB_REF);
+        midTx = {
+          refs: refRows().length,
+          taskRefs: taskRefRows().length,
+          events: eventsOfType("ref-linked").length,
+        };
         throw new Error("boom, after linkRef already returned");
       })(),
     ).toThrowError("boom, after linkRef already returned");
 
+    expect(midTx).toEqual({ refs: 1, taskRefs: 1, events: 1 });
     expect(refRows()).toHaveLength(0);
     expect(taskRefRows()).toHaveLength(0);
     expect(eventsOfType("ref-linked")).toHaveLength(0);
@@ -199,13 +210,22 @@ describe("linkRef", () => {
     const task = seedTask(fixture.store);
     linkRef(fixture.store, task, GITHUB_REF);
 
+    // Same mid-transaction capture as the link test: the unlink, its event
+    // and the GC must all have happened before the rollback undoes them.
+    let midTx: { refs: number; taskRefs: number; events: number } | undefined;
     expect(() =>
       fixture.store.db.transaction(() => {
         unlinkRef(fixture.store, task, "owner/repo#12");
+        midTx = {
+          refs: refRows().length,
+          taskRefs: taskRefRows().length,
+          events: eventsOfType("ref-unlinked").length,
+        };
         throw new Error("boom, after unlinkRef already returned");
       })(),
     ).toThrowError("boom, after unlinkRef already returned");
 
+    expect(midTx).toEqual({ refs: 0, taskRefs: 0, events: 1 });
     // Still linked, the ref row was not GC'd, and no ref-unlinked event
     // survives — the delete, the event, and the GC rolled back as one unit.
     expect(listRefs(fixture.store, task)).toHaveLength(1);
