@@ -126,6 +126,7 @@ describe("migrating a v1 store under contention", () => {
     rewind.exec(
       "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS claims; " +
         "DROP TABLE IF EXISTS presence; DROP TABLE IF EXISTS events; " +
+        "DROP TABLE IF EXISTS task_refs; DROP TABLE IF EXISTS refs; " +
         "DROP TRIGGER IF EXISTS tasks_fts_ai; DROP TRIGGER IF EXISTS tasks_fts_ad; " +
         "DROP TRIGGER IF EXISTS tasks_fts_au; DROP TRIGGER IF EXISTS notes_fts_ai; " +
         "DROP TRIGGER IF EXISTS notes_fts_ad; DROP TRIGGER IF EXISTS notes_fts_au; " +
@@ -197,6 +198,6 @@ describe("migrating a v1 store under contention", () => {
     // again, so editing it would leave two stores with different schemas at
     // the same version number.
     expect(MIGRATIONS[0]?.sql).toBe(migration0001.sql);
-    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4]);
+    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5]);
   });
 });
