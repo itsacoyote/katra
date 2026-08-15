@@ -170,6 +170,9 @@ describe("the public barrel", () => {
       )) {
         const specifier = match[1];
         if (specifier === undefined) continue;
+        // A JSON asset (version.ts requires package.json) is not a module:
+        // it brings no imports and nothing into the declaration graph.
+        if (specifier.endsWith(".json")) continue;
         walk(resolve(dirname(file), `${specifier}.ts`), path);
       }
     };
