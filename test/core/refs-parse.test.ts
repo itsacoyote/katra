@@ -357,6 +357,26 @@ describe("parseRefInput", () => {
       url: "https://github.com/owner/repo/pull/1",
     });
   });
+
+  it('refuses a bare owner or repo that is exactly "." or ".."', () => {
+    // Neither "." nor ".." contains a forbidden character, so the regex
+    // check alone would accept them -- but WHATWG's path normalization
+    // collapses a "." or ".." path segment on the *next* parse, which would
+    // otherwise let this recognize the first time and refuse on re-parse of
+    // its own derived url (the convergence invariant every other test in
+    // this file relies on).
+    expect(parseRefInput("./repo#1").recognized).toBe(false);
+    expect(parseRefInput("../repo#1").recognized).toBe(false);
+    expect(parseRefInput("owner/.#1").recognized).toBe(false);
+    expect(parseRefInput("owner/..#1").recognized).toBe(false);
+
+    // The same shapes recognized (wrongly) before the fix would have built
+    // a url that refuses on re-parse -- confirm that url-form input using
+    // "." or ".." as the owner segment is refused too, not just the bare
+    // form (the same trust boundary, per isCleanSegment's docs).
+    expect(parseRefInput("https://github.com/./repo/pull/1").recognized).toBe(false);
+    expect(parseRefInput("https://github.com/../repo/pull/1").recognized).toBe(false);
+  });
 });
 
 describe("validateExplicitRef", () => {
@@ -532,5 +552,29 @@ describe("validateExplicitRef", () => {
         url: "https://ghe.example.com/owner/repo/pull/1",
       },
     });
+  });
+
+  it("refuses malformed runtime input without throwing", () => {
+    // A boundary function reachable from parsed JSON, where nothing enforces
+    // ExplicitRefInput's shape at compile time -- each of these throws a
+    // TypeError on .trim() without the runtime guards.
+    expect(() => validateExplicitRef(null as never)).not.toThrow();
+    expect(validateExplicitRef(null as never).valid).toBe(false);
+
+    expect(() => validateExplicitRef({} as never)).not.toThrow();
+    expect(validateExplicitRef({} as never).valid).toBe(false);
+
+    expect(() => validateExplicitRef({ provider: 42, id: "i" } as never)).not.toThrow();
+    expect(validateExplicitRef({ provider: 42, id: "i" } as never).valid).toBe(false);
+
+    expect(() => validateExplicitRef({ url: 42 } as never)).not.toThrow();
+    expect(validateExplicitRef({ url: 42 } as never).valid).toBe(false);
+
+    // A structurally valid provider/id with a non-string, non-null url --
+    // the case the url-specific guard exists for, distinct from the missing
+    // provider/id case above.
+    const badUrl = { provider: "gitlab", id: "PROJ-1", url: 42 } as never;
+    expect(() => validateExplicitRef(badUrl)).not.toThrow();
+    expect(validateExplicitRef(badUrl).valid).toBe(false);
   });
 });

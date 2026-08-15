@@ -61,11 +61,23 @@ const CONTROL_CHARS_PATTERN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
  * segments -- the two are the same trust boundary and must refuse the
  * same shapes, or a URL built from one recognized bare ref could
  * recognize differently than the bare ref itself.
+ *
+ * Beyond the character check, {@link isCleanSegment} also refuses a
+ * segment that is exactly `.` or `..`: neither contains a forbidden
+ * character, so the regex alone lets them through, but WHATWG's own path
+ * normalization collapses a `.`/`..` path segment on the *next* parse (a
+ * bare `./repo#1` builds the url `.../github.com/./repo/issues/1`, which
+ * `new URL` resolves down to `/repo/issues/1` -- one segment short of
+ * what `matchGithubSegments` needs) -- so a `.`/`..` owner or repo
+ * recognized the first time refuses on re-parse, breaking the very
+ * recognize-the-same-shape-both-ways invariant this file otherwise
+ * maintains (security-scan finding).
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
 const FORBIDDEN_SEGMENT_PATTERN = /[/#?\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 function isCleanSegment(segment: string): boolean {
+  if (segment === "." || segment === "..") return false;
   return !FORBIDDEN_SEGMENT_PATTERN.test(segment);
 }
 
@@ -470,6 +482,24 @@ export function parseRefInput(text: string): ParseRefResult {
  * refusal without revisiting that decision first.
  */
 export function validateExplicitRef(input: ExplicitRefInput): ValidateExplicitRefResult {
+  // Runtime guards, not just the TS signature -- same boundary-function
+  // rationale as parseRefInput's typeof guard: this is reachable from
+  // parsed JSON (a library caller, a future MCP surface) where nothing
+  // enforces ExplicitRefInput's shape at compile time, and reading
+  // `.provider`/`.id`/`.trim()` off a non-object or non-string throws.
+  if (typeof input !== "object" || input === null) {
+    return refuseExplicit("input must be an object");
+  }
+  if (typeof input.provider !== "string") {
+    return refuseExplicit("provider must be a string");
+  }
+  if (typeof input.id !== "string") {
+    return refuseExplicit("id must be a string");
+  }
+  if (input.url !== undefined && input.url !== null && typeof input.url !== "string") {
+    return refuseExplicit("url must be a string");
+  }
+
   const provider = input.provider.trim();
   const externalId = input.id.trim();
 
