@@ -34,6 +34,10 @@ function unwrapRefusal(result: ParseRefResult): string {
  */
 const NUL = String.fromCharCode(0);
 const BEL = String.fromCharCode(7);
+const TAB = String.fromCharCode(9);
+const LF = String.fromCharCode(10);
+const CR = String.fromCharCode(13);
+const ESC = String.fromCharCode(0x1b);
 const DEL = String.fromCharCode(127);
 const RLO = String.fromCharCode(0x202e);
 const DQUOTE = String.fromCharCode(34);
@@ -231,6 +235,128 @@ describe("parseRefInput", () => {
     const message = unwrapRefusal(parseRefInput(bare));
     expect(message).toContain(`exceeds ${MAX_URL_LENGTH} characters`);
   });
+
+  it("refuses a percent-encoded path-segment splice attempt", () => {
+    // A decoded "%2F"/"%23"/"%3F" inside a single path segment used to
+    // splice extra components into the stored externalId — the segment
+    // decodes to "victim/repo/settings/secrets?z", which isCleanSegment now
+    // rejects outright rather than handing to the owner/repo grammar.
+    const splice = "https://github.com/victim%2Frepo%2Fsettings%2Fsecrets%3Fz/x/pull/1";
+    expect(parseRefInput(splice).recognized).toBe(false);
+
+    // %23 decoding to a literal "#" mid-segment.
+    expect(parseRefInput("https://github.com/owner/re%23po/pull/1").recognized).toBe(false);
+
+    // %3F decoding to a literal "?" mid-segment.
+    expect(parseRefInput("https://github.com/owner/re%3Fpo/pull/1").recognized).toBe(false);
+  });
+
+  it("refuses C0 controls that survive a single percent-decode (%1B, %0A)", () => {
+    expect(parseRefInput("https://github.com/owner/re%1Bpo/pull/1").recognized).toBe(false);
+    expect(parseRefInput("https://github.com/owner/re%0Apo/pull/1").recognized).toBe(false);
+  });
+
+  it("refuses a bare owner/repo#n whose owner/repo contains a query delimiter or control character", () => {
+    // "?" is not excluded by BARE_GITHUB_PATTERN's character class on its
+    // own — isCleanSegment is what refuses it, matching the URL-decoded
+    // path's grammar so a bare ref and its derived url never disagree.
+    expect(parseRefInput("owner?withquestion/repo#1").recognized).toBe(false);
+
+    // A raw control byte (BEL) embedded directly in a bare owner segment.
+    expect(parseRefInput(`owner${BEL}/repo#1`).recognized).toBe(false);
+  });
+
+  it("converges on a byte-identical ParsedRef when re-parsing its own canonical url", () => {
+    const recognizedInputs = [
+      "https://github.com/Owner/Repo/pull/42",
+      "owner/repo#7",
+      "https://linear.app/myworkspace/issue/eng-451/some-title",
+      // The double-encoding case: a single decode of "%252F" yields the
+      // literal "re%2fpo" (a "%" survives, not a "/"), which isCleanSegment
+      // accepts — encodeURIComponent in buildGithubRef is what keeps the
+      // *next* parse of the reconstructed url from decoding that "%2f" one
+      // effective layer further into an actual "/", which would otherwise
+      // split the id into a different externalId (dedupe split).
+      "https://github.com/owner/re%252Fpo/pull/1",
+    ];
+
+    for (const input of recognizedInputs) {
+      const first = unwrap(parseRefInput(input));
+      if (first.url === null) continue; // linear bare form has no url to round-trip
+      const second = unwrap(parseRefInput(first.url));
+      expect(second, `round-trip diverged for ${JSON.stringify(input)}`).toEqual(first);
+    }
+  });
+
+  it("refuses non-string input without throwing", () => {
+    expect(() => parseRefInput(null as never)).not.toThrow();
+    expect(parseRefInput(null as never).recognized).toBe(false);
+
+    expect(() => parseRefInput(42 as never)).not.toThrow();
+    expect(parseRefInput(42 as never).recognized).toBe(false);
+
+    expect(() => parseRefInput(undefined as never)).not.toThrow();
+    expect(parseRefInput(undefined as never).recognized).toBe(false);
+  });
+
+  it("accepts a derived external id at 256 code points using astral characters, refuses at 257", () => {
+    // .length (UTF-16 units) and textWidth (code points) disagree exactly
+    // here: an astral character is 2 units but 1 code point, so a check
+    // that used .length instead of textWidth would refuse this at-bound
+    // case as if it were already over the limit. Only a handful of astral
+    // characters are used (mixed with plain ASCII padding) rather than
+    // filling the whole owner with them -- each one costs 12 characters
+    // once percent-encoded into the derived url, and filling the whole
+    // owner would trip the url bound instead of the one this test targets.
+    const astral = "\u{1F600}"; // an emoji, one code point, two UTF-16 units
+    expect([...astral]).toHaveLength(1);
+    const astralCount = 3;
+
+    const repoLength = 10;
+    const bareRefFor = (externalIdCodePoints: number): string => {
+      const ownerCodePoints = externalIdCodePoints - 3 - repoLength;
+      const owner = astral.repeat(astralCount) + "o".repeat(ownerCodePoints - astralCount);
+      const repo = "r".repeat(repoLength);
+      return `${owner}/${repo}#1`;
+    };
+
+    const atBound = unwrap(parseRefInput(bareRefFor(MAX_EXTERNAL_ID_LENGTH)));
+    expect([...atBound.externalId]).toHaveLength(MAX_EXTERNAL_ID_LENGTH);
+
+    const overBoundMessage = unwrapRefusal(parseRefInput(bareRefFor(MAX_EXTERNAL_ID_LENGTH + 1)));
+    expect(overBoundMessage).toContain(`exceeds ${MAX_EXTERNAL_ID_LENGTH} characters`);
+  });
+
+  it("accepts a default port (443 https, 80 http), still refuses an explicit non-default port", () => {
+    // WHATWG normalizes away a URL's own default port before this function
+    // ever sees `url.port` — it reads as "", identical to no port at all.
+    expect(unwrap(parseRefInput("https://github.com:443/owner/repo/pull/1"))).toEqual({
+      provider: "github",
+      externalId: "owner/repo#1",
+      url: "https://github.com/owner/repo/pull/1",
+    });
+    expect(unwrap(parseRefInput("http://github.com:80/owner/repo/pull/1"))).toEqual({
+      provider: "github",
+      externalId: "owner/repo#1",
+      url: "https://github.com/owner/repo/pull/1",
+    });
+
+    expect(parseRefInput("https://github.com:8443/owner/repo/pull/1").recognized).toBe(false);
+  });
+
+  it("recognizes a host with an embedded tab, same as a browser address bar", () => {
+    // WHATWG strips ASCII tab/CR/LF found anywhere in the input as part of
+    // ordinary URL parsing (not specific to this function) -- so this reads
+    // as the clean host "github.com". Because parseRefInput reconstructs its
+    // own output rather than ever echoing the raw input, there is nothing
+    // for the stripped tab to have hidden inside the result.
+    const withTab = `https://git${TAB}hub.com/owner/repo/pull/1`;
+    expect(unwrap(parseRefInput(withTab))).toEqual({
+      provider: "github",
+      externalId: "owner/repo#1",
+      url: "https://github.com/owner/repo/pull/1",
+    });
+  });
 });
 
 describe("validateExplicitRef", () => {
@@ -332,6 +458,78 @@ describe("validateExplicitRef", () => {
         provider: "gitlab",
         externalId: "PROJ-1",
         url: "https://gitlab.example.com/proj/-/merge_requests/1",
+      },
+    });
+  });
+
+  it("stores a normal url byte-verbatim (trimmed only, not rewritten)", () => {
+    const input = "https://gitlab.example.com/group/proj/-/issues/9?tab=notes";
+    const result = validateExplicitRef({ provider: "gitlab", id: "PROJ-9", url: `  ${input}  ` });
+    expect(result).toEqual({
+      valid: true,
+      ref: { provider: "gitlab", externalId: "PROJ-9", url: input },
+    });
+  });
+
+  it("refuses control characters and line separators surviving into a stored url", () => {
+    // WHATWG can silently strip or re-encode these on the way to the shape
+    // check (`parseAbsoluteHttpUrl`'s return value) while the raw character
+    // stays present in the string this function actually stores -- checked
+    // directly against that stored string, not the normalized one.
+
+    // A raw NUL in the path.
+    const withNul = validateExplicitRef({
+      provider: "gitlab",
+      id: "PROJ-1",
+      url: `https://gitlab.example.com/path${NUL}here`,
+    });
+    expect(withNul.valid).toBe(false);
+
+    // An embedded CRLF -- WHATWG strips it from `parsed.pathname` entirely,
+    // so the shape check alone would see nothing wrong.
+    const withCrlf = validateExplicitRef({
+      provider: "gitlab",
+      id: "PROJ-1",
+      url: `https://gitlab.example.com/path${CR}${LF}here`,
+    });
+    expect(withCrlf.valid).toBe(false);
+
+    // An OSC8 terminal hyperlink escape sequence (ESC ] 8 ; ; url BEL) --
+    // ESC alone is enough to refuse, well before any OSC8-specific parsing.
+    const osc8 = `${ESC}]8;;https://evil.example${BEL}`;
+    const withOsc8 = validateExplicitRef({
+      provider: "gitlab",
+      id: "PROJ-1",
+      url: `https://gitlab.example.com/${osc8}link`,
+    });
+    expect(withOsc8.valid).toBe(false);
+
+    // A newline embedded in the host -- WHATWG strips it and `parsed.hostname`
+    // reads clean, so again the shape check alone would not catch this.
+    const newlineHost = validateExplicitRef({
+      provider: "gitlab",
+      id: "PROJ-1",
+      url: `https://git${LF}lab.example.com/proj/1`,
+    });
+    expect(newlineHost.valid).toBe(false);
+  });
+
+  it("accepts provider 'github' with an unrelated url (GitHub Enterprise, pinned)", () => {
+    // Deliberate (ADR-014's provider-agnosticism): provider and url are
+    // never cross-checked, so a self-hosted GitHub Enterprise instance (or
+    // any other host) can be stored under provider "github". This is a
+    // pinning test, not a gap report -- do not turn this into a refusal.
+    const result = validateExplicitRef({
+      provider: "github",
+      id: "owner/repo#1",
+      url: "https://ghe.example.com/owner/repo/pull/1",
+    });
+    expect(result).toEqual({
+      valid: true,
+      ref: {
+        provider: "github",
+        externalId: "owner/repo#1",
+        url: "https://ghe.example.com/owner/repo/pull/1",
       },
     });
   });

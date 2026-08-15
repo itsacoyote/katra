@@ -30,6 +30,46 @@ const GITHUB_HOST = "github.com";
 const LINEAR_HOST = "linear.app";
 
 /**
+ * Control and line-separator characters that must never survive into a
+ * value this module hands back -- whether reconstructed (a decoded path
+ * segment feeding {@link ParsedRef}) or stored verbatim (an explicit
+ * `--url`, {@link validateExplicitRef}): the C0 controls (NUL through
+ * Unit Separator -- covering NUL, tab, CR, LF, ESC), DEL, the C1
+ * controls, and the two Unicode line separators LINE SEPARATOR /
+ * PARAGRAPH SEPARATOR -- invisible to a terminal, line breaks to any
+ * other renderer. The same set `cli/format.ts`'s `oneLine` strips at
+ * render time (AGENTS.md); this module refuses them outright instead,
+ * since it is the boundary where they would otherwise start looking
+ * like ordinary, already-validated data. Every codepoint below is
+ * written as an explicit unicode escape, never a raw byte in this file
+ * (house rule).
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
+const CONTROL_CHARS_PATTERN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+/**
+ * What a decoded GitHub/Linear path segment -- owner, repo, or Linear
+ * workspace -- may never contain: `/` and `#`, which would let the
+ * segment forge a boundary `externalId` doesn't otherwise have (the
+ * security-scan finding this exists to close -- a percent-encoded
+ * `%2F`/`%23` decoding into a literal separator mid-segment used to
+ * splice extra, attacker-chosen path components into the stored id);
+ * `?`, which the same decode can turn into a query-string delimiter
+ * that was never in the raw path; and every character in
+ * {@link CONTROL_CHARS_PATTERN}. Applied identically to a bare
+ * `owner/repo#n` input's captured groups and to a URL's decoded path
+ * segments -- the two are the same trust boundary and must refuse the
+ * same shapes, or a URL built from one recognized bare ref could
+ * recognize differently than the bare ref itself.
+ */
+// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
+const FORBIDDEN_SEGMENT_PATTERN = /[/#?\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
+
+function isCleanSegment(segment: string): boolean {
+  return !FORBIDDEN_SEGMENT_PATTERN.test(segment);
+}
+
+/**
  * Hard cap on raw `parseRefInput` input, checked before any regex runs
  * (risk note 9).
  *
@@ -126,7 +166,16 @@ function buildGithubRef(
   const ownerLower = owner.toLowerCase();
   const repoLower = repo.toLowerCase();
   const externalId = `${ownerLower}/${repoLower}#${n}`;
-  const url = `https://${GITHUB_HOST}/${ownerLower}/${repoLower}/${kind}/${n}`;
+  // encodeURIComponent, not a raw splice: owner/repo already passed
+  // isCleanSegment (no /, #, ?, or control character survives), but a
+  // decoded segment can still legitimately contain a literal "%" — and
+  // splicing that raw into a url template produces a string that reparses
+  // to a DIFFERENT decoded value than the one just canonicalized (the
+  // double-encoding finding: "%252F" decodes once here to a literal
+  // "%2F", and an un-re-encoded url would reparse that "%2F" into "/" on
+  // the next parse). Re-encoding here is what makes reparsing this exact
+  // url reproduce the identical externalId (see the convergence tests).
+  const url = `https://${GITHUB_HOST}/${encodeURIComponent(ownerLower)}/${encodeURIComponent(repoLower)}/${kind}/${n}`;
   return finalize("github", externalId, url);
 }
 
@@ -140,8 +189,14 @@ function buildGithubRef(
  */
 function buildLinearRef(teamKey: string, workspace: string | null): ParseRefResult {
   const teamKeyUpper = teamKey.toUpperCase();
+  // Same re-encoding reasoning as buildGithubRef: workspace already passed
+  // isCleanSegment, but still needs encodeURIComponent so a literal "%"
+  // (or any other character encodeURIComponent escapes) surviving into it
+  // cannot make the reconstructed url reparse to a different value.
   const url =
-    workspace === null ? null : `https://${LINEAR_HOST}/${workspace}/issue/${teamKeyUpper}`;
+    workspace === null
+      ? null
+      : `https://${LINEAR_HOST}/${encodeURIComponent(workspace)}/issue/${teamKeyUpper}`;
   return finalize("linear", teamKeyUpper, url);
 }
 
@@ -194,22 +249,32 @@ function parseAbsoluteHttpUrl(text: string): URL | undefined {
  * Splits a URL pathname into non-empty segments and percent-decodes each one
  * **exactly once** (risk note 5) — decoding after the split, not before, so
  * a `%2F` inside a segment cannot introduce a boundary that was never in the
- * raw path; it just becomes a literal slash character living inside that one
- * segment's decoded value, which the grammar below will then simply fail to
- * match against (owner/repo/team-key patterns don't allow `/`).
+ * raw path. Every decoded segment is then checked with
+ * {@link isCleanSegment}: a decode that produced a `/`, `#`, `?`, or a
+ * control character refuses the whole path here, before
+ * `matchGithubSegments`/`matchLinearSegments` ever see it — those two have
+ * no character-class restriction of their own on owner/repo/workspace
+ * (risk note 4's deliberate permissiveness), so without this check a
+ * decoded `%2F`/`%23` would otherwise splice a forged extra path
+ * component straight into the stored `externalId` (the security-scan
+ * finding this closes).
  *
  * Returns `undefined` on malformed percent-encoding (`decodeURIComponent`
- * throwing `URIError`) rather than letting that escape as an uncaught crash.
+ * throwing `URIError`) or on a segment `isCleanSegment` rejects, rather
+ * than letting either escape as an uncaught crash or a spliced id.
  */
 function decodeSegments(pathname: string): string[] | undefined {
   const raw = pathname.split("/").filter((segment) => segment.length > 0);
   const decoded: string[] = [];
   for (const segment of raw) {
+    let value: string;
     try {
-      decoded.push(decodeURIComponent(segment));
+      value = decodeURIComponent(segment);
     } catch {
       return undefined;
     }
+    if (!isCleanSegment(value)) return undefined;
+    decoded.push(value);
   }
   return decoded;
 }
@@ -252,25 +317,39 @@ function matchLinearSegments(segments: readonly string[]): LinearPathMatch | und
 
 /**
  * Recognizes a pasted GitHub or Linear reference — URL or bare id — with no
- * network and no plugin (ADR-014). Never throws: every branch that can fail
+ * network and no plugin (ADR-014). Never throws: `text` is checked with
+ * `typeof` before anything else touches it, every branch that can fail
  * (`new URL`, `decodeURIComponent`) is caught, and every regex is linear, so
  * even a 10,000-character hostile paste refuses in the time it takes to
  * compare a length.
  *
  * Recognition, in order:
+ * 0. A non-`string` `text` refuses immediately (see the guard above).
  * 1. `text.length` over {@link MAX_INPUT_LENGTH} refuses immediately, before
  *    any regex or URL parse runs (risk note 9).
  * 2. If `text.trim()` parses as an absolute `http(s)` URL: the port must be
- *    empty (an explicit port refuses — risk note 6) and the hostname, with
- *    at most one leading `www.` stripped, must equal `github.com` or
- *    `linear.app` **exactly** — never `includes`/`endsWith`, which is what
- *    keeps `github.com.evil.com` and `evil-github.com` refusing, and an IDN
- *    homograph refusing too: `URL.hostname` is already in punycode form by
- *    the time this compares it, so a Cyrillic/Greek lookalike simply fails
- *    the exact match without this function ever needing to decode punycode
- *    itself (risk note 7). A URL that parses but is not one of the two hosts
- *    refuses here — it is never handed to the bare-form patterns below,
- *    which could not match a `scheme://` string anyway.
+ *    empty (an explicit port refuses — risk note 6) — WHATWG normalizes
+ *    away a *default* port (`:443` on `https`, `:80` on `http`) before this
+ *    ever sees it, so those are accepted like any bare host, while an
+ *    explicit non-default port (`:8443`, ...) is the one this refuses — and
+ *    the hostname, with at most one leading `www.` stripped, must equal
+ *    `github.com` or `linear.app` **exactly** — never `includes`/`endsWith`,
+ *    which is what keeps `github.com.evil.com` and `evil-github.com`
+ *    refusing, and an IDN homograph refusing too: `URL.hostname` is already
+ *    in punycode form by the time this compares it, so a Cyrillic/Greek
+ *    lookalike simply fails the exact match without this function ever
+ *    needing to decode punycode itself (risk note 7). WHATWG also strips
+ *    any ASCII tab/CR/LF found *anywhere* in `text` (not just the host) as
+ *    part of ordinary URL parsing — the same thing a browser's address bar
+ *    does — so `git`+TAB+`hub.com/...` parses to the clean hostname
+ *    `github.com` and recognizes normally; this function never stores the
+ *    raw input, only values it reconstructs itself, so there is nothing for
+ *    a stripped character to have hidden inside (contrast
+ *    {@link validateExplicitRef}, which stores its `url` verbatim and needs
+ *    its own explicit check for exactly this reason). A URL that parses but
+ *    is not one of the two hosts refuses here — it is never handed to the
+ *    bare-form patterns below, which could not match a `scheme://` string
+ *    anyway.
  * 3. Otherwise `text.trim()` is tried against the bare `owner/repo#n` and
  *    `TEAM-123` patterns. An SSH remote (`git@github.com:owner/repo.git`) is
  *    not a valid absolute URL (step 2 leaves it as "not a URL") and does not
@@ -280,14 +359,31 @@ function matchLinearSegments(segments: readonly string[]): LinearPathMatch | und
  *    escape hatch (ADR-014).
  *
  * The returned `ref.externalId`/`ref.url` are always reconstructed from the
- * matched parts, never the input re-serialized — so a credential-bearing URL
- * (`https://user:pass@github.com/...`) recognizes normally and the
- * credentials are simply never read, let alone stored (risk notes 1 and 25),
- * and every cosmetic variant of the same PR or issue (trailing `/files`, a
- * `?query`, a `#fragment`, `www.`, an uppercase host, `http` instead of
- * `https`) converges on byte-identical output.
+ * matched, `isCleanSegment`-checked parts, never the input re-serialized —
+ * so a credential-bearing URL (`https://user:pass@github.com/...`)
+ * recognizes normally and the credentials are simply never read, let alone
+ * stored (risk notes 1 and 25); a top-level `?query`/`#fragment` on the URL
+ * is never even seen by the path matcher, since `URL` already splits those
+ * into `search`/`hash`; and a query/fragment/separator character that only
+ * appears *after* percent-decoding a path segment (`%3F`, `%23`, `%2F`) is
+ * caught by `isCleanSegment` and refuses the whole input, rather than
+ * splicing into `externalId` — so every cosmetic variant of the same PR or
+ * issue (trailing `/files`, a `?query`, a `#fragment`, `www.`, an uppercase
+ * host, `http` instead of `https`, a credentialed URL) converges on
+ * byte-identical output, and re-parsing that output's own `url` reproduces
+ * the identical `ParsedRef` again (the convergence tests) — `encodeURIComponent`
+ * in `buildGithubRef`/`buildLinearRef` is what keeps a literal `%` inside an
+ * already-clean segment from making that second parse disagree with the
+ * first.
  */
 export function parseRefInput(text: string): ParseRefResult {
+  // Runtime guard, not just the TS signature: this is a boundary function —
+  // reachable from parsed JSON (a library caller, a future MCP surface)
+  // where nothing enforces the type at compile time — and `text.length` on
+  // a non-string throws, which would contradict "never throws" below.
+  if (typeof text !== "string") {
+    return refuseInput("input must be a string");
+  }
   if (text.length > MAX_INPUT_LENGTH) {
     return refuseInput(`input exceeds ${MAX_INPUT_LENGTH} characters`);
   }
@@ -315,7 +411,18 @@ export function parseRefInput(text: string): ParseRefResult {
     const owner = bareGithub[1];
     const repo = bareGithub[2];
     const n = bareGithub[3];
-    if (owner !== undefined && repo !== undefined && n !== undefined) {
+    // isCleanSegment here mirrors the check decodeSegments applies to a
+    // URL's decoded path segments (risk note in FORBIDDEN_SEGMENT_PATTERN's
+    // docs) — a bare bareGithub owner/repo and a URL-derived one are the
+    // same trust boundary, so a `?` or control character must refuse the
+    // same way through either path.
+    if (
+      owner !== undefined &&
+      repo !== undefined &&
+      n !== undefined &&
+      isCleanSegment(owner) &&
+      isCleanSegment(repo)
+    ) {
       return buildGithubRef(owner, repo, "issues", n);
     }
   }
@@ -341,12 +448,26 @@ export function parseRefInput(text: string): ParseRefResult {
  * Rules: `provider` and `id` non-empty after trimming and within
  * {@link MAX_PROVIDER_LENGTH} / {@link MAX_EXTERNAL_ID_LENGTH}; `url`, when
  * given and non-blank, must parse as an absolute `http`/`https` URL with no
- * credentials and no explicit port, at most {@link MAX_URL_LENGTH}
- * characters — kept exactly as given (trimmed only) on success, since unlike
- * a recognized ref there are no matched segments to reconstruct a canonical
- * form from, and rewriting what the caller explicitly typed would be a
- * surprise (risk note 24: "no network" does not mean "store anything as a
- * url" — the shape still has to be a real absolute http(s) URL).
+ * credentials, no explicit port, and no control character or line
+ * separator ({@link CONTROL_CHARS_PATTERN} — the WHATWG parser can
+ * silently strip or re-encode those on the way to the shape check, so they
+ * are checked directly against the string this function actually stores),
+ * at most {@link MAX_URL_LENGTH} characters — kept exactly as given
+ * (trimmed only) on success, since unlike a recognized ref there are no
+ * matched segments to reconstruct a canonical form from, and rewriting what
+ * the caller explicitly typed would be a surprise (risk note 24: "no
+ * network" does not mean "store anything as a url" — the shape still has
+ * to be a real absolute http(s) URL).
+ *
+ * `provider` and `url` are never cross-checked against each other —
+ * `{provider: "github", url: "https://ghe.example.com/..."}` is accepted.
+ * Deliberate (ADR-014's provider-agnosticism): a self-hosted GitHub
+ * Enterprise or Linear-on-a-different-domain instance is a legitimate real
+ * case with no other way to be stored under a recognizable provider name,
+ * and this function has no way to know which hosts are "really" which
+ * provider without becoming a second, competing host table alongside
+ * {@link parseRefInput}'s. Pinned by a test — do not turn this into a
+ * refusal without revisiting that decision first.
  */
 export function validateExplicitRef(input: ExplicitRefInput): ValidateExplicitRefResult {
   const provider = input.provider.trim();
@@ -383,6 +504,18 @@ export function validateExplicitRef(input: ExplicitRefInput): ValidateExplicitRe
   }
   if (parsed.username !== "" || parsed.password !== "") {
     return refuseExplicit("url must not contain credentials");
+  }
+  // `parsed` reflects what WHATWG normalized `trimmedUrl` INTO — but the
+  // value stored below is `trimmedUrl` itself, verbatim (this function's
+  // whole point, unlike parseRefInput's reconstructed url). WHATWG can
+  // silently strip or re-encode a control character on the way to `parsed`
+  // (an embedded tab/CR/LF disappears from `parsed.hostname` entirely; a
+  // NUL/ESC surviving elsewhere gets percent-encoded into `parsed.pathname`)
+  // — so checking only `parsed` and then storing `trimmedUrl` verbatim would
+  // let exactly those characters ride along into storage looking
+  // pre-validated. Checked directly against `trimmedUrl`, not `parsed`.
+  if (CONTROL_CHARS_PATTERN.test(trimmedUrl)) {
+    return refuseExplicit("url must not contain control characters or line separators");
   }
 
   return { valid: true, ref: buildExplicitRef(provider, externalId, trimmedUrl) };
