@@ -1,13 +1,37 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readTx } from "../../src/core/db/connection.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import { parseRefInput, validateExplicitRef } from "../../src/core/refs/parse.js";
-import { gcOrphanRefsWithin, linkRef, listRefs, unlinkRef } from "../../src/core/refs/repo.js";
+import {
+  gcOrphanRefsWithin,
+  linkRef,
+  linkRefWithin,
+  listRefs,
+  unlinkRef,
+  unlinkRefWithin,
+} from "../../src/core/refs/repo.js";
 import { openStore } from "../../src/core/store.js";
 import { runConcurrent } from "../helpers/concurrent.js";
 import { seedEpic, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/**
+ * A pass-through count of `writeTx` calls, for the atomicity-pin tests below
+ * — the `board.test.ts`/`readTxSpy` pattern, mirrored for writes. The wrapper
+ * delegates to the real implementation, so every other test in this file
+ * still runs against genuine transactions.
+ */
+const writeTxSpy = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("../../src/core/db/connection.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../src/core/db/connection.js")>();
+  const writeTx: typeof original.writeTx = (db, fn) => {
+    writeTxSpy.calls += 1;
+    return original.writeTx(db, fn);
+  };
+  return { ...original, writeTx };
+});
 
 const ACTOR = "feature/f7 @ /repo/wt-f7";
 
@@ -187,6 +211,36 @@ describe("linkRef", () => {
     expect(listRefs(fixture.store, task)).toHaveLength(1);
     expect(refRows()).toHaveLength(1);
     expect(eventsOfType("ref-unlinked")).toHaveLength(0);
+  });
+
+  it("linkRef opens exactly one write transaction — insert and event share it", () => {
+    // A caller-observable atomicity pin, distinct from the rollback tests
+    // above: those prove writes made *inside whatever transaction is
+    // currently open* roll back together; this proves `linkRef` itself never
+    // opens a second, separately-committed one — the shape a bug like "the
+    // event moves to its own writeTx" would take in ordinary (unwrapped)
+    // use, where the rollback tests' nesting trick cannot observe it.
+    const task = seedTask(fixture.store);
+
+    writeTxSpy.calls = 0;
+    linkRef(fixture.store, task, GITHUB_REF);
+
+    expect(writeTxSpy.calls).toBe(1);
+  });
+
+  it("a CHECK violation surfaces as itself, not as a swallowed no-op", () => {
+    // If either insert ever reverted to `INSERT OR IGNORE`, this would be
+    // silently swallowed and read back as "already exists" (or crash trying
+    // to re-SELECT a row that was never written) instead of the real
+    // constraint failure.
+    const task = seedTask(fixture.store);
+    const tooLongProvider = "x".repeat(65); // refs.provider: CHECK (length BETWEEN 1 AND 64)
+
+    expect(() =>
+      linkRef(fixture.store, task, { provider: tooLongProvider, externalId: "o/r#1", url: null }),
+    ).toThrowError(/CHECK constraint failed: length\(provider\)/);
+
+    expect(listRefs(fixture.store, task)).toEqual([]);
   });
 
   it("constraint violation never retried as id collision", () => {
@@ -376,6 +430,16 @@ describe("unlinkRef", () => {
     }
   });
 
+  it("unlinkRef opens exactly one write transaction — delete, event and orphan GC share it", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+
+    writeTxSpy.calls = 0;
+    unlinkRef(fixture.store, task, "owner/repo#12");
+
+    expect(writeTxSpy.calls).toBe(1);
+  });
+
   it("ref events carry owning epic id (epic-scoped log shows them)", () => {
     const epic = seedEpic(fixture.store, { title: "an epic" });
     const child = seedTask(fixture.store, { parentId: epic });
@@ -395,21 +459,67 @@ describe("unlinkRef", () => {
   });
 });
 
+describe("linkRefWithin", () => {
+  it("throws when called outside any transaction", () => {
+    // The other half of the transaction-required guard, mirrored from
+    // `addLinkWithin`'s own tests (`links.test.ts`): no transaction at all,
+    // not just the read-only one below.
+    const task = seedTask(fixture.store);
+
+    expect(() => linkRefWithin(fixture.store, task, GITHUB_REF)).toThrowError(/open transaction/);
+  });
+
+  it("throws when called inside a read transaction", () => {
+    // `db.inTransaction` is also true inside a deferred read, so only
+    // `assertNotReadOnly` catches this — see its own docs (`db/connection.ts`)
+    // for why the plain `inTransaction` check alone cannot.
+    const task = seedTask(fixture.store);
+
+    expect(() =>
+      readTx(fixture.store.db, () => linkRefWithin(fixture.store, task, GITHUB_REF)),
+    ).toThrowError(/read transaction/);
+  });
+});
+
+describe("unlinkRefWithin", () => {
+  it("throws when called outside any transaction", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+
+    expect(() => unlinkRefWithin(fixture.store, task, "owner/repo#12")).toThrowError(
+      /open transaction/,
+    );
+  });
+
+  it("throws when called inside a read transaction", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+
+    expect(() =>
+      readTx(fixture.store.db, () => unlinkRefWithin(fixture.store, task, "owner/repo#12")),
+    ).toThrowError(/read transaction/);
+  });
+});
+
 describe("listRefs", () => {
   it("orders by link order, not by when the underlying refs row was created", () => {
-    // refB is created (refs.id) before refA, but the task under test links
-    // refB first and refA second — task_refs.rowid (link order) and refs.id
-    // (creation order) now disagree, so ordering by the wrong column would
-    // list refA before refB.
+    // `older`/`newer` are created via `other` first — older gets refs.id 1,
+    // newer gets refs.id 2. The task under test then links them in the
+    // OPPOSITE order (newer first, older second), so task_refs' own rowid
+    // (link order) and refs.id (creation order) actively disagree: ordering
+    // by refs.id would report [older, newer] regardless of what `task` did,
+    // while link order must report [newer, older]. A version of this test
+    // that links in the same relative order both times cannot tell the two
+    // orderings apart — this one can.
     const other = seedTask(fixture.store);
-    const refB = { provider: "github", externalId: "owner/repo#2", url: null };
-    const refA = { provider: "github", externalId: "owner/repo#1", url: null };
-    linkRef(fixture.store, other, refB); // refs.id 1 — created first
-    linkRef(fixture.store, other, refA); // refs.id 2 — created second
+    const older = { provider: "github", externalId: "owner/repo#1", url: null };
+    const newer = { provider: "github", externalId: "owner/repo#2", url: null };
+    linkRef(fixture.store, other, older); // refs.id 1 — created first
+    linkRef(fixture.store, other, newer); // refs.id 2 — created second
 
     const task = seedTask(fixture.store);
-    linkRef(fixture.store, task, refB); // linked to `task` first
-    linkRef(fixture.store, task, refA); // linked to `task` second
+    linkRef(fixture.store, task, newer); // linked to `task` first
+    linkRef(fixture.store, task, older); // linked to `task` second
 
     expect(listRefs(fixture.store, task).map((ref) => ref.externalId)).toEqual([
       "owner/repo#2",
