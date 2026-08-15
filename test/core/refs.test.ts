@@ -147,33 +147,77 @@ describe("linkRef", () => {
     const events = eventsOfType("ref-linked");
     expect(events[0]?.actor).toBe(ACTOR);
     expect(result.ref.provider).toBe("github");
+    // "same transaction" is proven by the two rollback tests below — this
+    // one is scoped to the actor assertion only.
+  });
 
-    // Atomicity: a refusal (unknown task) must leave nothing behind — no
-    // half-written refs row, no task_refs row, no event — proving the ref
-    // write and the event share one transaction rather than two.
-    expect(() => linkRef(fixture.store, "kt-zzzzzz", GITHUB_REF)).toThrowError();
-    expect(refRows()).toHaveLength(1); // only the earlier, successful link
-    expect(eventsOfType("ref-linked")).toHaveLength(1);
+  it("rolls back the ref row, task_refs row and event together when the enclosing transaction fails", () => {
+    // better-sqlite3 nests `db.transaction(...)` as a SAVEPOINT when one is
+    // already open — so wrapping `linkRef` in an outer transaction that
+    // throws *after* `linkRef` has already returned proves every write it
+    // made (the refs row, the task_refs row, the ref-linked event) lives in
+    // one rollback-able unit, not two or three separately committed ones.
+    const task = seedTask(fixture.store);
+
+    expect(() =>
+      fixture.store.db.transaction(() => {
+        linkRef(fixture.store, task, GITHUB_REF);
+        throw new Error("boom, after linkRef already returned");
+      })(),
+    ).toThrowError("boom, after linkRef already returned");
+
+    expect(refRows()).toHaveLength(0);
+    expect(taskRefRows()).toHaveLength(0);
+    expect(eventsOfType("ref-linked")).toHaveLength(0);
+  });
+
+  it("rolls back an unlink, its event and its orphan GC together when the enclosing transaction fails", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+
+    expect(() =>
+      fixture.store.db.transaction(() => {
+        unlinkRef(fixture.store, task, "owner/repo#12");
+        throw new Error("boom, after unlinkRef already returned");
+      })(),
+    ).toThrowError("boom, after unlinkRef already returned");
+
+    // Still linked, the ref row was not GC'd, and no ref-unlinked event
+    // survives — the delete, the event, and the GC rolled back as one unit.
+    expect(listRefs(fixture.store, task)).toHaveLength(1);
+    expect(refRows()).toHaveLength(1);
+    expect(eventsOfType("ref-unlinked")).toHaveLength(0);
   });
 
   it("constraint violation never retried as id collision", () => {
-    // Simulates a row that another connection already created — the
-    // stale-lastInsertRowid trap: if linkRefWithin ever trusted
-    // `.lastInsertRowid` after an ignored insert, it would bind whatever
-    // leftover rowid the handle carried into `task_refs`, either violating
-    // the foreign key or silently pointing at the wrong ref.
-    const preExisting = fixture.store.db
+    // Two rows, so the target's real id (2) cannot coincidentally match
+    // whatever `sqlite3_last_insert_rowid()` happens to hold on this
+    // connection — the flaw a single-row setup has: seed a throwaway first
+    // row (id 1), the real target second (id 2), then delete the throwaway.
+    // Linking the task itself is the intervening insert that moves the
+    // connection's last-insert-rowid off of 2 and onto the task's own,
+    // unrelated rowid (empirically 1) — the exact stale value
+    // `linkRefWithin` must NOT trust after its own insert is ignored.
+    fixture.store.db
       .prepare("INSERT INTO refs (provider, external_id, url) VALUES (?,?,?)")
-      .run(GITHUB_REF.provider, GITHUB_REF.externalId, GITHUB_REF.url).lastInsertRowid;
+      .run("github", "throwaway/first#1", null);
+    const targetInsert = fixture.store.db
+      .prepare("INSERT INTO refs (provider, external_id, url) VALUES (?,?,?)")
+      .run(GITHUB_REF.provider, GITHUB_REF.externalId, GITHUB_REF.url);
+    const targetId = Number(targetInsert.lastInsertRowid);
+    expect(targetId).toBe(2);
+    fixture.store.db
+      .prepare("DELETE FROM refs WHERE provider = ? AND external_id = ?")
+      .run("github", "throwaway/first#1");
 
     const task = seedTask(fixture.store);
     const result = linkRef(fixture.store, task, GITHUB_REF);
 
-    expect(refRows()).toHaveLength(1);
     expect(result.action).toBe("linked");
+    expect(refRows()).toHaveLength(1);
 
     const taskRef = taskRefRows()[0];
-    expect(taskRef?.ref_id).toBe(Number(preExisting));
+    expect(taskRef?.ref_id).toBe(targetId);
   });
 });
 
@@ -301,6 +345,25 @@ describe("unlinkRef", () => {
     expect(listRefs(fixture.store, task)).toHaveLength(1);
   });
 
+  it("a numeric external_id from the escape hatch still resolves and removes", () => {
+    // The numeric refusal only fires when nothing on the task matches — a
+    // Jira/Bugzilla-style provider whose qualified id is itself all digits
+    // (stored via the escape hatch, no derivable url) must still be
+    // removable by that same digit string, not shadowed by the "looks like
+    // an internal row id" refusal.
+    const task = seedTask(fixture.store);
+    const validated = validateExplicitRef({ provider: "bugzilla", id: "12345" });
+    if (!validated.valid) throw new Error("expected validateExplicitRef to accept a numeric id");
+    expect(validated.ref.url).toBeNull();
+
+    linkRef(fixture.store, task, validated.ref);
+
+    const result = unlinkRef(fixture.store, task, "12345");
+
+    expect(result.action).toBe("unlinked");
+    expect(listRefs(fixture.store, task)).toEqual([]);
+  });
+
   it("unlink of never-linked ref refuses", () => {
     const task = seedTask(fixture.store);
 
@@ -329,6 +392,29 @@ describe("unlinkRef", () => {
     const types = page.events.map((event) => event.type);
     expect(types).toContain("ref-linked");
     expect(types).toContain("ref-unlinked");
+  });
+});
+
+describe("listRefs", () => {
+  it("orders by link order, not by when the underlying refs row was created", () => {
+    // refB is created (refs.id) before refA, but the task under test links
+    // refB first and refA second — task_refs.rowid (link order) and refs.id
+    // (creation order) now disagree, so ordering by the wrong column would
+    // list refA before refB.
+    const other = seedTask(fixture.store);
+    const refB = { provider: "github", externalId: "owner/repo#2", url: null };
+    const refA = { provider: "github", externalId: "owner/repo#1", url: null };
+    linkRef(fixture.store, other, refB); // refs.id 1 — created first
+    linkRef(fixture.store, other, refA); // refs.id 2 — created second
+
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, refB); // linked to `task` first
+    linkRef(fixture.store, task, refA); // linked to `task` second
+
+    expect(listRefs(fixture.store, task).map((ref) => ref.externalId)).toEqual([
+      "owner/repo#2",
+      "owner/repo#1",
+    ]);
   });
 });
 

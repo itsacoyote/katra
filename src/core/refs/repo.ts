@@ -17,16 +17,25 @@
  * in the same transaction as its cascading delete — `unlinkRef` is not its
  * only caller.
  *
- * Idempotence runs on `INSERT OR IGNORE`, and the trap that comes with it:
- * once `.changes === 0`, `.lastInsertRowid` is **stale** — better-sqlite3
- * does not reset it on an ignored insert, so it can read back a leftover
- * value from any earlier successful insert on that statement handle, not "no
- * row" or "this row". The only sound reading is `.changes === 1` means trust
- * it, anything else means re-`SELECT` by the unique key. This is not the
- * app-generated-id collision `insertWithRetry` (`tasks/ids.ts`) handles —
- * `refs.id` is a plain autoincrement rowid, nobody ever picks one, so a
- * `SQLITE_CONSTRAINT_UNIQUE` here is never a signal to try again with a
- * different value, only a signal that the row already exists.
+ * Idempotence runs on `INSERT ... ON CONFLICT (...) DO NOTHING`, targeted
+ * explicitly at each table's own unique key — **not** `INSERT OR IGNORE`,
+ * which would swallow every constraint violation on the statement (a `CHECK`
+ * failure, a `NOT NULL` failure) as silently as the one conflict it is
+ * actually meant to absorb. A targeted conflict clause suppresses only that
+ * one unique-key collision; anything else — a bad `provider`/`external_id`
+ * length, for one — surfaces as the real `SQLITE_CONSTRAINT_CHECK` it is,
+ * not a false "already exists" read.
+ *
+ * The trap that comes with the idempotent insert either way: once
+ * `.changes === 0`, `.lastInsertRowid` is **stale** — better-sqlite3 does not
+ * reset it on a no-op insert, so it can read back a leftover value from any
+ * earlier successful insert on the connection, not "no row" or "this row".
+ * The only sound reading is `.changes === 1` means trust it, anything else
+ * means re-`SELECT` by the unique key. This is not the app-generated-id
+ * collision `insertWithRetry` (`tasks/ids.ts`) handles — `refs.id` is an
+ * internal, reusable rowid (no `AUTOINCREMENT`; migration 0005), nobody ever
+ * picks one, so a unique-key conflict here is never a signal to try again
+ * with a different value, only a signal that the row already exists.
  *
  * `RefInput`/`RefResult` are declared here rather than in `refs/types.ts`
  * (out of scope for this task — write-fenced to `repo.ts` and its test) or
@@ -47,8 +56,6 @@ import type { OpenStore } from "../store.js";
 import { requireResolved, resolveId } from "../tasks/ids.js";
 import { getTask } from "../tasks/repo.js";
 import type { Ref } from "./types.js";
-
-export type { Ref } from "./types.js";
 
 /**
  * What `linkRef`/`linkRefWithin` accept.
@@ -149,7 +156,7 @@ function requireRefTarget(store: OpenStore, input: string): string {
  * neither `refs` nor `task_refs` (migration 0005) has a timestamp column to
  * stamp, so there is nothing here for one to do.
  *
- * Two inserts, both `INSERT OR IGNORE`:
+ * Two inserts, each `ON CONFLICT` targeted at its own table's unique key:
  *
  * 1. `refs`, keyed on `(provider, external_id)`. `.changes === 1` means this
  *    call created the row and its `lastInsertRowid` is trustworthy; anything
@@ -189,7 +196,10 @@ export function linkRefWithin(
   const taskId = requireRefTarget(store, taskIdInput);
 
   const insertInfo = store.db
-    .prepare("INSERT OR IGNORE INTO refs (provider, external_id, url) VALUES (?,?,?)")
+    .prepare(
+      `INSERT INTO refs (provider, external_id, url) VALUES (?,?,?)
+       ON CONFLICT (provider, external_id) DO NOTHING`,
+    )
     .run(input.provider, input.externalId, input.url);
 
   let record: RefRecord;
@@ -206,8 +216,9 @@ export function linkRefWithin(
       },
     };
   } else {
-    // Ignored: the row already exists. `.lastInsertRowid` is stale here (see
-    // module doc) — re-SELECT by the unique key rather than trust it.
+    // The unique-key conflict was suppressed and the row already exists.
+    // `.lastInsertRowid` is stale here (see module doc) — re-SELECT by the
+    // unique key rather than trust it.
     const existingRow = store.db
       .prepare("SELECT * FROM refs WHERE provider = ? AND external_id = ?")
       .get(input.provider, input.externalId) as RefRow | undefined;
@@ -215,8 +226,9 @@ export function linkRefWithin(
       throw new KatraException({
         code: "internal",
         message:
-          `refs (${input.provider}, ${input.externalId}) was ignored on insert but is not ` +
-          "findable by its own unique key — the write lock should make this impossible",
+          `refs (${input.provider}, ${input.externalId}) hit its own unique-key ` +
+          "conflict on insert but is not findable by that same key — the write " +
+          "lock should make this impossible",
       });
     }
     record = rowToRefRecord(existingRow);
@@ -228,7 +240,10 @@ export function linkRefWithin(
   }
 
   const taskRefInfo = store.db
-    .prepare("INSERT OR IGNORE INTO task_refs (task_id, ref_id) VALUES (?,?)")
+    .prepare(
+      `INSERT INTO task_refs (task_id, ref_id) VALUES (?,?)
+       ON CONFLICT (task_id, ref_id) DO NOTHING`,
+    )
     .run(taskId, record.id);
 
   return {
@@ -247,7 +262,11 @@ export function linkRefWithin(
  * event. The ref, the `task_refs` row and the `ref-linked` event — when one
  * is written at all — share one transaction and one timestamp.
  */
-export function linkRef(store: OpenStore, taskIdInput: string, input: RefInput): RefResult {
+export function linkRef(
+  store: OpenStore,
+  taskIdInput: string,
+  input: RefInput,
+): RefResult & { readonly action: "linked" | "already-linked" } {
   // Before the transaction: resolving the actor spawns git subprocesses, and
   // under `BEGIN IMMEDIATE` that holds the write lock across both.
   const actor = store.actor();
@@ -294,6 +313,27 @@ function describeRefCandidate(ref: Ref): string {
 }
 
 /**
+ * `taskId`'s own linked refs, in **link order** — `task_refs`'s own rowid
+ * (an ordinary rowid table; no `WITHOUT ROWID` on it, migration 0005), not
+ * `refs.id`. The two diverge whenever a ref that already existed for some
+ * other task is linked to this one after a ref that was created fresh: link
+ * order is what `requireLinkedRef`'s candidate list and `listRefs`/`show`/
+ * `brief` should render, not "whichever `refs` row happened to be created
+ * first, elsewhere." Shared by both — the only two readers of `task_refs`
+ * joined to `refs`.
+ */
+function linkedRefRows(store: OpenStore, taskId: string): RefRow[] {
+  return store.db
+    .prepare(
+      `SELECT r.* FROM refs r
+         JOIN task_refs tr ON tr.ref_id = r.id
+        WHERE tr.task_id = ?
+        ORDER BY tr.rowid`,
+    )
+    .all(taskId) as RefRow[];
+}
+
+/**
  * Resolves `refInput` against `taskId`'s **own** linked refs — never the
  * whole `refs` table, and never `resolveId`/`requireId` (risk note 17: those
  * range-scan `kt-`-prefixed ids against `tasks`, the wrong table entirely).
@@ -304,35 +344,20 @@ function describeRefCandidate(ref: Ref): string {
  * be removed by its id, and a differently-cased re-typing of an accepted
  * input resolve back to the row it named (spec amendment, epic comment 2).
  *
- * A purely numeric input refuses immediately, naming the two accepted forms
- * — the internal rowid is never published and never a valid input (spec
- * amendment). Two or more case-insensitive matches on one task refuse,
- * naming every match so a url can disambiguate them.
+ * The task-scoped match runs **first**. Only when nothing matches does a
+ * purely numeric input get its own refusal, naming the two accepted forms —
+ * the internal rowid is never published and never a valid input (spec
+ * amendment), but a provider whose own qualified id happens to be all
+ * digits (a Jira/Bugzilla-style numeric id via the escape hatch) is a real,
+ * removable external_id and must resolve like any other. Two or more
+ * case-insensitive matches on one task refuse, naming every match so a url
+ * can disambiguate them.
  */
 function requireLinkedRef(store: OpenStore, taskId: string, refInput: string): RefRecord {
   const trimmed = refInput.trim();
-
-  if (NUMERIC_INPUT_PATTERN.test(trimmed)) {
-    throw new KatraException({
-      code: "validation",
-      message:
-        `"${trimmed}" looks like a ref's internal row id, which is never a valid input — ` +
-        "remove a ref by its url or its qualified id (for example owner/repo#12, ENG-451)",
-      field: "ref",
-      value: trimmed,
-    });
-  }
-
   const lower = trimmed.toLowerCase();
 
-  const rows = store.db
-    .prepare(
-      `SELECT r.* FROM refs r
-         JOIN task_refs tr ON tr.ref_id = r.id
-        WHERE tr.task_id = ?
-        ORDER BY r.id`,
-    )
-    .all(taskId) as RefRow[];
+  const rows = linkedRefRows(store, taskId);
 
   const matches = rows
     .map(rowToRefRecord)
@@ -343,6 +368,16 @@ function requireLinkedRef(store: OpenStore, taskId: string, refInput: string): R
     );
 
   if (matches.length === 0) {
+    if (NUMERIC_INPUT_PATTERN.test(trimmed)) {
+      throw new KatraException({
+        code: "validation",
+        message:
+          `"${trimmed}" looks like a ref's internal row id, which is never a valid input — ` +
+          "remove a ref by its url or its qualified id (for example owner/repo#12, ENG-451)",
+        field: "ref",
+        value: trimmed,
+      });
+    }
     throw new KatraException({
       code: "not_found",
       message: `no ref matching "${trimmed}" is linked to ${taskId}`,
@@ -403,9 +438,10 @@ export function unlinkRefWithin(
     .run(taskId, match.id).changes;
 
   if (changes === 0) {
-    // The row `requireLinkedRef` just found was removed by someone else in
-    // the instant between that read and this delete. Refuse cleanly rather
-    // than report success for a row that is no longer there to remove.
+    // Unreachable under the write lock: `requireLinkedRef` and this DELETE
+    // run inside the same `BEGIN IMMEDIATE` transaction, so nothing else can
+    // remove the row in between. Defensive only — refuse cleanly rather than
+    // silently report success if this is ever somehow reached.
     throw new KatraException({
       code: "not_found",
       message: `no ref matching "${refInput}" is linked to ${taskId}`,
@@ -423,7 +459,11 @@ export function unlinkRefWithin(
  * transaction: a ref that no longer has any holder is deleted in the same
  * commit as the removal that orphaned it (spec requirement 6).
  */
-export function unlinkRef(store: OpenStore, taskIdInput: string, refInput: string): RefResult {
+export function unlinkRef(
+  store: OpenStore,
+  taskIdInput: string,
+  refInput: string,
+): RefResult & { readonly action: "unlinked" } {
   const actor = store.actor();
 
   return writeTx(store.db, (now) => {
@@ -490,23 +530,10 @@ export function gcOrphanRefsWithin(store: OpenStore, refIds: readonly number[]):
 }
 
 /**
- * Lists a task's own linked refs, oldest link first.
- *
- * Ordered by `refs.id` — insertion order — the same tie-break rationale
- * `listNotes`/`listLinks` use elsewhere: stable and cheap, with no ambiguous
- * timestamp to break ties on in the first place.
+ * Lists a task's own linked refs, oldest link first — see {@link linkedRefRows}
+ * for why that is `task_refs`'s own rowid and not `refs.id`.
  */
 export function listRefs(store: OpenStore, taskIdInput: string): Ref[] {
   const taskId = requireRefTarget(store, taskIdInput);
-
-  const rows = store.db
-    .prepare(
-      `SELECT r.* FROM refs r
-         JOIN task_refs tr ON tr.ref_id = r.id
-        WHERE tr.task_id = ?
-        ORDER BY r.id`,
-    )
-    .all(taskId) as RefRow[];
-
-  return rows.map(rowToRef);
+  return linkedRefRows(store, taskId).map(rowToRef);
 }
