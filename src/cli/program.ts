@@ -28,6 +28,7 @@ import { registerMigrate } from "./commands/migrate.js";
 import { registerNext } from "./commands/next.js";
 import { registerNote } from "./commands/note.js";
 import { registerRecent } from "./commands/recent.js";
+import { registerRef } from "./commands/ref.js";
 import { registerRelease } from "./commands/release.js";
 import { registerSearch } from "./commands/search.js";
 import { registerShow } from "./commands/show.js";
@@ -237,6 +238,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerDelete(program, context);
   registerLog(program, context);
   registerNote(program, context);
+  registerRef(program, context);
   registerNext(program, context);
   registerBrief(program, context);
   registerBoard(program, context);
