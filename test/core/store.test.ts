@@ -55,9 +55,19 @@ describe("openStore", () => {
       "events",
       "links",
       "notes",
+      "notes_fts",
+      "notes_fts_config",
+      "notes_fts_data",
+      "notes_fts_docsize",
+      "notes_fts_idx",
       "presence",
       "tags",
       "tasks",
+      "tasks_fts",
+      "tasks_fts_config",
+      "tasks_fts_data",
+      "tasks_fts_docsize",
+      "tasks_fts_idx",
     ]);
   });
 

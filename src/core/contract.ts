@@ -22,7 +22,7 @@
 
 import type { MigrationReport } from "./beads/types.js";
 import type { ClaimInfo } from "./claims/types.js";
-import type { Lane, NoteKind, Priority } from "./enums.js";
+import type { Kind, Lane, Level, NoteKind, Priority } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
 import type { Note } from "./notes/types.js";
 import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
@@ -428,6 +428,143 @@ export interface BoardResult {
   readonly pointer: string | null;
   /** The newest handoff, when `--digest` asked for it. */
   readonly digest: BoardDigest | null;
+}
+
+/**
+ * One entity with recorded activity — the row shape `recent` and `stale`
+ * share (F6 T4), and the base that `search`'s hit extends (T5).
+ *
+ * Epics appear here on equal footing with tasks: unlike {@link BoardResult}'s
+ * sections, which exclude an epic because it is a container nobody picks up,
+ * activity is a question about *history*, not about what is startable, and an
+ * epic accrues events the same as any task.
+ */
+export interface ActivityHit {
+  readonly id: string;
+  readonly title: string;
+  readonly level: Level;
+  readonly lane: Lane;
+  readonly kind: Kind;
+  readonly priority: Priority;
+  /** The epic this belongs under, or null for top-level work and for an epic itself. */
+  readonly epicId: string | null;
+  /**
+   * The most recent event's timestamp, or null when there is none.
+   *
+   * Null is only ever real on search's outer-joined filter path (T5): a task
+   * that matches the filters but was never touched still has to appear there
+   * — a filter narrows, it never deletes. `recent` and `stale` join inner
+   * (`activityJoin({outer: false})`, `src/core/activity.ts`), so every hit
+   * either of them returns truly has one; the field stays nullable regardless,
+   * because one document's shape cannot depend on which command produced it.
+   */
+  readonly lastActivity: string | null;
+}
+
+/** What `recent` prints. */
+export interface RecentResult {
+  readonly hits: readonly ActivityHit[];
+  /** True when the bound cut the result short. `recent` is capped by default, so it owes this the same as `log` does. */
+  readonly truncated: boolean;
+}
+
+/** What `stale` prints. */
+export interface StaleResult {
+  readonly hits: readonly ActivityHit[];
+  readonly truncated: boolean;
+  /**
+   * The cutoff actually applied, in katra's canonical timestamp format.
+   *
+   * Echoed rather than left implicit: `--older-than` has a default (2 weeks),
+   * and a result that does not say which instant it compared against leaves a
+   * caller guessing whether the default or an explicit flag produced it.
+   */
+  readonly olderThan: string;
+}
+
+/**
+ * One `search` result row — {@link ActivityHit} plus what made it match
+ * (F6 T5).
+ *
+ * `search.ts`'s rollup pins two independent properties, and both ride on this
+ * one row per matched entity:
+ *
+ * - `idMatch` is an **any-row property**: true the moment *any* branch of the
+ *   underlying query matched this entity by id, even when the row chosen to
+ *   populate `snippet`/`score` came from a different branch entirely (a task
+ *   matching both by id fragment and by text keeps `idMatch: true`, with the
+ *   text branch's real snippet on display — see `search.ts`'s `readSearch`
+ *   docs for the SQL shape that makes this true).
+ * - `snippet`, `score` (and the tier that picked them, internal to the query)
+ *   are **winning-row properties**: whichever single branch's row the rollup
+ *   selected for this entity.
+ *
+ * `null` on both `snippet` and `score` for an id-only match (nothing to
+ * excerpt or rank when the hit came from `tasks.id`, not FTS5) and for every
+ * row on the filter-only path (no query text at all to score or excerpt).
+ */
+export interface SearchHit extends ActivityHit {
+  /**
+   * A marked excerpt from the winning field, or `null` for an id-only match
+   * and for the filter-only path.
+   *
+   * Raw stored bytes, exactly as FTS5's `snippet()` returns them — sanitized
+   * at render, not here (module docs, `search.ts`). `--json` carries it
+   * verbatim per policy; the markers are display-best-effort and can collide
+   * with identical literal characters already in the stored text, so they
+   * carry no structural meaning a consumer should parse.
+   *
+   * The same holds for the CLI's own text-mode addition on top of this
+   * field: `formatSearch` (`cli/format.ts`) prefixes a note hit's rendered
+   * snippet line with a literal `note match — ` marker. Stored text — a
+   * title, a description, a note body — is exactly as free to *start with*
+   * that same literal as it is to contain `snippet()`'s own `[`/`]`
+   * brackets, so the prefix is display-best-effort too, not a signal a
+   * consumer can trust to distinguish a real note hit from a task hit whose
+   * stored text happens to spoof it. `matchedIn` below is the actual,
+   * structured answer to "did this come from a note or the task itself" —
+   * it is derived from which branch of the query matched, never from parsing
+   * rendered text, and it is what a caller should read instead.
+   */
+  readonly snippet: string | null;
+  /**
+   * The winning row's bm25 score — more negative is a better match — or
+   * `null` for an id-only match and for the filter-only path.
+   *
+   * Comparable only against another hit in the **same tier** (`matchedIn` the
+   * same value): bm25 magnitudes are not commensurable across `tasks_fts` and
+   * `notes_fts`, two structurally different indexes over different content.
+   */
+  readonly score: number | null;
+  /**
+   * Where the winning row's text lived — spec req 3's provenance marker,
+   * nothing more. `"task"` for a title/description hit and for an id-only
+   * match; `"note"` only when the winning row came from a note body. Also
+   * `"task"` on the filter-only path, where nothing actually matched by text
+   * or id at all — the value has no provenance to report there, and `"task"`
+   * is the same default an id-only match already uses rather than a third,
+   * union-widening state.
+   */
+  readonly matchedIn: "task" | "note";
+  /** True when this entity matched the id-fragment branch — see this interface's docs. */
+  readonly idMatch: boolean;
+}
+
+/** What `search` prints. */
+export interface SearchResult {
+  /**
+   * Echoed as given; empty when no query was supplied.
+   *
+   * A caller need not thread the query text through separately to know what
+   * produced these hits. A whitespace-only query still routes to the
+   * filter-only path (`search.ts`'s `readSearch`: `matchExpression` returns
+   * `null` for it, the one input FTS5's `MATCH` throws on) but is echoed
+   * verbatim here regardless — this field reports what was *asked*, not
+   * which path answered it.
+   */
+  readonly query: string;
+  readonly hits: readonly SearchHit[];
+  readonly truncated: boolean;
 }
 
 /** What `--help --json` prints: the usage screen, as data. */

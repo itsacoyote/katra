@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, and nineteen commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. Search and external refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, and twenty-two commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. External refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -137,6 +137,9 @@ which is what a session opening in a fresh worktree wants to read first.
 | `note add` · `note list` | Typed prose on a task: `general`, `handoff`, `decision`, `acceptance` |
 | `brief` | Everything needed to resume one task or epic, in one call — handoff body included |
 | `board` | Where the repository stands: in flight, ready, blocked, and what just moved |
+| `search` | Full-text over titles, descriptions and notes, plus structured filters, with or without query text |
+| `recent` | Activity-sorted — what has been touched, newest first |
+| `stale` | Open items with no recent activity — `--older-than` defaults to two weeks |
 
 Every read takes `--json`. Every refusal names what would unblock it — an ambiguous id lists the candidates, a rejected dependency prints the cycle path, and `next` with nothing ready tells you whether the work is blocked, untriaged, or simply finished.
 
@@ -160,9 +163,45 @@ katra: kt-s3l2m4 is held by main @ /path/to/repo, last seen just now — release
 
 `next` and `board` steer around a claim without ever moving it between the board's counts ([ADR-012](docs/decisions/ADR-012-claims-steer-not-move.md)): `next` never offers a task another worktree holds, and hands your own still-`Planned` claim back first if you have one; the board marks another worktree's claimed rows and lists them last. `katra release <id>` gives a claim back, and `close`/`cancel` release it for you automatically. A claim left behind by a session that will not return is taken over with `katra release <id> --force`, informed by exactly the holder and liveness a refusal already showed. Presence — the "last seen" behind that liveness — is a heartbeat only: every command bumps it for its own worktree, no hooks required ([ADR-011](docs/decisions/ADR-011-every-call-heartbeats.md)), and claims are scoped to a worktree rather than a session, so two agent sessions sharing one worktree share one claim too.
 
+### Finding things
+
+`katra search <query>` is full-text over titles, descriptions and note bodies, built on SQLite's own FTS5 — no extra dependency, and the index stays current automatically ([ADR-013](docs/decisions/ADR-013-fts5-external-content-triggers.md)). A note match rolls up to the task it belongs to and says so:
+
+```console
+$ katra search oauth
+kt-owvndz  P2  Defined  feat  oauth migration for the billing service
+    [oauth] migration for the billing service
+kt-cr8lrz  P2  Defined  feat  rotate the staging credentials
+    note match — still need to sort out the [oauth] callback…
+```
+
+The same command takes structured filters — `--lane`, `--kind`, `--level`, `--epic`, `--tag`, `--updated-before`/`--updated-after` — with or without query text, so "everything tagged `urgent`" is as valid a search as a keyword:
+
+```console
+$ katra search --tag urgent
+kt-ryc943  P2  Defined  feat  tag demo task
+```
+
+`katra recent` reads your own event history back to you, newest first — the direct answer to "what was I working on":
+
+```console
+$ katra recent
+kt-cr8lrz  P2  Defined  rotate the staging credentials  just now
+kt-owvndz  P2  Defined  oauth migration for the billing service  just now
+kt-8ind1q  P2  Defined  core tracker foundation  just now
+```
+
+`katra stale` is the inverse — open items nothing has touched in a while, oldest first, default window two weeks:
+
+```console
+$ katra stale
+stale — untouched since before 2026-07-31T02:43:24.049Z
+  kt-dlcpbk  P2  Defined  old audit follow-up nobody touched  15d ago
+```
+
 ## Still to come
 
-FTS5 search, external refs with pluggable providers, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
+External refs with pluggable providers, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
 
 Until `snapshot` lands, the store lives only in your `.git` directory: it is not shareable, not reviewable in a pull request, and does not survive a fresh clone.
 
@@ -191,7 +230,7 @@ pnpm test       # vitest
 pnpm check      # lint + typecheck + test — what CI runs
 ```
 
-The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. The traceability docs map every acceptance criterion to the test that covers it, and record where coverage is genuinely limited rather than claiming a tick: [`f1`](docs/f1-traceability.md), [`f2`](docs/f2-traceability.md), [`f3`](docs/f3-traceability.md), [`f4`](docs/f4-traceability.md), [`f5`](docs/f5-traceability.md).
+The suite runs against real SQLite in throwaway git repositories, and spawns real OS processes where multi-process contention is the thing under test. The traceability docs map every acceptance criterion to the test that covers it, and record where coverage is genuinely limited rather than claiming a tick: [`f1`](docs/f1-traceability.md), [`f2`](docs/f2-traceability.md), [`f3`](docs/f3-traceability.md), [`f4`](docs/f4-traceability.md), [`f5`](docs/f5-traceability.md), [`f6`](docs/f6-traceability.md).
 
 ## Migrating from beads
 

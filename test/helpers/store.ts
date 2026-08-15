@@ -89,3 +89,22 @@ export const OTHER_IDENTITY: Identity = {
 export function openAs(repoDir: string, identity: Identity): OpenStore {
   return openStore(repoDir, { identity: () => identity }).store;
 }
+
+/**
+ * Backdates `taskId`'s one recorded event directly, against the store at
+ * `repoDir` — the CLI has no way to produce a timestamp in the past, and a
+ * relative-time assertion ("3h ago", "older than the stale window") has to
+ * come from a real `created_at`, not a stubbed clock (recent.test.ts and
+ * stale.test.ts's shared fixture; T4/T5's own tests take the same
+ * direct-store approach for `readRecent`/`readStale`).
+ */
+export function backdate(repoDir: string, taskId: string, msAgo: number): void {
+  const { store } = openStore(repoDir, {});
+  try {
+    store.db
+      .prepare("UPDATE events SET created_at = ? WHERE entity_id = ?")
+      .run(new Date(Date.now() - msAgo).toISOString(), taskId);
+  } finally {
+    store.close();
+  }
+}

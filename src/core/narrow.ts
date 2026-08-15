@@ -7,6 +7,7 @@
  * so both narrow through a predicate rather than asserting with `as`.
  */
 
+import { parseWhen, WHEN_ACCEPTED_FORMS } from "./clock.js";
 import type { EventType, Kind, Lane, Level, NoteKind, Priority } from "./enums.js";
 import {
   EVENT_TYPES,
@@ -22,7 +23,7 @@ import {
   NOTE_KINDS,
   PRIORITIES,
 } from "./enums.js";
-import { KatraException } from "./errors.js";
+import { isKatraException, KatraException } from "./errors.js";
 
 function invalid(field: string, value: unknown, allowed: readonly (string | number)[]): never {
   throw new KatraException({
@@ -102,6 +103,42 @@ export function narrowCount(value: unknown, field: string): number {
       `${field} must be a whole number of items between 0 and ${MAX_COUNT} — ` +
       `got ${JSON.stringify(value)}`,
     field,
+    value,
+  });
+}
+
+/**
+ * Narrows a command-line "when" value — the flag behind `--older-than`,
+ * `--updated-before`, `--updated-after` — via {@link parseWhen}.
+ *
+ * The parsing grammar (relative durations, absolute timestamps, the strict
+ * `Date.parse` gate) lives once, in `clock.ts`; `parseWhen` itself doesn't
+ * know which flag it's parsing, so it names the field generically ("when").
+ * This is the CLI boundary: it adds the `unknown`/blank check every other
+ * narrow* function here starts with, and reports a refusal naming the actual
+ * flag rather than the generic field — same shape as `narrowCount`.
+ *
+ * Trims once and parses the trimmed text: `parseWhen`'s grammar is anchored
+ * (`^...$`), so unlike `narrowCount` — where `Number(" 5 ")` already ignores
+ * the padding — a padded value here would otherwise fail the regex gate and
+ * refuse. Trimming here keeps that padding-tolerant behavior consistent
+ * across every narrow* function in this module.
+ */
+export function narrowWhen(value: unknown, flag: string, now: string): string {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed !== "") {
+      try {
+        return parseWhen(trimmed, now);
+      } catch (error) {
+        if (!isKatraException(error)) throw error;
+      }
+    }
+  }
+  throw new KatraException({
+    code: "validation",
+    message: `${flag} must be ${WHEN_ACCEPTED_FORMS} — got ${JSON.stringify(value)}`,
+    field: flag,
     value,
   });
 }

@@ -27,8 +27,11 @@ import { registerLog } from "./commands/log.js";
 import { registerMigrate } from "./commands/migrate.js";
 import { registerNext } from "./commands/next.js";
 import { registerNote } from "./commands/note.js";
+import { registerRecent } from "./commands/recent.js";
 import { registerRelease } from "./commands/release.js";
+import { registerSearch } from "./commands/search.js";
 import { registerShow } from "./commands/show.js";
+import { registerStale } from "./commands/stale.js";
 import { registerUpdate } from "./commands/update.js";
 import type { OutputStreams } from "./output.js";
 import { EXIT, emitError, processStreams } from "./output.js";
@@ -240,6 +243,9 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerClaim(program, context);
   registerRelease(program, context);
   registerMigrate(program, context);
+  registerSearch(program, context);
+  registerRecent(program, context);
+  registerStale(program, context);
 
   return program;
 }

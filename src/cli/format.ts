@@ -7,7 +7,15 @@
  */
 
 import { nowIso, timeAgoOrNull } from "../core/clock.js";
-import type { BoardResult, BoardTask, BriefResult, ClaimInfo } from "../core/contract.js";
+import type {
+  BoardResult,
+  BoardTask,
+  BriefResult,
+  ClaimInfo,
+  RecentResult,
+  SearchResult,
+  StaleResult,
+} from "../core/contract.js";
 import type { LoggedEvent } from "../core/events/types.js";
 import type { Note } from "../core/notes/types.js";
 import type { Task, TaskDetail, TaskView } from "../core/tasks/types.js";
@@ -272,6 +280,21 @@ function describeEvent(event: LoggedEvent): string {
 const TITLE_WIDTH = 44;
 
 /**
+ * How much room `search`'s snippet line gets before it is cut.
+ *
+ * Wider than {@link TITLE_WIDTH} on purpose — the snippet owns its own
+ * indented line, not a shared row, so it can afford more room than a column
+ * squeezed between an id and a lane. It still needs a bound: FTS5's
+ * `snippet()` caps its excerpt at {@link SNIPPET_MAX_TOKENS} *tokens*
+ * (`search.ts`), not characters, and a single token has no length limit of
+ * its own — a note body that is one 800,000-character run with no whitespace
+ * (probe-verified) produces a "snippet" of the same length, unclamped. This
+ * is the render-side bound that stops that from reaching a terminal as one
+ * unbroken line; `--json` still carries `snippet` verbatim.
+ */
+const SNIPPET_WIDTH = 200;
+
+/**
  * Cuts a title to `width`, marking the cut with an ellipsis.
  *
  * Measured in code points, via `capText`, not in UTF-16 code units. The
@@ -332,6 +355,27 @@ export function padTo(text: string, width: number): string {
 }
 
 /**
+ * The bound-cut-it-short line the three chronological, `--limit`-bounded
+ * reads share: `formatEventLog`, `formatRecent` and `formatStale` all
+ * over-fetch by one and report the cut the identical way. One spelling
+ * rather than three near-identical literals drifting from each other.
+ *
+ * `formatSearch` does **not** reuse this one — see
+ * {@link RAISE_SEARCH_LIMIT_LINE}.
+ */
+const RAISE_LIMIT_LINE = "  … more; raise --limit to see further back";
+
+/**
+ * {@link RAISE_LIMIT_LINE}'s sibling for `formatSearch` alone (senior review
+ * MEDIUM). `RAISE_LIMIT_LINE`'s wording — "see further back" — is
+ * chronological: right for `log`/`recent`/`stale`, which all walk the event
+ * stream in time order and truncate a *time window*. `search`'s bound
+ * truncates a *relevance ranking* instead; there is no "further back" to see,
+ * only more matches outside the top `--limit`.
+ */
+const RAISE_SEARCH_LIMIT_LINE = "  … more; raise --limit to see more matches";
+
+/**
  * The event stream, newest first, one physical line per event.
  *
  * The actor column appears only when the log holds more than one — in a
@@ -343,7 +387,7 @@ export function formatEventLog(events: readonly LoggedEvent[], truncated: boolea
   // total — reporting "nothing has happened yet" there would be a claim of
   // completeness in exactly the case the flag exists to prevent.
   if (events.length === 0) {
-    return truncated ? "  … more; raise --limit to see further back" : "nothing has happened yet";
+    return truncated ? RAISE_LIMIT_LINE : "nothing has happened yet";
   }
 
   const width = (pick: (event: LoggedEvent) => string): number => columnWidth(events, pick);
@@ -386,7 +430,7 @@ export function formatEventLog(events: readonly LoggedEvent[], truncated: boolea
 
   // A bound that cannot report itself is indistinguishable from the end of the
   // history — and this is the read a session digest is built on.
-  return truncated ? `${rows}\n  … more; raise --limit to see further back` : rows;
+  return truncated ? `${rows}\n${RAISE_LIMIT_LINE}` : rows;
 }
 
 /**
@@ -801,4 +845,142 @@ export function formatBoard(board: BoardResult, now: string = nowIso()): string 
   }
 
   return lines.join("\n").trimStart();
+}
+
+/**
+ * `search`'s results: one aligned row per hit, an indented sanitized snippet
+ * line beneath it when there is one to show.
+ *
+ * Empty has two readings, same shape as {@link formatRecent}/
+ * {@link formatStale}: a genuine zero-hit search reads "no matches" (or "no
+ * matches for `<query>`"), but `--limit 0` can cut a non-empty ranking down
+ * to zero rows, and that case reads {@link RAISE_SEARCH_LIMIT_LINE} instead
+ * — silence there would claim completeness in exactly the case the flag
+ * exists to prevent.
+ *
+ * Columns mirror {@link formatTaskList} — id, priority, lane, kind (or
+ * `epic`, `formatTaskList`'s own convention for a hit at that level) — plus
+ * the clamped title. `snippet` is FTS5's raw output (`search.ts`'s docs: not
+ * sanitized until render), so it goes through {@link oneLine} here exactly
+ * like every other stored-text surface in this file, then {@link clamp} to
+ * {@link SNIPPET_WIDTH} — FTS5 bounds its excerpt by token count, not
+ * character count, so one pathological token can otherwise produce an
+ * unbounded line ({@link SNIPPET_WIDTH}'s docs). `--json` carries `snippet`
+ * verbatim regardless. The note-match marker is prefixed to the snippet line
+ * rather than the row above it, because the row's own columns describe the
+ * *task*, and "this hit came from a note, not the task's own text" is a fact
+ * about the snippet, not the task — and, like the marker text `snippet()`
+ * itself embeds, this prefix is display-best-effort only: see `SearchHit`'s
+ * `snippet` field docs (contract.ts) for why `matchedIn` is the field a
+ * consumer should actually trust.
+ *
+ * An id-only match or a filter-only-path hit carries no snippet at all
+ * (`SearchHit`'s docs) — those rows print with no second line.
+ */
+export function formatSearch(result: SearchResult): string {
+  if (result.hits.length === 0) {
+    // `--limit 0` can cut a genuinely non-empty ranking down to zero rows
+    // (req 11) — the same shape formatEventLog/formatRecent/formatStale
+    // already guard against, and search was the one place it went
+    // unguarded: "no matches" would be a false claim of completeness in
+    // exactly the case the flag exists to prevent (senior review MEDIUM).
+    if (result.truncated) return RAISE_SEARCH_LIMIT_LINE;
+    // The query is echoed even when it routed through the filter-only path
+    // (`SearchResult.query`'s docs), but an empty echo for a genuine
+    // filter-only search would read as "no matches for nothing" — so a blank
+    // query gets the same plain phrasing `formatTaskList` uses instead.
+    //
+    // The non-empty echo is clamped like every other rendered field in this
+    // file (security scan LOW): the query is stored, untrusted input with no
+    // length bound of its own, and every sibling render already caps what it
+    // prints — an unclamped echo here was the one place that bound was
+    // missing.
+    return result.query === ""
+      ? "no matches"
+      : `no matches for ${clamp(oneLine(result.query), TITLE_WIDTH)}`;
+  }
+
+  const width = (pick: (hit: SearchResult["hits"][number]) => string): number =>
+    columnWidth(result.hits, pick);
+  const laneWidth = width((hit) => hit.lane);
+  const kindWidth = width((hit) => (hit.level === "epic" ? "epic" : hit.kind));
+
+  const rows = result.hits.flatMap((hit) => {
+    const header = [
+      hit.id,
+      `P${hit.priority}`,
+      padTo(hit.lane, laneWidth),
+      padTo(hit.level === "epic" ? "epic" : hit.kind, kindWidth),
+      clamp(text(hit.title), TITLE_WIDTH),
+    ].join("  ");
+
+    if (hit.snippet === null) return [header];
+    const provenance = hit.matchedIn === "note" ? "note match — " : "";
+    return [header, `    ${provenance}${clamp(oneLine(hit.snippet), SNIPPET_WIDTH)}`];
+  });
+
+  return result.truncated ? [...rows, RAISE_SEARCH_LIMIT_LINE].join("\n") : rows.join("\n");
+}
+
+/**
+ * `recent`'s results: the entities with the most recent activity, newest
+ * first, one aligned row each with its age.
+ *
+ * Empty and truncated-and-empty read exactly like {@link formatEventLog}'s
+ * own two cases for the same shape: "nothing has happened yet" when the store
+ * genuinely holds nothing, and the raise-the-limit line alone when `--limit
+ * 0` cut a non-empty history down to zero rows — silence there would be a
+ * false claim of an empty store.
+ */
+export function formatRecent(result: RecentResult, now: string = nowIso()): string {
+  if (result.hits.length === 0) {
+    return result.truncated ? RAISE_LIMIT_LINE : "nothing has happened yet";
+  }
+
+  const idWidth = columnWidth(result.hits, (hit) => hit.id);
+  const laneWidth = columnWidth(result.hits, (hit) => hit.lane);
+
+  const rows = result.hits.map((hit) => {
+    // `recent` joins activity INNER (`activity.ts`'s docs), so every hit here
+    // truly has one — the null branch exists only because `ActivityHit` is
+    // shared with search's outer-joined path, not because it is reachable
+    // from this command.
+    const age = hit.lastActivity === null ? "" : (timeAgoOrNull(hit.lastActivity, now) ?? "");
+    return `${padTo(hit.id, idWidth)}  P${hit.priority}  ${padTo(hit.lane, laneWidth)}  ${clamp(text(hit.title), TITLE_WIDTH)}  ${age}`.trimEnd();
+  });
+
+  return result.truncated ? [...rows, RAISE_LIMIT_LINE].join("\n") : rows.join("\n");
+}
+
+/**
+ * `stale`'s results: open items untouched since before the window, oldest
+ * first.
+ *
+ * The window is echoed on its own header line — `StaleResult.olderThan`'s
+ * docs: the cutoff actually applied, default or explicit, so a caller never
+ * has to guess which one produced this list. It appears whether or not any
+ * hits came back, so an empty result still says what it checked, not just
+ * that it found nothing.
+ */
+export function formatStale(result: StaleResult, now: string = nowIso()): string {
+  const header = `stale — untouched since before ${result.olderThan}`;
+
+  if (result.hits.length === 0) {
+    return result.truncated ? `${header}\n${RAISE_LIMIT_LINE}` : `${header}\n  nothing is stale`;
+  }
+
+  const idWidth = columnWidth(result.hits, (hit) => hit.id);
+  const laneWidth = columnWidth(result.hits, (hit) => hit.lane);
+
+  const rows = result.hits.map((hit) => {
+    // Every `stale` hit joins activity INNER, same as `recent` above — never
+    // null in practice, but `ActivityHit` carries the wider, nullable type.
+    const age =
+      hit.lastActivity === null
+        ? "no activity"
+        : (timeAgoOrNull(hit.lastActivity, now) ?? "unknown");
+    return `  ${padTo(hit.id, idWidth)}  P${hit.priority}  ${padTo(hit.lane, laneWidth)}  ${clamp(text(hit.title), TITLE_WIDTH)}  ${age}`.trimEnd();
+  });
+
+  return [header, ...rows, ...(result.truncated ? [RAISE_LIMIT_LINE] : [])].join("\n");
 }
