@@ -14,6 +14,15 @@
  * cannot reference a TypeScript array, and `eventTypes` is a parameter rather
  * than a direct `EVENT_TYPES` import so a test can inject a value no
  * hardcoded list could know about.
+ *
+ * `refs`'s three `length(...)` CHECKs (`provider`, `external_id`, `url`,
+ * below) are NUL-truncatable: SQLite's `length()` on TEXT stops counting at
+ * the first NUL byte, so a value with one embedded can satisfy every CHECK
+ * here while its real, full-string length runs past what any of them allow.
+ * These bounds are not the security boundary — `refs/parse.ts`'s
+ * control-character screen (`parseRefInput`/`validateExplicitRef`) is,
+ * refusing a NUL outright at the input boundary before a value ever reaches
+ * this table.
  */
 
 import { EVENT_TYPES, sqlEnum } from "../../enums.js";

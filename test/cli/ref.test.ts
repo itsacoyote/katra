@@ -223,6 +223,47 @@ describe("katra ref add", () => {
     expect(briefed.stdout).toContain("acme/widgets#31");
   });
 
+  it("an at-DDL-max url renders clamped in show", async () => {
+    // Validate round 2, finding LOW-2: refs.url's own bound is 2048
+    // characters (migration 0005's CHECK), and formatRefLine had no width
+    // clamp of its own — a url at that bound turned a show block into one
+    // unbroken line. The same treatment as search's snippet: cut, marked
+    // with an ellipsis, --json still carries it whole.
+    const task = await add(["a task"]);
+    const base = "https://example.com/";
+    const url = base + "a".repeat(2048 - base.length);
+    expect(url).toHaveLength(2048);
+
+    const added = await runCli(
+      ["ref", "add", task, "--provider", "x", "--id", "clamp-test", "--url", url, "--json"],
+      { cwd: repo.dir },
+    );
+    expect(added.exitCode, added.stderr).toBe(EXIT.ok);
+    expect((added.json() as RefResult).ref.url).toBe(url);
+
+    const shown = await runCli(["show", task], { cwd: repo.dir });
+    expect(shown.exitCode, shown.stderr).toBe(EXIT.ok);
+    expect(shown.stdout).toContain("…");
+    expect(shown.stdout).not.toContain(url);
+  });
+
+  it("a url backfill prints wording distinct from the linked/already-linked cases", async () => {
+    // Validate round 2, finding M1: the text output must not read the
+    // backfill as a no-op — it renders neither "linked" alone (which would
+    // hide that this was a re-add) nor "already linked" (which is this
+    // module's own wording for "nothing changed", and something did).
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "ENG-500"], { cwd: repo.dir });
+
+    const backfilled = await runCli(["ref", "add", task, "https://linear.app/acme/issue/ENG-500"], {
+      cwd: repo.dir,
+    });
+
+    expect(backfilled.exitCode, backfilled.stderr).toBe(EXIT.ok);
+    expect(backfilled.stdout).toContain("url recorded");
+    expect(backfilled.stdout).not.toContain("already linked");
+  });
+
   it("log renders ref-linked/ref-unlinked rows through the existing path (no crash, ref oneLined)", async () => {
     const task = await add(["a task"]);
     await runCli(["ref", "add", task, "https://github.com/acme/widgets/pull/9"], {

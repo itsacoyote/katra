@@ -41,10 +41,21 @@
  * it is this module's own internal input shape for `linkRef`/`linkRefWithin`,
  * never published — `contract.ts` re-exports only what a `--json` document
  * carries. `RefResult` **is** published, so it lives in `contract.ts`
- * alongside `LinkResult` (F7 T5) and is imported back from there; the shape
- * is unchanged from what this module declared before that move — `action:
- * "linked" | "already-linked" | "unlinked"`, `taskId`, `ref: Ref` — so every
- * caller here needed no change beyond the import.
+ * alongside `LinkResult` (F7 T5) and is imported back from there — `action:
+ * "linked" | "already-linked" | "url-backfilled" | "unlinked"`, `taskId`,
+ * `ref: Ref`.
+ *
+ * **`"url-backfilled"` is not part of the original design** (validate round
+ * 2, finding M1): the plan-era shape had only three actions, on the reasoning
+ * that filling in a bare ref's `url` from `NULL` was an idempotence detail —
+ * the same "nothing new happened" case as `"already-linked"`. That reasoning
+ * missed that `refs.url` is a column **every task linking that row shares**,
+ * so the fill-in is a real, visible mutation of shared state, not a no-op —
+ * and it was landing with no event and no distinguishable `action`, an
+ * audited-writes module with one silent write. `linkRefWithin` now reports it
+ * as its own action, and `linkRef` events it exactly like a fresh link (see
+ * both functions' docs for the full reasoning and the entity-scoping this
+ * implies for a *different* task sharing the same row).
  */
 
 import type { RefResult } from "../contract.js";
@@ -53,7 +64,7 @@ import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
 import { narrowNullableText, narrowText } from "../narrow.js";
 import type { OpenStore } from "../store.js";
-import { requireResolved, resolveId } from "../tasks/ids.js";
+import { MAX_CANDIDATES, requireResolved, resolveId } from "../tasks/ids.js";
 import { getTask } from "../tasks/repo.js";
 import type { Ref } from "./types.js";
 
@@ -140,7 +151,7 @@ function requireRefTarget(store: OpenStore, input: string): string {
  * **Must be called inside an open transaction**; see `addLinkWithin`'s guard,
  * which this mirrors. Writes no event: `linkRef` is the only caller during
  * ordinary use, and appends `ref-linked` itself only when this reports
- * `action: "linked"`.
+ * `action: "linked"` or `"url-backfilled"`.
  *
  * Takes no `createdAt` context, unlike `addLinkWithin`/`createNoteWithin`:
  * neither `refs` nor `task_refs` (migration 0005) has a timestamp column to
@@ -159,9 +170,22 @@ function requireRefTarget(store: OpenStore, input: string): string {
  *    stored, no later call — with a null url or a different one — ever
  *    overwrites it. A provider's first-recorded canonical url is not
  *    something a possibly-stale second caller gets to rewrite.
- * 2. `task_refs`, the join row. `.changes === 1` here is what `action`
- *    reports: a fresh link for *this task*, regardless of whether the `refs`
- *    row itself was just created or already existed for some other task.
+ *
+ *    **The backfill is a real mutation of a row every task holding it
+ *    shares** (validate round 2, finding M1) — `refs.url` is not scoped to
+ *    the task that happens to be calling. `linkRef` treats it accordingly:
+ *    when the fill-in is the only thing this call did (`task_refs` already
+ *    held the link — see point 2), the action is `"url-backfilled"`, not
+ *    `"already-linked"`, precisely because something *did* change and
+ *    `"already-linked"` is this module's signal that nothing did. See
+ *    `linkRef`'s docs for why that also means an event.
+ * 2. `task_refs`, the join row. `.changes === 1` here is a fresh link for
+ *    *this task*, regardless of whether the `refs` row itself was just
+ *    created or already existed for some other task — and takes precedence
+ *    over the backfill signal above: a brand-new link already gets its own
+ *    `ref-linked` event (point 1's mutation rides along on it, evented once,
+ *    not twice), so `action` is `"linked"` even when this same call also
+ *    backfilled the shared row's url.
  */
 export function linkRefWithin(
   store: OpenStore,
@@ -171,7 +195,7 @@ export function linkRefWithin(
   readonly taskId: string;
   readonly refId: number;
   readonly ref: Ref;
-  readonly action: "linked" | "already-linked";
+  readonly action: "linked" | "already-linked" | "url-backfilled";
 } {
   if (!store.db.inTransaction) {
     throw new KatraException({
@@ -193,6 +217,10 @@ export function linkRefWithin(
     .run(input.provider, input.externalId, input.url);
 
   let record: RefRecord;
+  // Set only in the "row already existed" branch below, and only when this
+  // call actually changed `url` — never for a row this call itself created,
+  // which stores `input.url` as an ordinary part of the insert, not a fill-in.
+  let urlBackfilled = false;
   if (insertInfo.changes === 1) {
     record = {
       id: Number(insertInfo.lastInsertRowid),
@@ -226,6 +254,7 @@ export function linkRefWithin(
     if (record.ref.url === null && input.url !== null) {
       store.db.prepare("UPDATE refs SET url = ? WHERE id = ?").run(input.url, record.id);
       record = { id: record.id, ref: { ...record.ref, url: input.url } };
+      urlBackfilled = true;
     }
   }
 
@@ -236,27 +265,48 @@ export function linkRefWithin(
     )
     .run(taskId, record.id);
 
+  const linkedFresh = taskRefInfo.changes === 1;
+
   return {
     taskId,
     refId: record.id,
     ref: record.ref,
-    action: taskRefInfo.changes === 1 ? "linked" : "already-linked",
+    action: linkedFresh ? "linked" : urlBackfilled ? "url-backfilled" : "already-linked",
   };
 }
 
 /**
  * Links a reference to a task and records that it happened.
  *
- * Idempotent: re-linking the same `(task, provider, externalId)` is a no-op
- * that reports `already-linked` rather than a duplicate row or a second
- * event. The ref, the `task_refs` row and the `ref-linked` event — when one
- * is written at all — share one transaction and one timestamp.
+ * Idempotent: re-linking the same `(task, provider, externalId)` with nothing
+ * new to say is a no-op that reports `already-linked` rather than a duplicate
+ * row or a second event.
+ *
+ * **A url backfill is not that.** `refs.url` is a column every task linking
+ * that row shares, so filling it in from `NULL` on a re-add is a real,
+ * store-wide mutation — an unaudited one before this fix (validate round 2,
+ * finding M1): the row visibly changed for every task holding it, `linkRef`
+ * reported `already-linked` (this module's own definition of "nothing
+ * changed"), and no event recorded that anything happened. A `ref-linked`
+ * event now fires whenever `linkRefWithin` reports `"linked"` **or**
+ * `"url-backfilled"` — the same event type either way, since both mean this
+ * task's own link now points at a ref with a url it did not have a moment
+ * ago, which is exactly what a reader of this task's history needs to know.
+ * The event's `entityId` is the task that issued *this* command, per ADR-008 —
+ * a different task sharing the same `refs` row sees its own rendered url
+ * change with no event of its own, which is correct: nothing happened to
+ * *that* task's link, only to a column the two rows both read from, and its
+ * own history is unchanged (see `linkRefWithin`'s docs for the audit trail
+ * that does exist: `ref.externalId` names one row across every task's log).
+ *
+ * The ref, the `task_refs` row and the event — when one is written at all —
+ * share one transaction and one timestamp.
  */
 export function linkRef(
   store: OpenStore,
   taskIdInput: string,
   input: RefInput,
-): RefResult & { readonly action: "linked" | "already-linked" } {
+): RefResult & { readonly action: "linked" | "already-linked" | "url-backfilled" } {
   // Before the transaction: resolving the actor spawns git subprocesses, and
   // under `BEGIN IMMEDIATE` that holds the write lock across both.
   const actor = store.actor();
@@ -264,7 +314,7 @@ export function linkRef(
   return writeTx(store.db, (now) => {
     const { taskId, ref, action } = linkRefWithin(store, taskIdInput, input);
 
-    if (action === "linked") {
+    if (action === "linked" || action === "url-backfilled") {
       const task = getTask(store, taskId);
       if (task === undefined) {
         throw new KatraException({
@@ -324,38 +374,109 @@ function linkedRefRows(store: OpenStore, taskId: string): RefRow[] {
 }
 
 /**
+ * Splits `input` into a `{provider, id}` guess on its **first** `:` — the
+ * `provider:externalId` resolution form, `describeRefCandidate`'s own shape
+ * (modulo the space its rendering adds after the colon, which this trims
+ * away so a copy-pasted candidate line still resolves). `undefined` when
+ * `input` has no colon at all, so a bare `owner/repo#12` or `ENG-451` never
+ * reaches this tier with a nonsensical split.
+ *
+ * Splitting on the *first* colon, not looking for a unique one, is
+ * deliberate: `externalId` itself may contain one (a Jira-style
+ * `PROJECT:123`, hypothetically), and `provider` never legitimately does —
+ * `validateExplicitRef` accepts an arbitrary provider string, but every real
+ * one, GitHub/Linear included, is a short bare word.
+ */
+function splitProviderId(
+  input: string,
+): { readonly provider: string; readonly id: string } | undefined {
+  const colonIndex = input.indexOf(":");
+  if (colonIndex === -1) return undefined;
+  return { provider: input.slice(0, colonIndex).trim(), id: input.slice(colonIndex + 1).trim() };
+}
+
+/**
  * Resolves `refInput` against `taskId`'s **own** linked refs — never the
  * whole `refs` table, and never `resolveId`/`requireId` (risk note 17: those
  * range-scan `kt-`-prefixed ids against `tasks`, the wrong table entirely).
  *
- * Comparison is case-insensitive (`toLowerCase()`, locale-independent) and
- * checked against both a row's `url` and its `external_id` — never provider,
- * and never `parseRefInput`: this lets an escape-hatch ref with a `NULL` url
- * be removed by its id, and a differently-cased re-typing of an accepted
- * input resolve back to the row it named (spec amendment, epic comment 2).
+ * Three resolution forms, every comparison case-insensitive
+ * (`toLowerCase()`, locale-independent) and never through `parseRefInput`
+ * (this lets an escape-hatch ref with a `NULL` url be removed by its id, and
+ * a differently-cased re-typing of an accepted input resolve back to the row
+ * it named — spec amendment, epic comment 2): exact **url** match, exact
+ * **`provider:externalId`** match (split on the input's first colon,
+ * {@link splitProviderId} — added by validate round 2's finding M2: two refs
+ * can share both `external_id`, e.g. a Jira-style `SHARED-1` reused across
+ * providers, *and*, via the explicit escape hatch, `url` — a case neither of
+ * the other two forms can tell apart no matter which one a caller tries,
+ * since both rows match either one identically; `provider:externalId` is the
+ * only input shape guaranteed unique per row, `refs`'s own
+ * `UNIQUE (provider, external_id)` constraint, migration 0005), and bare
+ * **`external_id`**, regardless of provider — the original, provider-blind
+ * form.
  *
- * The task-scoped match runs **first**. Only when nothing matches does a
- * purely numeric input get its own refusal, naming the two accepted forms —
- * the internal rowid is never published and never a valid input (spec
- * amendment), but a provider whose own qualified id happens to be all
- * digits (a Jira/Bugzilla-style numeric id via the escape hatch) is a real,
- * removable external_id and must resolve like any other. Two or more
- * case-insensitive matches on one task refuse, naming every match so a url
- * can disambiguate them.
+ * **Every row matching *any* of the three counts once**, unioned rather than
+ * tried as exclusive alternatives — a task can hold two entirely different
+ * refs where one's url and the other's external_id both happen to equal the
+ * input string (a real, tested case: an explicit ref stored with its id set
+ * to another ref's url, verbatim), and both are genuinely what the input
+ * could mean. Silently keeping only the first criterion's hit would resolve
+ * the "wrong" one without ever telling the caller the other existed. The one
+ * exception is the `provider:externalId` split itself: it is **not**
+ * attempted when the input already matched by url, because a url routinely
+ * contains a `:` of its own (`https:`) that would otherwise feed the split
+ * nonsense — a candidate that can never legitimately match a stored
+ * `provider` and so costs a query for nothing. A row satisfying more than
+ * one criterion at once (theoretically possible, never seen in practice)
+ * counts once, not twice — matches are deduplicated by `refs.id`.
+ *
+ * Only once the union comes back empty does a purely numeric input get its
+ * own refusal, naming the two accepted forms — the internal rowid is never
+ * published and never a valid input (spec amendment), but a provider whose
+ * own qualified id happens to be all digits (a Jira/Bugzilla-style numeric
+ * id via the escape hatch) is a real, removable external_id and must resolve
+ * like any other, which the bare-`external_id` criterion above already gave
+ * it the chance to do. Two or more matches refuse, naming every match
+ * (capped at {@link MAX_CANDIDATES}, `tasks/ids.ts`'s own bound, the same
+ * reason a partial-id match caps there) so a url or a `provider:id` pair can
+ * disambiguate them.
  */
 function requireLinkedRef(store: OpenStore, taskId: string, refInput: string): RefRecord {
   const trimmed = refInput.trim();
   const lower = trimmed.toLowerCase();
 
-  const rows = linkedRefRows(store, taskId);
+  const records = linkedRefRows(store, taskId).map(rowToRefRecord);
 
-  const matches = rows
-    .map(rowToRefRecord)
-    .filter(
-      (record) =>
-        (record.ref.url !== null && record.ref.url.toLowerCase() === lower) ||
-        record.ref.externalId.toLowerCase() === lower,
-    );
+  const urlMatches = records.filter(
+    (record) => record.ref.url !== null && record.ref.url.toLowerCase() === lower,
+  );
+
+  const providerIdMatches: RefRecord[] = [];
+  if (urlMatches.length === 0) {
+    const split = splitProviderId(trimmed);
+    if (split !== undefined && split.provider !== "" && split.id !== "") {
+      const providerLower = split.provider.toLowerCase();
+      const idLower = split.id.toLowerCase();
+      providerIdMatches.push(
+        ...records.filter(
+          (record) =>
+            record.ref.provider.toLowerCase() === providerLower &&
+            record.ref.externalId.toLowerCase() === idLower,
+        ),
+      );
+    }
+  }
+
+  const bareIdMatches = records.filter((record) => record.ref.externalId.toLowerCase() === lower);
+
+  const seenIds = new Set<number>();
+  const matches: RefRecord[] = [];
+  for (const candidate of [...urlMatches, ...providerIdMatches, ...bareIdMatches]) {
+    if (seenIds.has(candidate.id)) continue;
+    seenIds.add(candidate.id);
+    matches.push(candidate);
+  }
 
   if (matches.length === 0) {
     if (NUMERIC_INPUT_PATTERN.test(trimmed)) {
@@ -381,14 +502,18 @@ function requireLinkedRef(store: OpenStore, taskId: string, refInput: string): R
   }
 
   if (matches.length > 1) {
+    const truncated = matches.length > MAX_CANDIDATES;
     throw new KatraException({
       code: "ambiguous_id",
       message:
-        `"${trimmed}" matches ${matches.length} refs linked to ${taskId} — ` +
-        "disambiguate with the url",
+        (truncated
+          ? `"${trimmed}" matches more than ${MAX_CANDIDATES} refs linked to ${taskId} — here are the first ${MAX_CANDIDATES}`
+          : `"${trimmed}" matches ${matches.length} refs linked to ${taskId}`) +
+        " — disambiguate with the url, or with the provider:id form " +
+        "(for example, github:owner/repo#12)",
       input: trimmed,
-      candidates: matches.map((match) => describeRefCandidate(match.ref)),
-      truncated: false,
+      candidates: matches.slice(0, MAX_CANDIDATES).map((match) => describeRefCandidate(match.ref)),
+      truncated,
     });
   }
 

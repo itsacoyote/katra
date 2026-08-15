@@ -12,6 +12,7 @@ import {
   unlinkRefWithin,
 } from "../../src/core/refs/repo.js";
 import { openStore } from "../../src/core/store.js";
+import { MAX_CANDIDATES } from "../../src/core/tasks/ids.js";
 import { runConcurrent } from "../helpers/concurrent.js";
 import { seedEpic, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
@@ -111,22 +112,36 @@ describe("linkRef", () => {
     expect(eventsOfType("ref-linked")).toHaveLength(1);
   });
 
-  it("bare-id then URL backfills null url, second URL never overwrites, no second event", () => {
+  it("bare-id then URL backfills null url, second URL never overwrites, url-backfilled events once", () => {
+    // Validate round 2, finding M1: a url backfill is a real mutation of a
+    // row every task holding it shares, so it now reports its own action
+    // and events exactly once — never silently as "already-linked" (this
+    // module's own signal for "nothing changed").
     const task = seedTask(fixture.store);
 
     const first = linkRef(fixture.store, task, LINEAR_BARE_REF);
     expect(first.ref.url).toBeNull();
+    expect(first.action).toBe("linked");
+    expect(eventsOfType("ref-linked")).toHaveLength(1);
 
     const backfillUrl = "https://linear.app/acme/issue/ENG-451";
-    const second = linkRef(fixture.store, task, {
-      provider: "linear",
-      externalId: "ENG-451",
-      url: backfillUrl,
-    });
-    expect(second.action).toBe("already-linked");
+    const backfillInput = { provider: "linear", externalId: "ENG-451", url: backfillUrl };
+
+    const second = linkRef(fixture.store, task, backfillInput);
+    expect(second.action).toBe("url-backfilled");
     expect(second.ref.url).toBe(backfillUrl);
     expect(refRows()[0]?.url).toBe(backfillUrl);
+    // Exactly one new event for the backfill — two total now, not zero.
+    expect(eventsOfType("ref-linked")).toHaveLength(2);
 
+    // A byte-identical re-add (same triple, url already stored) is the true
+    // no-op AC 1 promises: still already-linked, still no new event.
+    const identicalReAdd = linkRef(fixture.store, task, backfillInput);
+    expect(identicalReAdd.action).toBe("already-linked");
+    expect(eventsOfType("ref-linked")).toHaveLength(2);
+
+    // A different url, once one is already stored, never overwrites it —
+    // and is reported as the ordinary no-op, not a second backfill.
     const third = linkRef(fixture.store, task, {
       provider: "linear",
       externalId: "ENG-451",
@@ -137,7 +152,40 @@ describe("linkRef", () => {
     expect(refRows()[0]?.url).toBe(backfillUrl);
 
     expect(refRows()).toHaveLength(1);
-    expect(eventsOfType("ref-linked")).toHaveLength(1);
+    expect(eventsOfType("ref-linked")).toHaveLength(2);
+  });
+
+  it("cross-task backfill events under the task that issued the command, not the task whose view changed", () => {
+    // The probe M1 names: task A links a bare Linear id (url null); task B
+    // then links the *same* ref with a url, backfilling the shared row.
+    // task_refs is brand new for B, so this is an ordinary "linked" event
+    // for B — a fresh link already carries its own event, taking precedence
+    // over the backfill signal (linkRefWithin's docs). Task A's rendered
+    // url changes too, but no event is stamped on A: nothing happened to
+    // A's own link, only to a column the two rows both read from, and A's
+    // history stays exactly as it was — traceable through the shared
+    // `ref.externalId`, not through a phantom event on a task the command
+    // never named.
+    const taskA = seedTask(fixture.store);
+    const taskB = seedTask(fixture.store);
+
+    linkRef(fixture.store, taskA, LINEAR_BARE_REF);
+    expect(eventsOfType("ref-linked").filter((e) => e.entity_id === taskA)).toHaveLength(1);
+
+    const backfillUrl = "https://linear.app/acme/issue/ENG-451";
+    const resultB = linkRef(fixture.store, taskB, {
+      provider: "linear",
+      externalId: "ENG-451",
+      url: backfillUrl,
+    });
+
+    expect(resultB.action).toBe("linked");
+    expect(eventsOfType("ref-linked").filter((e) => e.entity_id === taskB)).toHaveLength(1);
+    // A's own event count is unchanged by B's command.
+    expect(eventsOfType("ref-linked").filter((e) => e.entity_id === taskA)).toHaveLength(1);
+
+    // A's *view* did change — traceable through the shared row, not an event.
+    expect(listRefs(fixture.store, taskA)[0]?.url).toBe(backfillUrl);
   });
 
   it("same ref on two tasks shares one row", () => {
@@ -400,6 +448,61 @@ describe("unlinkRef", () => {
     expect(listRefs(fixture.store, task)).toEqual([
       expect.objectContaining({ provider: "foo", externalId: "ABC-123" }),
     ]);
+  });
+
+  it("two refs sharing both external_id and url on one task remove via provider:id", () => {
+    // Validate round 2, finding M2: two providers can share external_id
+    // (e.g. a Jira-style "SHARED-1") and, via the escape hatch, the exact
+    // same url too — a case neither existing form can tell apart, since
+    // both rows match either one. The old ambiguity hint ("disambiguate
+    // with the url") is provably false here.
+    const task = seedTask(fixture.store);
+    const sharedUrl = "https://x.example/shared";
+    linkRef(fixture.store, task, { provider: "alpha", externalId: "SHARED-1", url: sharedUrl });
+    linkRef(fixture.store, task, { provider: "beta", externalId: "SHARED-1", url: sharedUrl });
+
+    expect(() => unlinkRef(fixture.store, task, sharedUrl)).toThrowError(/matches 2 refs/);
+    expect(() => unlinkRef(fixture.store, task, "SHARED-1")).toThrowError(/matches 2 refs/);
+
+    const result = unlinkRef(fixture.store, task, "alpha:SHARED-1");
+
+    expect(result.action).toBe("unlinked");
+    expect(result.ref.provider).toBe("alpha");
+    expect(listRefs(fixture.store, task)).toEqual([
+      expect.objectContaining({ provider: "beta", externalId: "SHARED-1" }),
+    ]);
+  });
+
+  it("ambiguity refusal names the provider:id form", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, { provider: "alpha", externalId: "SHARED-1", url: null });
+    linkRef(fixture.store, task, { provider: "beta", externalId: "SHARED-1", url: null });
+
+    try {
+      unlinkRef(fixture.store, task, "SHARED-1");
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.message).toMatch(/provider:id/);
+    }
+  });
+
+  it("many-match refusal caps candidates at MAX_CANDIDATES and sets truncated", () => {
+    const task = seedTask(fixture.store);
+    for (let i = 0; i < MAX_CANDIDATES + 1; i++) {
+      linkRef(fixture.store, task, { provider: `provider-${i}`, externalId: "DUP-1", url: null });
+    }
+
+    try {
+      unlinkRef(fixture.store, task, "DUP-1");
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("ambiguous_id");
+      if (error.detail.code !== "ambiguous_id") throw error;
+      expect(error.detail.candidates).toHaveLength(MAX_CANDIDATES);
+      expect(error.detail.truncated).toBe(true);
+    }
   });
 
   it("numeric input refuses naming accepted forms", () => {

@@ -93,10 +93,19 @@ function claimedField(claim: ClaimInfo, now: string): string {
  * is for here), so
  * every one goes through {@link text} here exactly like a task's own title or
  * description does. `--json` carries them verbatim per house policy.
+ *
+ * The url is also **width-clamped** (validate round 2, finding LOW-2), the
+ * same treatment `search`'s snippet gets and titles get at a narrower
+ * {@link TITLE_WIDTH}: `refs.url`'s own bound is 2048 characters (migration
+ * 0005's `CHECK`), and an unclamped one of those turns a `show`/`brief`
+ * block into a single unbroken line that pushes everything below it off
+ * screen — the identical failure shape {@link SNIPPET_WIDTH}'s own docs
+ * describe for a pathological FTS5 excerpt. `--json` still carries `url`
+ * verbatim, uncapped, same as every other field here.
  */
 function formatRefLine(ref: Ref): string {
   const qualified = `${text(ref.provider)}: ${text(ref.externalId)}`;
-  return ref.url === null ? qualified : `${qualified}  ${text(ref.url)}`;
+  return ref.url === null ? qualified : `${qualified}  ${clamp(text(ref.url), SNIPPET_WIDTH)}`;
 }
 
 /**
@@ -108,6 +117,12 @@ function formatRefLine(ref: Ref): string {
  * keeping it a distinct `action`: an agent re-adding a ref it already
  * recorded needs to read "this was already there" off the text output the
  * same way `--json` already tells it apart.
+ *
+ * `"url-backfilled"` (validate round 2, finding M1) gets a third, equally
+ * distinct wording — "linked · url recorded" — deliberately not reusing
+ * "already linked": a caller reading the text output, same as one reading
+ * `--json`, must not mistake a real mutation of the shared `refs` row for
+ * the no-op `"already-linked"` otherwise reads as.
  */
 export function formatRefResult(result: RefResult): string {
   const line = formatRefLine(result.ref);
@@ -116,6 +131,8 @@ export function formatRefResult(result: RefResult): string {
       return `${result.taskId}  linked  ${line}`;
     case "already-linked":
       return `${result.taskId}  already linked  ${line}`;
+    case "url-backfilled":
+      return `${result.taskId}  linked · url recorded  ${line}`;
     case "unlinked":
       return `${result.taskId}  unlinked  ${line}`;
     default: {

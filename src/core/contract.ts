@@ -149,9 +149,20 @@ export interface LinkResult {
  * script re-adding a ref it already recorded needs to tell "this is new" from
  * "this was already there" apart, the same idempotence signal `linkRef`
  * (`refs/repo.ts`) computes and returns verbatim here.
+ *
+ * `"url-backfilled"` (validate round 2, security finding M1) is a fourth,
+ * distinct action, not a fifth reading of `"already-linked"`: `refs.url` is a
+ * column shared by every task that links that row, and filling it in from
+ * `NULL` on a re-add is a real, visible mutation — the exact opposite of what
+ * `"already-linked"` promises ("nothing changed"). Reported and evented (see
+ * `linkRef`'s docs) so an audited row mutation is never the one write in this
+ * module with no trace of having happened. This is a reversal of a plan-era
+ * decision that treated the backfill as a silent idempotence detail; it is
+ * not one — a store-wide mutation without an event is a gap in the audit log
+ * `refs`/`task_refs` otherwise never has.
  */
 export interface RefResult {
-  readonly action: "linked" | "already-linked" | "unlinked";
+  readonly action: "linked" | "already-linked" | "url-backfilled" | "unlinked";
   readonly taskId: string;
   readonly ref: Ref;
 }

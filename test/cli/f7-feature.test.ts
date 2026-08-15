@@ -88,8 +88,10 @@ describe("F7 e2e — external refs through the real CLI", () => {
     expect((sharedOnB.json() as RefResult).action).toBe("linked");
 
     // Bare-id-then-URL backfill: a Linear ref pasted bare first (url null),
-    // then the same issue's URL — task_refs-wise a no-op ("already-linked"),
-    // but the stored url backfills from null, visible through `show`.
+    // then the same issue's URL — task_refs-wise the link already existed,
+    // but the stored url backfills from null, a real mutation of the shared
+    // `refs` row that gets its own action and event ("url-backfilled", not
+    // "already-linked" — validate round 2, finding M1).
     const bareAdd = await runCli(["ref", "add", taskA, "ENG-500", "--json"], { cwd: repo.dir });
     expect(bareAdd.exitCode, bareAdd.stderr).toBe(EXIT.ok);
     expect((bareAdd.json() as RefResult).ref.url).toBeNull();
@@ -99,7 +101,7 @@ describe("F7 e2e — external refs through the real CLI", () => {
       { cwd: repo.dir },
     );
     expect(backfill.exitCode, backfill.stderr).toBe(EXIT.ok);
-    expect((backfill.json() as RefResult).action).toBe("already-linked");
+    expect((backfill.json() as RefResult).action).toBe("url-backfilled");
 
     const shownAfterBackfill = await runCli(["show", taskA], { cwd: repo.dir });
     expect(shownAfterBackfill.stdout).toContain("ENG-500");
