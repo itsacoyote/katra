@@ -24,7 +24,7 @@
 import { claimFor } from "../claims/repo.js";
 import { listEvents } from "../events/repo.js";
 import { listNotes } from "../notes/repo.js";
-import { listRefs } from "../refs/repo.js";
+import { listRefsFor } from "../refs/repo.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { showTaskWithin } from "./repo.js";
@@ -72,9 +72,9 @@ export function viewTask(store: OpenStore, idInput: string): TaskView {
     // to create one — the same ordinary absent-data reading `TaskView.claim`
     // documents, not a special case handled here.
     claim: claimFor(store, id),
-    // This entity's own refs, not its children's — `listRefs` joins
+    // This entity's own refs, not its children's — `listRefsFor` joins
     // `task_refs` straight off `id`, with no epic-scope widening the way
     // `notes`/`activity` above have.
-    refs: listRefs(store, id),
+    refs: listRefsFor(store, id),
   };
 }

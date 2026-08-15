@@ -134,13 +134,15 @@ describe("katra ref add", () => {
     });
   });
 
-  it("hostile provider/id/url (ANSI, RLO, NUL via fromCharCode) oneLined in show/brief text, verbatim in --json", async () => {
+  it("hostile provider/id/url (ANSI, RLO via fromCharCode) oneLined in show/brief text, verbatim in --json", async () => {
+    // Bidi and zero-width characters ride through storage by design (render
+    // sanitization is the defense); C0/C1 controls now refuse at
+    // validateExplicitRef — covered by the refusal test below.
     const task = await add(["a task"]);
     const esc = String.fromCharCode(27);
-    const nul = String.fromCharCode(0);
     const rlo = String.fromCharCode(0x202e);
-    const provider = `prov${esc}[31mider`;
-    const id = `id${nul}here`;
+    const provider = "provider";
+    const id = `id${rlo}here`;
     const url = `https://example.com/${rlo}x`;
 
     const added = await runCli(
@@ -157,14 +159,29 @@ describe("katra ref add", () => {
     const shown = await runCli(["show", task], { cwd: repo.dir });
     expect(shown.exitCode).toBe(EXIT.ok);
     expect(shown.stdout).not.toContain(esc);
-    expect(shown.stdout).not.toContain(nul);
     expect(shown.stdout).not.toContain(rlo);
 
     const briefed = await runCli(["brief", task], { cwd: repo.dir });
     expect(briefed.exitCode).toBe(EXIT.ok);
     expect(briefed.stdout).not.toContain(esc);
-    expect(briefed.stdout).not.toContain(nul);
     expect(briefed.stdout).not.toContain(rlo);
+  });
+
+  it("NUL-bearing --id refuses as user error, never an internal CHECK failure", async () => {
+    // A NUL-leading value passes code-point bounds but SQLite's length()
+    // counts pre-NUL characters only — unguarded, it surfaced as exit 4 with
+    // leaked DDL text (validate round-1 finding). In-process argv carries the
+    // NUL; a real shell cannot, but library callers can.
+    const task = await add(["a task"]);
+    const nul = String.fromCharCode(0);
+
+    const result = await runCli(["ref", "add", task, "--provider", "p", "--id", `${nul}abc`], {
+      cwd: repo.dir,
+    });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/control characters/);
+    expect(result.stderr).not.toContain("CHECK constraint");
   });
 
   it("ambiguous-remove candidate list oneLines hostile stored fields on stderr", async () => {
@@ -173,11 +190,13 @@ describe("katra ref add", () => {
     // live terminal injection once ambiguous-ref candidates carry stored
     // provider/id/url. Two refs where the remove argument matches one ref's
     // url AND the other's external id force the refusal that renders both.
+    // RLO, not ESC: C0/C1 controls now refuse at validateExplicitRef, but
+    // bidi rides through storage by design — the sink's oneLine is still the
+    // only thing between a stored RLO and the terminal.
     const task = await add(["a task"]);
-    const esc = String.fromCharCode(27);
     const rlo = String.fromCharCode(0x202e);
     const url = "https://github.com/acme/app/pull/99";
-    const hostileProvider = `${esc}[2J${esc}[1;1H${rlo}x`;
+    const hostileProvider = `${rlo}x`;
 
     const first = await runCli(["ref", "add", task, url], { cwd: repo.dir });
     expect(first.exitCode).toBe(EXIT.ok);
@@ -189,7 +208,6 @@ describe("katra ref add", () => {
     const removed = await runCli(["ref", "remove", task, url], { cwd: repo.dir });
     expect(removed.exitCode).not.toBe(EXIT.ok);
     expect(removed.stderr).toContain("matches 2 refs");
-    expect(removed.stderr).not.toContain(esc);
     expect(removed.stderr).not.toContain(rlo);
   });
 

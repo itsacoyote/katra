@@ -511,6 +511,17 @@ export function validateExplicitRef(input: ExplicitRefInput): ValidateExplicitRe
   if (textWidth(externalId) > MAX_EXTERNAL_ID_LENGTH) {
     return refuseExplicit(`id exceeds ${MAX_EXTERNAL_ID_LENGTH} characters`);
   }
+  // The bound checks above count code points; SQLite's `length()` counts
+  // characters before the first NUL. A NUL-leading value passes here and then
+  // fails the DDL CHECK three layers down as an internal error with leaked
+  // DDL text — the exact typed-refusal-vs-internal gap this module exists to
+  // close. Same set the url check below screens, for the same reason.
+  if (CONTROL_CHARS_PATTERN.test(provider)) {
+    return refuseExplicit("provider must not contain control characters or line separators");
+  }
+  if (CONTROL_CHARS_PATTERN.test(externalId)) {
+    return refuseExplicit("id must not contain control characters or line separators");
+  }
 
   const rawUrl = input.url;
   if (rawUrl === undefined || rawUrl === null) {

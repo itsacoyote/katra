@@ -368,9 +368,14 @@ function requireLinkedRef(store: OpenStore, taskId: string, refInput: string): R
         value: trimmed,
       });
     }
+    // The likeliest real miss is a URL variant `add` canonicalized away
+    // (`.../pull/5/files` was stored as `.../pull/5`) — this resolver matches
+    // stored values literally, so point at where the stored forms are listed.
     throw new KatraException({
       code: "not_found",
-      message: `no ref matching "${trimmed}" is linked to ${taskId}`,
+      message:
+        `no ref matching "${trimmed}" is linked to ${taskId} — ` +
+        `use the url or qualified id exactly as "katra show ${taskId}" lists them`,
       id: trimmed,
     });
   }
@@ -525,5 +530,15 @@ export function gcOrphanRefsWithin(store: OpenStore, refIds: readonly number[]):
  */
 export function listRefs(store: OpenStore, taskIdInput: string): Ref[] {
   const taskId = requireRefTarget(store, taskIdInput);
+  return listRefsFor(store, taskId);
+}
+
+/**
+ * {@link listRefs} minus the id resolution, for callers holding an
+ * already-resolved id — `viewTask` and `briefEntity` resolve before composing,
+ * so routing them through `listRefs` would re-scan `tasks` for an id that
+ * cannot miss and dead-end its friendlier refusal.
+ */
+export function listRefsFor(store: OpenStore, taskId: string): Ref[] {
   return linkedRefRows(store, taskId).map(rowToRef);
 }

@@ -317,9 +317,9 @@ function describeEvent(event: LoggedEvent): string {
     parts.push(`${event.fromLane} -> ${event.toLane}`);
   }
   if (event.reason !== null) parts.push(oneLine(event.reason));
-  // `events.ref` carries generated note ids today, but the column has no CHECK
-  // constraint and F5 routes external refs through it — one-line it before the
-  // first URL arrives, not after.
+  // `events.ref` has no CHECK constraint: it carries generated note ids and,
+  // since F7, external-ref qualified ids — stored text a hostile `--id` can
+  // shape, so the one-line here is load-bearing, not defensive.
   if (event.ref !== null) parts.push(oneLine(event.ref));
   // Set only on a forced release (`claims/repo.ts`'s `settleClaim`): the
   // holder it displaced. Without this the column's whole justification —

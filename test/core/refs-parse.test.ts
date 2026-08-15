@@ -534,6 +534,21 @@ describe("validateExplicitRef", () => {
     expect(newlineHost.valid).toBe(false);
   });
 
+  it("refuses control characters in provider and id (NUL defeats SQLite length())", () => {
+    // The code-point bound checks agree with the DDL CHECKs on every clean
+    // string, but SQLite's length() stops at the first NUL -- a NUL-leading
+    // id passes the bound here and fails the CHECK three layers down as an
+    // internal error. Screened with the same set the url check uses.
+    const nulId = validateExplicitRef({ provider: "gitlab", id: `${NUL}abc` });
+    expect(nulId.valid).toBe(false);
+
+    const nulProvider = validateExplicitRef({ provider: `${NUL}p`, id: "PROJ-1" });
+    expect(nulProvider.valid).toBe(false);
+
+    const escId = validateExplicitRef({ provider: "gitlab", id: `PROJ${ESC}[31m-1` });
+    expect(escId.valid).toBe(false);
+  });
+
   it("accepts provider 'github' with an unrelated url (GitHub Enterprise, pinned)", () => {
     // Deliberate (ADR-014's provider-agnosticism): provider and url are
     // never cross-checked, so a self-hosted GitHub Enterprise instance (or
