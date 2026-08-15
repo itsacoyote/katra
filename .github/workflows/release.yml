@@ -33,8 +33,14 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
+      # npm trusted publishing (OIDC) needs npm >= 11.5.1; the runner's
+      # bundled npm lags node releases, so pin to latest explicitly.
+      - run: npm install -g npm@latest
+
       # Opens/updates a "Version Packages" PR when changesets are pending,
-      # and publishes to npm when that PR is merged.
+      # and publishes to npm when that PR is merged. Publishing authenticates
+      # via OIDC (id-token: write above + the trusted publisher configured on
+      # npmjs.com for this repo and workflow) — no NPM_TOKEN secret.
       - uses: changesets/action@v1
         with:
           version: pnpm changeset version
@@ -43,4 +49,3 @@ jobs:
           title: "chore: version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
