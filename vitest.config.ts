@@ -11,6 +11,12 @@ export default defineConfig({
     // on a two-core CI runner. The whole suite is a few seconds, so the
     // determinism is close to free.
     fileParallelism: false,
+    // Per-file module registries. This is vitest's default, pinned because two
+    // test files (refs.test.ts, delete.test.ts) each install their own
+    // vi.mock writeTx counter and depend on never seeing the other's —
+    // under --no-isolate one factory wins the shared registry and the other
+    // file's counter silently counts the wrong module.
+    isolate: true,
     // The default 5s assumes in-process tests. The CLI suite runs the real
     // binary — a single test can spawn a dozen OS processes, each opening
     // SQLite and resolving git — and a loaded Windows CI runner spends 3-4s
