@@ -13,7 +13,6 @@
  */
 
 import type { Command } from "commander";
-import type { RefResult } from "../../core/contract.js";
 import { KatraException } from "../../core/errors.js";
 import { parseRefInput, validateExplicitRef } from "../../core/refs/parse.js";
 import type { RefInput } from "../../core/refs/repo.js";
@@ -123,11 +122,8 @@ export function registerRef(program: Command, context: CliContext): void {
 
       const { result, warnings } = withStore(context, (store) => linkRef(store, taskId, input));
 
-      // Annotated, so the shape the CLI prints and the type the package
-      // publishes cannot drift apart without a compile error.
-      const document: RefResult = result;
       emit(
-        document,
+        result,
         { json: options.json === true, warnings, streams: context.streams },
         formatRefResult,
       );
@@ -149,9 +145,8 @@ export function registerRef(program: Command, context: CliContext): void {
       // task-scoped against this task's own linked refs instead.
       const { result, warnings } = withStore(context, (store) => unlinkRef(store, taskId, refArg));
 
-      const document: RefResult = result;
       emit(
-        document,
+        result,
         { json: options.json === true, warnings, streams: context.streams },
         formatRefResult,
       );

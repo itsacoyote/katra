@@ -170,7 +170,11 @@ export function emitError(error: unknown, options: EmitOptions): number {
 function formatErrorHint(detail: KatraErrorDetail): string {
   switch (detail.code) {
     case "ambiguous_id":
-      return detail.candidates.map((candidate) => `  ${candidate}\n`).join("");
+      // `oneLine` each candidate, not just the message above: task-id
+      // candidates are GLOB-constrained generated ids, but F7's ambiguous-ref
+      // candidates interpolate stored provider/id/url — the first
+      // attacker-influenced text to flow through this hint path.
+      return detail.candidates.map((candidate) => `  ${oneLine(candidate)}\n`).join("");
     case "cycle":
       return `  cycle: ${detail.path.join(" -> ")}\n`;
     case "not_found":

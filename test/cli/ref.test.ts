@@ -167,6 +167,32 @@ describe("katra ref add", () => {
     expect(briefed.stdout).not.toContain(rlo);
   });
 
+  it("ambiguous-remove candidate list oneLines hostile stored fields on stderr", async () => {
+    // The candidates hint path in output.ts rendered verbatim until F7 — safe
+    // while task-id candidates were the only producer (GLOB-constrained ids),
+    // live terminal injection once ambiguous-ref candidates carry stored
+    // provider/id/url. Two refs where the remove argument matches one ref's
+    // url AND the other's external id force the refusal that renders both.
+    const task = await add(["a task"]);
+    const esc = String.fromCharCode(27);
+    const rlo = String.fromCharCode(0x202e);
+    const url = "https://github.com/acme/app/pull/99";
+    const hostileProvider = `${esc}[2J${esc}[1;1H${rlo}x`;
+
+    const first = await runCli(["ref", "add", task, url], { cwd: repo.dir });
+    expect(first.exitCode).toBe(EXIT.ok);
+    const second = await runCli(["ref", "add", task, "--provider", hostileProvider, "--id", url], {
+      cwd: repo.dir,
+    });
+    expect(second.exitCode).toBe(EXIT.ok);
+
+    const removed = await runCli(["ref", "remove", task, url], { cwd: repo.dir });
+    expect(removed.exitCode).not.toBe(EXIT.ok);
+    expect(removed.stderr).toContain("matches 2 refs");
+    expect(removed.stderr).not.toContain(esc);
+    expect(removed.stderr).not.toContain(rlo);
+  });
+
   it("refs render on an epic's show/brief", async () => {
     const epic = await add(["an epic", "--level", "epic"]);
 
