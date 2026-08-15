@@ -87,8 +87,10 @@ function claimedField(claim: ClaimInfo, now: string): string {
  * call sites.
  *
  * `provider`/`externalId`/`url` are all attacker-influenced (F7 risk note
- * 23 — stored via the `--provider/--id/--url` escape hatch with no character
- * restriction beyond what `validateExplicitRef` checks on `url` alone), so
+ * 23 — stored via the `--provider/--id/--url` escape hatch with only the
+ * control-character screen `validateExplicitRef` applies to all three; bidi
+ * and zero-width codepoints ride through by design, which is what `text()`
+ * is for here), so
  * every one goes through {@link text} here exactly like a task's own title or
  * description does. `--json` carries them verbatim per house policy.
  */

@@ -455,10 +455,13 @@ export function parseRefInput(text: string): ParseRefResult {
  * Validates the `--provider/--id/--url` escape hatch's raw input (ADR-014) —
  * every provider `parseRefInput` does not recognize by built-in parsing goes
  * through this instead. Unlike {@link parseRefInput}, `provider` is trusted
- * verbatim (trimmed only): core stays provider-agnostic in what it stores.
+ * verbatim beyond a trim and a control-character screen: core stays
+ * provider-agnostic in what it stores.
  *
- * Rules: `provider` and `id` non-empty after trimming and within
- * {@link MAX_PROVIDER_LENGTH} / {@link MAX_EXTERNAL_ID_LENGTH}; `url`, when
+ * Rules: `provider` and `id` non-empty after trimming, within
+ * {@link MAX_PROVIDER_LENGTH} / {@link MAX_EXTERNAL_ID_LENGTH}, and free of
+ * {@link CONTROL_CHARS_PATTERN} (SQLite's `length()` stops at the first NUL,
+ * so an unscreened value fails the DDL CHECK as an internal error); `url`, when
  * given and non-blank, must parse as an absolute `http`/`https` URL with no
  * credentials, no explicit port, and no control character or line
  * separator ({@link CONTROL_CHARS_PATTERN} — the WHATWG parser can

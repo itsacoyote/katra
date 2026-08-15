@@ -375,7 +375,7 @@ function requireLinkedRef(store: OpenStore, taskId: string, refInput: string): R
       code: "not_found",
       message:
         `no ref matching "${trimmed}" is linked to ${taskId} — ` +
-        `use the url or qualified id exactly as "katra show ${taskId}" lists them`,
+        `use the url or qualified id exactly as \`katra show ${taskId}\` lists them`,
       id: trimmed,
     });
   }
@@ -526,7 +526,10 @@ export function gcOrphanRefsWithin(store: OpenStore, refIds: readonly number[]):
 
 /**
  * Lists a task's own linked refs, oldest link first — see {@link linkedRefRows}
- * for why that is `task_refs`'s own rowid and not `refs.id`.
+ * for why that is `task_refs`'s own rowid and not `refs.id`. The resolving
+ * entry point core keeps for a future `ref list`/library surface; in-tree,
+ * composition goes through {@link listRefsFor} and no production caller
+ * remains here today.
  */
 export function listRefs(store: OpenStore, taskIdInput: string): Ref[] {
   const taskId = requireRefTarget(store, taskIdInput);

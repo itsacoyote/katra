@@ -134,12 +134,11 @@ describe("katra ref add", () => {
     });
   });
 
-  it("hostile provider/id/url (ANSI, RLO via fromCharCode) oneLined in show/brief text, verbatim in --json", async () => {
+  it("hostile provider/id/url (RLO via fromCharCode) oneLined in show/brief text, verbatim in --json", async () => {
     // Bidi and zero-width characters ride through storage by design (render
     // sanitization is the defense); C0/C1 controls now refuse at
     // validateExplicitRef — covered by the refusal test below.
     const task = await add(["a task"]);
-    const esc = String.fromCharCode(27);
     const rlo = String.fromCharCode(0x202e);
     const provider = "provider";
     const id = `id${rlo}here`;
@@ -158,12 +157,10 @@ describe("katra ref add", () => {
 
     const shown = await runCli(["show", task], { cwd: repo.dir });
     expect(shown.exitCode).toBe(EXIT.ok);
-    expect(shown.stdout).not.toContain(esc);
     expect(shown.stdout).not.toContain(rlo);
 
     const briefed = await runCli(["brief", task], { cwd: repo.dir });
     expect(briefed.exitCode).toBe(EXIT.ok);
-    expect(briefed.stdout).not.toContain(esc);
     expect(briefed.stdout).not.toContain(rlo);
   });
 
