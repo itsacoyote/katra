@@ -1,6 +1,6 @@
 {
   "name": "@itsacoyote/katra",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Local, git-native, agent-first project manager and coordination layer for AI coding sessions.",
   "keywords": [
     "cli",
