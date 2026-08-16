@@ -1,14 +1,38 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { claimFor, claimTask } from "../../src/core/claims/repo.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import { addDependency, isReady } from "../../src/core/graph/deps.js";
 import { addLink } from "../../src/core/graph/links.js";
+import { linkRef, listRefs } from "../../src/core/refs/repo.js";
 import { deleteTask } from "../../src/core/tasks/delete.js";
 import { getTask } from "../../src/core/tasks/repo.js";
 import { seedDep, seedEpic, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/**
+ * A pass-through count of `writeTx` calls, mirrored from `refs.test.ts`'s own
+ * `writeTxSpy` — pins the critical invariant that `deleteTask`'s orphan-ref
+ * GC rides its existing transaction rather than opening a second one. Vitest
+ * gives each test file its own module registry (`isolate`, pinned on in
+ * vitest.config.ts), so this factory never reaches `refs.test.ts`'s counter.
+ */
+const writeTxSpy = vi.hoisted(() => ({ calls: 0 }));
+vi.mock("../../src/core/db/connection.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../src/core/db/connection.js")>();
+  const writeTx: typeof original.writeTx = (db, fn) => {
+    writeTxSpy.calls += 1;
+    return original.writeTx(db, fn);
+  };
+  return { ...original, writeTx };
+});
+
+const GITHUB_REF = {
+  provider: "github",
+  externalId: "owner/repo#12",
+  url: "https://github.com/owner/repo/pull/12",
+};
 
 let fixture: StoreFixture;
 beforeEach(() => {
@@ -175,5 +199,84 @@ describe("claim settlement", () => {
     expect(listEvents(fixture.store, { entityId: id }).events.map((e) => e.type)).toEqual([
       "deleted",
     ]);
+  });
+});
+
+describe("deleteTask orphan-ref GC (epic risk note 16)", () => {
+  it("deleting the sole holder task GCs the refs row (direct DB read)", () => {
+    const id = seedTask(fixture.store);
+    linkRef(fixture.store, id, GITHUB_REF);
+    expect(count("refs")).toBe(1);
+
+    deleteTask(fixture.store, id);
+
+    expect(count("refs")).toBe(0);
+  });
+
+  it("deleting one of two holder tasks keeps the row and the survivor's view", () => {
+    const taskA = seedTask(fixture.store);
+    const taskB = seedTask(fixture.store);
+    linkRef(fixture.store, taskA, GITHUB_REF);
+    linkRef(fixture.store, taskB, GITHUB_REF);
+
+    deleteTask(fixture.store, taskA);
+
+    expect(count("refs")).toBe(1);
+    expect(listRefs(fixture.store, taskB)).toEqual([
+      expect.objectContaining({ provider: "github", externalId: "owner/repo#12" }),
+    ]);
+  });
+
+  it("delete emits no ref-unlinked events", () => {
+    const id = seedTask(fixture.store);
+    linkRef(fixture.store, id, GITHUB_REF);
+
+    deleteTask(fixture.store, id);
+
+    const events = fixture.store.db
+      .prepare("SELECT type FROM events WHERE type = 'ref-unlinked'")
+      .all();
+    expect(events).toEqual([]);
+  });
+
+  it("GC and delete are atomic (simulated failure keeps both or neither — house crash-consistency pattern)", () => {
+    // better-sqlite3 nests `db.transaction(...)` as a SAVEPOINT when one is
+    // already open — wrapping `deleteTask` in an outer transaction that throws
+    // *after* it has already returned proves the task row's cascade and the
+    // ref's orphan GC live in one rollback-able unit. The mid-transaction read
+    // is load-bearing: without it, these assertions are indistinguishable from
+    // "the GC never ran at all", and the test passes with the feature deleted.
+    // (Which halves share one transaction is the writeTxSpy test's job — the
+    // savepoint nesting here cannot observe that.)
+    const id = seedTask(fixture.store);
+    linkRef(fixture.store, id, GITHUB_REF);
+
+    let midTx: { task: unknown; refs: number } | undefined;
+    expect(() =>
+      fixture.store.db.transaction(() => {
+        deleteTask(fixture.store, id);
+        // Read *inside* the transaction, before the rollback: proves both
+        // writes actually landed, so what follows is a rollback and not a GC
+        // that never ran.
+        midTx = { task: getTask(fixture.store, id), refs: count("refs") };
+        throw new Error("boom, after deleteTask already returned");
+      })(),
+    ).toThrowError("boom, after deleteTask already returned");
+
+    // Both happened...
+    expect(midTx).toEqual({ task: undefined, refs: 0 });
+    // ...and both were undone.
+    expect(getTask(fixture.store, id)).toBeDefined();
+    expect(count("refs")).toBe(1);
+  });
+
+  it("deleteTask opens exactly one write transaction — the cascade and orphan GC share it", () => {
+    const id = seedTask(fixture.store);
+    linkRef(fixture.store, id, GITHUB_REF);
+
+    writeTxSpy.calls = 0;
+    deleteTask(fixture.store, id);
+
+    expect(writeTxSpy.calls).toBe(1);
   });
 });

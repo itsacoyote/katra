@@ -16,8 +16,9 @@
  * ```
  *
  * Nothing here may import from `store.ts`, `db/`, or any module that does.
- * `enums.ts`, `tasks/types.ts`, `claims/types.ts` and `beads/types.ts` are the
- * only permitted dependencies, and none of them touches the database.
+ * `enums.ts`, `tasks/types.ts`, `claims/types.ts`, `beads/types.ts` and
+ * `refs/types.ts` are the only permitted dependencies, and none of them
+ * touches the database.
  */
 
 import type { MigrationReport } from "./beads/types.js";
@@ -25,6 +26,7 @@ import type { ClaimInfo } from "./claims/types.js";
 import type { Kind, Lane, Level, NoteKind, Priority } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
 import type { Note } from "./notes/types.js";
+import type { Ref } from "./refs/types.js";
 import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
 
 /**
@@ -41,7 +43,7 @@ export interface StoreWarning {
 }
 
 /**
- * Three types this file does not define, re-exported here so it stays the one
+ * Four types this file does not define, re-exported here so it stays the one
  * place to read the `--json` contract.
  *
  * `Blocker` is defined in `tasks/types.ts` because {@link TaskDetail} needs
@@ -58,8 +60,20 @@ export interface StoreWarning {
  * `load.ts`. Declaring `MigrationReport` beside it, rather than here, keeps
  * the plan and the report each other's neighbor and this file untouched by
  * `transform.ts`/`load.ts`'s internals — only the report crosses back.
+ *
+ * `Ref` (F7) is defined in `refs/types.ts`, the fifth permitted dependency,
+ * for a second reason beyond the usual store-freedom one: {@link
+ * BriefResult}'s `refs` field needs it here, and `TaskView.refs`
+ * (`tasks/types.ts`) needs it there too. Declaring it in either of those two
+ * modules and importing it into the other would recreate the exact cycle
+ * this file's own split exists to avoid — `tasks/types.ts` already imports
+ * nothing from `contract.ts`, and a `Ref` declared here would force it to
+ * start. A third, dependency-free leaf module lets both sides import it
+ * independently instead. `RefResult`, unlike `Ref`, has no such second
+ * consumer — it is the `ref add`/`ref remove` `--json` envelope alone — so it
+ * is declared directly below, like {@link LinkResult}.
  */
-export type { Blocker, ClaimInfo, MigrationReport };
+export type { Blocker, ClaimInfo, MigrationReport, Ref };
 
 /**
  * What `update` prints.
@@ -126,6 +140,31 @@ export interface LinkResult {
   readonly action: "linked" | "unlinked";
   readonly a: string;
   readonly b: string;
+}
+
+/**
+ * What `ref add`/`ref remove` print (F7).
+ *
+ * `"already-linked"` is its own `action`, not folded into `"linked"`: a
+ * script re-adding a ref it already recorded needs to tell "this is new" from
+ * "this was already there" apart, the same idempotence signal `linkRef`
+ * (`refs/repo.ts`) computes and returns verbatim here.
+ *
+ * `"url-backfilled"` (validate round 2, security finding M1) is a fourth,
+ * distinct action, not a fifth reading of `"already-linked"`: `refs.url` is a
+ * column shared by every task that links that row, and filling it in from
+ * `NULL` on a re-add is a real, visible mutation — the exact opposite of what
+ * `"already-linked"` promises ("nothing changed"). Reported and evented (see
+ * `linkRef`'s docs) so an audited row mutation is never the one write in this
+ * module with no trace of having happened. This is a reversal of a plan-era
+ * decision that treated the backfill as a silent idempotence detail; it is
+ * not one — a store-wide mutation without an event is a gap in the audit log
+ * `refs`/`task_refs` otherwise never has.
+ */
+export interface RefResult {
+  readonly action: "linked" | "already-linked" | "url-backfilled" | "unlinked";
+  readonly taskId: string;
+  readonly ref: Ref;
 }
 
 /** What `close`, `cancel` and `reopen` print. */
@@ -265,6 +304,20 @@ interface BriefCommon {
   readonly blockers: readonly Blocker[];
   /** Tasks waiting on this one — what finishing it would release. */
   readonly blocking: readonly Blocker[];
+  /**
+   * External references linked to this entity — a GitHub PR, a Linear issue —
+   * in link order (F7).
+   *
+   * On **both** shapes, for the same reason `blockers`/`blocking` are: an
+   * epic can carry a ref like anything else. Scoped to **this entity's own**
+   * `task_refs` rows, never aggregated from an epic's children — unlike
+   * `handoff`/`noteCounts`/`activity`, which follow `NoteScope`/`entityId`
+   * out to the whole subtree. A ref lives on the specific issue or PR it was
+   * pasted against, and rolling a child's up into its epic would let two
+   * unrelated children's refs collide on one summary with no way to tell
+   * which task either came from.
+   */
+  readonly refs: readonly Ref[];
 }
 
 /**

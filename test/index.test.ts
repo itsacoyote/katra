@@ -95,6 +95,15 @@ describe("the public barrel", () => {
       // it rides on SearchResult the same way ActivityHit rides on
       // RecentResult/StaleResult above without one.
       katra.SearchResult,
+      // F7 T5: the ref shape carried by TaskView and the brief common shape.
+      // Listed on its own, not only inside those two, so the barrel losing
+      // the standalone export is still this same compile error — the same
+      // reasoning ClaimInfo's entry above states.
+      katra.Ref,
+      // F7 T5: what `ref add`/`ref remove` print, the same as LinkResult
+      // above it — declared for the CLI command T5 does not itself add, but
+      // published now so T6 needs no barrel change to use it.
+      katra.RefResult,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -103,8 +112,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 22;
-    expect(count).toBe(22);
+    const count: PublishedDocuments["length"] = 24;
+    expect(count).toBe(24);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {
@@ -196,6 +205,7 @@ describe("the public barrel", () => {
       "core/events/types.ts",
       "core/id-format.ts",
       "core/notes/types.ts",
+      "core/refs/types.ts",
       "core/tasks/types.ts",
       "index.ts",
       "version.ts",

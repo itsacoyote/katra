@@ -146,6 +146,9 @@ describe("event types", () => {
           return "custody";
         case "deleted":
           return "removal";
+        case "ref-linked":
+        case "ref-unlinked":
+          return "reference";
         default: {
           const exhaustive: never = type;
           return exhaustive;
@@ -163,16 +166,18 @@ describe("event types", () => {
       "lifecycle",
       "lifecycle",
       "removal",
+      "reference",
+      "reference",
     ]);
   });
 
-  it("declares the nine types the schema currently accepts, and no more", () => {
-    // The spec's own list is nine too, but not the same nine: `ref-linked` and
-    // `ref-status-changed` still wait on F5's external refs — declaring a
-    // value nothing can write would put it in a CHECK constraint under
-    // forward-only migrations, expensive to take back. `deleted` (ADR-008)
-    // and `cancelled` (ADR-003) are additions the spec's own list does not
-    // carry.
+  it("declares the eleven types the schema currently accepts, and no more", () => {
+    // The spec's own list is nine, but not the same nine: `ref-status-changed`
+    // still waits on the provider cycles — declaring a value nothing can
+    // write would put it in a CHECK constraint under forward-only
+    // migrations, expensive to take back. `deleted` (ADR-008), `cancelled`
+    // (ADR-003) and `ref-unlinked` (F7 requirement 5) are additions the
+    // spec's own list does not carry.
     expect(EVENT_TYPES).toEqual([
       "created",
       "claimed",
@@ -183,8 +188,10 @@ describe("event types", () => {
       "cancelled",
       "reopened",
       "deleted",
+      "ref-linked",
+      "ref-unlinked",
     ]);
-    expect(EVENT_TYPES).not.toContain("ref-linked");
+    expect(EVENT_TYPES).toContain("ref-linked");
     expect(EVENT_TYPES).not.toContain("ref-status-changed");
   });
 
@@ -195,7 +202,7 @@ describe("event types", () => {
     }
   });
 
-  it("rejects an event type outside the fixed set, naming all nine", () => {
+  it("rejects an event type outside the fixed set, naming all eleven", () => {
     try {
       narrowEventType("updated");
       expect.unreachable("should have thrown");

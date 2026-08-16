@@ -112,7 +112,7 @@ describe("migrating a v1 store under contention", () => {
     const setup = await runCli(["init"], { cwd: repo.dir });
     expect(setup.exitCode).toBe(EXIT.ok);
 
-    // Rewind to v1: drop what 0002, 0003 and 0004 added and reset the
+    // Rewind to v1: drop what 0002 through 0005 added and reset the
     // version, so the store is exactly what an installation from before this
     // feature has. The six FTS triggers and the two FTS5 virtual tables have
     // to go too, not just the ordinary tables: `init` already brought this
@@ -126,6 +126,7 @@ describe("migrating a v1 store under contention", () => {
     rewind.exec(
       "DROP TABLE IF EXISTS notes; DROP TABLE IF EXISTS claims; " +
         "DROP TABLE IF EXISTS presence; DROP TABLE IF EXISTS events; " +
+        "DROP TABLE IF EXISTS task_refs; DROP TABLE IF EXISTS refs; " +
         "DROP TRIGGER IF EXISTS tasks_fts_ai; DROP TRIGGER IF EXISTS tasks_fts_ad; " +
         "DROP TRIGGER IF EXISTS tasks_fts_au; DROP TRIGGER IF EXISTS notes_fts_ai; " +
         "DROP TRIGGER IF EXISTS notes_fts_ad; DROP TRIGGER IF EXISTS notes_fts_au; " +
@@ -151,6 +152,8 @@ describe("migrating a v1 store under contention", () => {
     // from the concurrent block below, ~60s later.
     expect(tables).not.toContain("tasks_fts");
     expect(tables).not.toContain("notes_fts");
+    expect(tables).not.toContain("refs");
+    expect(tables).not.toContain("task_refs");
     rewind.close();
 
     const outcomes = await runConcurrent<{ version: number; created: boolean }>({
@@ -197,6 +200,6 @@ describe("migrating a v1 store under contention", () => {
     // again, so editing it would leave two stores with different schemas at
     // the same version number.
     expect(MIGRATIONS[0]?.sql).toBe(migration0001.sql);
-    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4]);
+    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5]);
   });
 });

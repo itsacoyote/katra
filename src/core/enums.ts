@@ -78,15 +78,17 @@ export const UNTRIAGED_LANES = ["Defined", "Researching"] as const satisfies rea
 /**
  * What an event records.
  *
- * Nine now that `claimed` and `released` land here — F4's claims (migration
- * 0003), and the two this comment held back since F2. `ref-linked` and
- * `ref-status-changed` still wait on F5's external refs: declaring a value
- * nothing can write would put it in a `CHECK` constraint under forward-only
- * migrations, which makes the mistake expensive to take back.
+ * Eleven now that `ref-linked` and `ref-unlinked` land here — F7's external
+ * refs (migration 0005). `ref-status-changed` still waits on the provider
+ * cycles (.21+): declaring a value nothing can write would put it in a
+ * `CHECK` constraint under forward-only migrations, which makes the mistake
+ * expensive to take back.
  *
- * Two of the nine are not in `docs/katra-spec.md` §5's own list at all:
- * `deleted` (ADR-008 — `delete` appends its own last event) and `cancelled`
- * (ADR-003 — a terminal lane distinct from `closed`).
+ * Three of the eleven are not in `docs/katra-spec.md` §5's own list at all:
+ * `deleted` (ADR-008 — `delete` appends its own last event), `cancelled`
+ * (ADR-003 — a terminal lane distinct from `closed`), and `ref-unlinked`
+ * (F7 requirement 5 — a deliberate addition with no counterpart in the
+ * spec's original curated set).
  *
  * The order is the rough order a task's life produces them, not alphabetical —
  * it is what a reader of the CHECK constraint sees.
@@ -101,6 +103,8 @@ export const EVENT_TYPES = [
   "cancelled",
   "reopened",
   "deleted",
+  "ref-linked",
+  "ref-unlinked",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 

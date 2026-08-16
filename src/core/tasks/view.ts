@@ -4,10 +4,10 @@
  *
  * A module of its own rather than an addition to `repo.ts`, for two reasons:
  *
- * - **It would be an import cycle.** `notes/repo.ts` already imports `getTask`
- *   from `tasks/repo.ts`, so reaching back the other way would make the two
- *   mutually dependent. Sitting above both, this module imports freely and
- *   neither of them changes.
+ * - **It would be an import cycle.** `notes/repo.ts` and `refs/repo.ts` (F7)
+ *   already import `getTask` from `tasks/repo.ts`, so reaching back the other
+ *   way from either would make the two mutually dependent. Sitting above all
+ *   three, this module imports freely and none of them changes.
  * - **`update` should not pay for it.** `showTaskWithin` is what `update`
  *   returns from inside its transaction; adding two more queries there would
  *   charge every field edit for notes it never displays, and a bulk update by
@@ -24,6 +24,7 @@
 import { claimFor } from "../claims/repo.js";
 import { listEvents } from "../events/repo.js";
 import { listNotes } from "../notes/repo.js";
+import { listRefsFor } from "../refs/repo.js";
 import type { OpenStore } from "../store.js";
 import { requireId } from "./ids.js";
 import { showTaskWithin } from "./repo.js";
@@ -71,5 +72,9 @@ export function viewTask(store: OpenStore, idInput: string): TaskView {
     // to create one — the same ordinary absent-data reading `TaskView.claim`
     // documents, not a special case handled here.
     claim: claimFor(store, id),
+    // This entity's own refs, not its children's — `listRefsFor` joins
+    // `task_refs` straight off `id`, with no epic-scope widening the way
+    // `notes`/`activity` above have.
+    refs: listRefsFor(store, id),
   };
 }

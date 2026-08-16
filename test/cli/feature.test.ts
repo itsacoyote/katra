@@ -36,6 +36,7 @@ const EXPECTED_COMMANDS = [
   "delete",
   "dep",
   "link",
+  "ref",
   "next",
   "log",
   "note",
@@ -61,7 +62,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all twenty-two commands on the program", () => {
+  it("registers all twenty-three commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -70,7 +71,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(22);
+    expect(registered).toHaveLength(23);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -136,6 +137,7 @@ describe("--json across every command", () => {
       ["update", blocker, "--priority", "1"],
       ["dep", dependent, "--blocked-by", blocker],
       ["link", linked, doomed],
+      ["ref", "add", blocker, "https://github.com/acme/widgets/pull/7"],
       ["close", blocker],
       ["reopen", blocker],
       ["cancel", blocker, "--reason", "dropped"],

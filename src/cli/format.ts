@@ -13,6 +13,8 @@ import type {
   BriefResult,
   ClaimInfo,
   RecentResult,
+  Ref,
+  RefResult,
   SearchResult,
   StaleResult,
 } from "../core/contract.js";
@@ -78,6 +80,69 @@ function claimedField(claim: ClaimInfo, now: string): string {
 }
 
 /**
+ * One reference, rendered `provider: qualified-id`, plus the url when there is
+ * one (F7 spec §3 — an unresolved ref renders as a plain link with whatever is
+ * cached). Shared by {@link formatTaskDetail} and {@link formatBrief}'s `refs`
+ * blocks and by {@link formatRefResult}'s own line — one rendering, three
+ * call sites.
+ *
+ * `provider`/`externalId`/`url` are all attacker-influenced (F7 risk note
+ * 23 — stored via the `--provider/--id/--url` escape hatch with only the
+ * control-character screen `validateExplicitRef` applies to all three; bidi
+ * and zero-width codepoints ride through by design, which is what `text()`
+ * is for here), so
+ * every one goes through {@link text} here exactly like a task's own title or
+ * description does. `--json` carries them verbatim per house policy.
+ *
+ * The url is also **width-clamped** (validate round 2, finding LOW-2), the
+ * same treatment `search`'s snippet gets and titles get at a narrower
+ * {@link TITLE_WIDTH}: `refs.url`'s own bound is 2048 characters (migration
+ * 0005's `CHECK`), and an unclamped one of those turns a `show`/`brief`
+ * block into a single unbroken line that pushes everything below it off
+ * screen — the identical failure shape {@link SNIPPET_WIDTH}'s own docs
+ * describe for a pathological FTS5 excerpt. `--json` still carries `url`
+ * verbatim, uncapped, same as every other field here.
+ */
+function formatRefLine(ref: Ref): string {
+  const qualified = `${text(ref.provider)}: ${text(ref.externalId)}`;
+  return ref.url === null ? qualified : `${qualified}  ${clamp(text(ref.url), SNIPPET_WIDTH)}`;
+}
+
+/**
+ * What `ref add`/`ref remove` print — the task, what happened, and the
+ * reference itself via {@link formatRefLine}.
+ *
+ * `"already-linked"` gets its own wording rather than collapsing into
+ * `"linked"`, mirroring the reason {@link RefResult}'s own docs give for
+ * keeping it a distinct `action`: an agent re-adding a ref it already
+ * recorded needs to read "this was already there" off the text output the
+ * same way `--json` already tells it apart.
+ *
+ * `"url-backfilled"` (validate round 2, finding M1) gets a third, equally
+ * distinct wording — "linked · url recorded" — deliberately not reusing
+ * "already linked": a caller reading the text output, same as one reading
+ * `--json`, must not mistake a real mutation of the shared `refs` row for
+ * the no-op `"already-linked"` otherwise reads as.
+ */
+export function formatRefResult(result: RefResult): string {
+  const line = formatRefLine(result.ref);
+  switch (result.action) {
+    case "linked":
+      return `${result.taskId}  linked  ${line}`;
+    case "already-linked":
+      return `${result.taskId}  already linked  ${line}`;
+    case "url-backfilled":
+      return `${result.taskId}  linked · url recorded  ${line}`;
+    case "unlinked":
+      return `${result.taskId}  unlinked  ${line}`;
+    default: {
+      const exhaustive: never = result.action;
+      return exhaustive;
+    }
+  }
+}
+
+/**
  * The full block `show` prints.
  *
  * `claim` is a separate parameter rather than a field on {@link TaskDetail}:
@@ -86,11 +151,20 @@ function claimedField(claim: ClaimInfo, now: string): string {
  * that display it). Omitting it renders no "claimed" line, so `update`'s
  * output is unaffected. `now` defaults to the real instant so every ordinary
  * caller gets live ages for free; tests pin it for a deterministic render.
+ *
+ * `refs` is a separate parameter, not a field read off `detail`, and it comes
+ * **after** `now` (F7 T6): {@link TaskDetail} carries no `refs` field — only
+ * {@link TaskView} does, for the identical "don't charge `update` for a query
+ * it never displays" reason `claim` is a parameter here rather than part of
+ * the type. Defaulting to `[]` means `update`'s existing call site
+ * (`formatTaskDetail(document.tasks[0])`, a plain `TaskDetail`) renders with
+ * no refs block and needs no change.
  */
 export function formatTaskDetail(
   detail: TaskDetail,
   claim: ClaimInfo | null = null,
   now: string = nowIso(),
+  refs: readonly Ref[] = [],
 ): string {
   const { task, parent } = detail;
   const lines = [
@@ -132,6 +206,11 @@ export function formatTaskDetail(
 
   for (const [index, link] of detail.links.entries()) {
     lines.push(field(index === 0 ? "links" : "", `${link.id}  ${text(link.title)}`));
+  }
+  // Follows the `links` block's own precedent — one line per entry, blank
+  // label after the first (F7 T6).
+  for (const [index, ref] of refs.entries()) {
+    lines.push(field(index === 0 ? "refs" : "", formatRefLine(ref)));
   }
   if (task.tags.length > 0) lines.push(field("tags", text(task.tags.join(", "))));
 
@@ -257,9 +336,9 @@ function describeEvent(event: LoggedEvent): string {
     parts.push(`${event.fromLane} -> ${event.toLane}`);
   }
   if (event.reason !== null) parts.push(oneLine(event.reason));
-  // `events.ref` carries generated note ids today, but the column has no CHECK
-  // constraint and F5 routes external refs through it — one-line it before the
-  // first URL arrives, not after.
+  // `events.ref` has no CHECK constraint: it carries generated note ids and,
+  // since F7, external-ref qualified ids — stored text a hostile `--id` can
+  // shape, so the one-line here is load-bearing, not defensive.
   if (event.ref !== null) parts.push(oneLine(event.ref));
   // Set only on a forced release (`claims/repo.ts`'s `settleClaim`): the
   // holder it displaced. Without this the column's whole justification —
@@ -532,7 +611,7 @@ const PREVIEW_WIDTH = 56;
  * absolute timestamps and do not depend on it.
  */
 export function formatTaskView(view: TaskView, now: string = nowIso()): string {
-  const lines = [formatTaskDetail(view, view.claim, now)];
+  const lines = [formatTaskDetail(view, view.claim, now, view.refs)];
 
   if (view.notes.length > 0) {
     lines.push("", `notes (${view.notes.length}, newest first — \`katra note list\` for bodies)`);
@@ -630,6 +709,13 @@ export function formatBrief(brief: BriefResult, now: string = nowIso()): string 
         `${dependent.id}  ${dependent.lane}  ${clamp(text(dependent.title), TITLE_WIDTH)}`,
       ),
     );
+  }
+
+  // On both shapes, like `blockers`/`blocking` above — `BriefResult.refs`'s
+  // own docs: scoped to this entity's own `task_refs`, never rolled up from
+  // an epic's children.
+  for (const [index, ref] of brief.refs.entries()) {
+    lines.push(field(index === 0 ? "refs" : "", formatRefLine(ref)));
   }
 
   if (brief.level === "epic") {

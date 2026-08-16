@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, and twenty-two commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. External refs are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, external refs that link tasks to GitHub PRs and Linear issues, and twenty-three commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. Provider plugins that resolve refs live are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -199,15 +199,52 @@ stale — untouched since before 2026-07-31T02:43:24.049Z
   kt-dlcpbk  P2  Defined  old audit follow-up nobody touched  15d ago
 ```
 
+### Linking external work
+
+`katra ref add` attaches a task to the thing that tracks or ships it elsewhere — paste a GitHub PR/issue URL or a Linear id and katra derives the provider and a canonical qualified id ([ADR-014](docs/decisions/ADR-014-core-parses-known-ref-urls.md)); re-adding is a safe no-op that says so:
+
+```console
+$ katra ref add kt-28fs2e https://github.com/acme/billing/pull/128
+kt-28fs2e  linked  github: acme/billing#128  https://github.com/acme/billing/pull/128
+$ katra ref add kt-28fs2e ENG-451
+kt-28fs2e  linked  linear: ENG-451
+$ katra ref add kt-28fs2e https://github.com/acme/billing/pull/128
+kt-28fs2e  already linked  github: acme/billing#128  https://github.com/acme/billing/pull/128
+```
+
+`show` and `brief` carry a task's refs, so the next session finds the review context without git archaeology:
+
+```console
+$ katra show kt-28fs2e
+kt-28fs2e  oauth migration for the billing service
+  level       task
+  kind        feat
+  lane        Defined
+  priority    P2
+  blockers    none
+  refs        github: acme/billing#128  https://github.com/acme/billing/pull/128
+              linear: ENG-451
+```
+
+Any other tracker stores through the explicit form — core is provider-agnostic in what it keeps, opinionated only in what it parses:
+
+```console
+$ katra ref add kt-28fs2e https://gitlab.com/acme/tool/-/merge_requests/9
+katra: not a recognized github.com or linear.app reference URL — store it explicitly with --provider <name> --id <id> [--url <url>]
+$ katra ref add kt-28fs2e --provider gitlab --id "acme/tool!9" --url https://gitlab.com/acme/tool/-/merge_requests/9
+```
+
+Nothing here touches the network: refs are stored links with room for cached status and title, which stay empty until provider plugins land. `ref remove` takes the url, the qualified id, or `provider:id` when two refs collide, and linking/unlinking is recorded in the task's history like every other write.
+
 ## Still to come
 
-External refs with pluggable providers, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
+Provider plugins that resolve refs live (cached status/title, `refresh`, `reconcile`), and snapshots. The [spec](docs/katra-spec.md) describes all of it.
 
 Until `snapshot` lands, the store lives only in your `.git` directory: it is not shareable, not reviewable in a pull request, and does not survive a fresh clone.
 
 ## Install
 
-Not published yet. When it is:
+Published as [`@itsacoyote/katra`](https://www.npmjs.com/package/@itsacoyote/katra):
 
 ```bash
 npm install -g @itsacoyote/katra
