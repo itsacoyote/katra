@@ -272,11 +272,15 @@ describe("parseRefInput", () => {
     // Same hosts, wrong shapes — each refuses into the escape hatch rather
     // than mis-deriving an external id: a commit link, a compare link, a
     // non-digit issue number, a Linear board link, a malformed team key.
+    // The commit and board examples carry an otherwise-VALID trailing part
+    // (digit id, well-formed team key) so only the kind/literal check can
+    // refuse them — an invalid trailing part would mask that line behind the
+    // next check and pin nothing (QA round-4 iteration-2 catch).
     const shapes = [
-      "https://github.com/owner/repo/commit/abc123def",
+      "https://github.com/owner/repo/commits/1",
       "https://github.com/owner/repo/compare/main...feature",
       "https://github.com/owner/repo/pull/12abc",
-      "https://linear.app/acme/team/ENG/board",
+      "https://linear.app/acme/board/ENG-451",
       "https://linear.app/acme/issue/ENG_451",
     ];
     for (const input of shapes) {
