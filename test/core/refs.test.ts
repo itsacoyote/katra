@@ -473,6 +473,27 @@ describe("unlinkRef", () => {
     ]);
   });
 
+  it("an input matching a stored url never splits on its own colon", () => {
+    // The precedence guard behind the provider:id form (validate round 2,
+    // M2 verification INFO-2): a stored url used as the remove argument must
+    // resolve as a url, even when another ref on the task could parse the
+    // same string as provider "https" + a slashed id. Without the
+    // urlMatches-empty gate, reordering the union re-introduces the
+    // mis-split silently.
+    const task = seedTask(fixture.store);
+    const url = "https://example.com/a";
+    linkRef(fixture.store, task, { provider: "github", externalId: "acme/w#1", url });
+    linkRef(fixture.store, task, { provider: "https", externalId: "//example.com/a", url: null });
+
+    const result = unlinkRef(fixture.store, task, url);
+
+    expect(result.action).toBe("unlinked");
+    expect(result.ref.provider).toBe("github");
+    expect(listRefs(fixture.store, task)).toEqual([
+      expect.objectContaining({ provider: "https", externalId: "//example.com/a" }),
+    ]);
+  });
+
   it("ambiguity refusal names the provider:id form", () => {
     const task = seedTask(fixture.store);
     linkRef(fixture.store, task, { provider: "alpha", externalId: "SHARED-1", url: null });
