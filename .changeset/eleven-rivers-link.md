@@ -1,5 +1,0 @@
----
-"@itsacoyote/katra": minor
----
-
-Add `katra ref add` and `katra ref remove` — external references linking a task to the work that tracks or ships it elsewhere. Paste a GitHub PR/issue URL or a Linear id and katra derives the provider and a canonical qualified id by pure string parsing (ADR-014 — no network, no plugins); any other tracker stores through the explicit `--provider/--id/--url` form. One shared row per unique reference: two tasks linking the same PR share it, removing it from the last holder deletes it, and a later paste that fills in a bare id's missing url is reported and evented as `url-backfilled`, never as a silent no-op. `show` and `brief` render a task's refs; `--json` publishes `Ref` and `RefResult`; `ref-linked`/`ref-unlinked` events land in the task's history inside the same transaction as the write. Migration 0005 adds the tables and widens the event-type constraint; existing stores upgrade in place on open. Cached status/title fields exist but stay empty until provider plugins land.
