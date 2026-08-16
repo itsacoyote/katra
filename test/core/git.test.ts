@@ -9,10 +9,10 @@
  */
 
 import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
+import { delimiter, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { findGit, runGit } from "../../src/core/git.js";
+import { findGh, findGit, runGh, runGit } from "../../src/core/git.js";
 import { createGitRepo, createNonRepoDir } from "../helpers/fixture.js";
 
 const cleanups: Array<() => void> = [];
@@ -21,6 +21,14 @@ afterEach(() => {
 });
 
 const onPosix = process.platform !== "win32";
+
+/** Writes an executable `#!/bin/sh` stub named `gh` into `dir` and returns its path. */
+function writeGhStub(dir: string, body: string): string {
+  const script = join(dir, "gh");
+  writeFileSync(script, `#!/bin/sh\n${body}`, "utf8");
+  chmodSync(script, 0o755);
+  return script;
+}
 
 describe("findGit", () => {
   it("returns a path with a directory separator, never the bare name", () => {
@@ -152,5 +160,139 @@ describe("relative PATH entries", () => {
 
     expect(found).toBeDefined();
     expect(isAbsolute(found ?? "")).toBe(true);
+  });
+});
+
+describe("findGh", () => {
+  it.runIf(onPosix)("finds gh in a directory it was given, absolute, and not elsewhere", () => {
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    const script = writeGhStub(dir.dir, "echo fake\n");
+
+    const found = findGh({ PATH: dir.dir });
+
+    expect(found).toBe(script);
+    expect(isAbsolute(found ?? "")).toBe(true);
+  });
+
+  it("returns undefined when PATH holds no gh rather than guessing", () => {
+    const empty = createNonRepoDir();
+    cleanups.push(() => empty.cleanup());
+
+    expect(findGh({ PATH: empty.dir })).toBeUndefined();
+    expect(findGh({})).toBeUndefined();
+  });
+
+  it.runIf(onPosix)("skips a relative PATH entry rather than resolving it", () => {
+    // Same discipline as findGit's own relative-entry test: a bare `"gh"`
+    // resolved from a relative PATH entry is the Windows PATH-shadowing
+    // finding all over again, just for the second binary.
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    const bin = join(dir.dir, "tools");
+    mkdirSync(bin, { recursive: true });
+    const planted = writeGhStub(bin, "echo hijacked\n");
+
+    expect(findGh({ PATH: "tools" })).toBeUndefined();
+    expect(findGh({ PATH: "." })).toBeUndefined();
+    expect(findGh({ PATH: bin })).toBe(planted);
+  });
+});
+
+describe("runGh", () => {
+  it("reports gh-not-available without throwing when gh is absent from PATH", () => {
+    const empty = createNonRepoDir();
+    cleanups.push(() => empty.cleanup());
+
+    const result = runGh({ PATH: empty.dir }, ["api", "repos/x/y/issues/1"]);
+
+    expect(result).toEqual({ ok: false, reason: "gh-not-available" });
+  });
+
+  it.runIf(onPosix)("classifies exit 4 as gh-unauthenticated", () => {
+    // Probed against the real `gh` CLI (GH_TOKEN='' + an empty GH_CONFIG_DIR):
+    // exit 4 is the one unambiguous code — no credentials presented at all.
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    writeGhStub(dir.dir, "exit 4\n");
+
+    const result = runGh({ PATH: dir.dir }, ["api", "repos/x/y/issues/1"]);
+
+    expect(result).toEqual({ ok: false, reason: "gh-unauthenticated" });
+  });
+
+  it.runIf(onPosix)("classifies exit 1 with a 404 stdout body as not-found", () => {
+    // Probed real: `gh api` on a nonexistent repo exits 1 with the GitHub API's
+    // own JSON error body on stdout, `"status":"404"` included.
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    writeGhStub(
+      dir.dir,
+      'echo \'{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":"404"}\'\nexit 1\n',
+    );
+
+    const result = runGh({ PATH: dir.dir }, ["api", "repos/x/y/issues/1"]);
+
+    expect(result).toEqual({ ok: false, reason: "not-found" });
+  });
+
+  it.runIf(onPosix)("classifies exit 1 with an 'error connecting' stderr as network", () => {
+    // Probed real: pointing gh at an unreachable host exits 1 with
+    // "error connecting to <host>" on stderr and nothing on stdout.
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    writeGhStub(
+      dir.dir,
+      "echo 'error connecting to api.github.invalid' 1>&2\n" +
+        "echo 'check your internet connection or https://githubstatus.com' 1>&2\n" +
+        "exit 1\n",
+    );
+
+    const result = runGh({ PATH: dir.dir }, ["api", "repos/x/y/issues/1"]);
+
+    expect(result).toEqual({ ok: false, reason: "network" });
+  });
+
+  it.runIf(onPosix)(
+    "SIGKILLs a stub that outlives the timeout and reports timeout, in bounded time",
+    () => {
+      const dir = createNonRepoDir();
+      cleanups.push(() => dir.cleanup());
+      writeGhStub(dir.dir, "sleep 30\n");
+      // `sleep` is an external binary, not a shell builtin, so the stub's own
+      // PATH must still resolve it — the real PATH is appended after the stub
+      // directory so `gh` itself keeps resolving to the fake ahead of any real
+      // one that might also be installed.
+      const env = { PATH: `${dir.dir}${delimiter}${process.env.PATH ?? ""}` };
+
+      const start = Date.now();
+      const result = runGh(env, ["api", "repos/x/y/issues/1"]);
+      const elapsed = Date.now() - start;
+
+      expect(result).toEqual({ ok: false, reason: "timeout" });
+      // Bounded, not merely "eventually returned": proves the process was
+      // actually killed at the ~5s configured timeout rather than left to run
+      // out its full 30s sleep in the background.
+      expect(elapsed).toBeGreaterThanOrEqual(4500);
+      expect(elapsed).toBeLessThan(20_000);
+    },
+  );
+
+  it.runIf(onPosix)("passes both GH_ environment overrides to the spawned process", () => {
+    // GH_PROMPT_DISABLED and GH_NO_UPDATE_NOTIFIER are runGh's own hardening —
+    // always set on the spawned process, not something a caller opts into.
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    writeGhStub(
+      dir.dir,
+      'echo "GH_PROMPT_DISABLED=$GH_PROMPT_DISABLED"\necho "GH_NO_UPDATE_NOTIFIER=$GH_NO_UPDATE_NOTIFIER"\n',
+    );
+
+    const result = runGh({ PATH: dir.dir }, []);
+
+    expect(result).toEqual({
+      ok: true,
+      stdout: "GH_PROMPT_DISABLED=1\nGH_NO_UPDATE_NOTIFIER=1",
+    });
   });
 });
