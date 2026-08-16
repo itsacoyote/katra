@@ -200,6 +200,6 @@ describe("migrating a v1 store under contention", () => {
     // again, so editing it would leave two stores with different schemas at
     // the same version number.
     expect(MIGRATIONS[0]?.sql).toBe(migration0001.sql);
-    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(MIGRATIONS.map((migration) => migration.version)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 });
