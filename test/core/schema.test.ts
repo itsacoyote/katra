@@ -856,7 +856,10 @@ describe("migration 0003 — claims and presence", () => {
       );
     expect(idsOf()).toEqual([1, 3]);
 
-    migrate(db, MIGRATIONS);
+    // Scoped deliberately: MIGRATIONS now carries steps through 0006, and the
+    // unscoped call would silently carry this store past v3 to measure every
+    // later rebuild's id-preservation instead of 0003's own.
+    migrate(db, MIGRATIONS.slice(0, 3));
 
     expect(idsOf()).toEqual([1, 3]);
     db.close();
@@ -1538,19 +1541,31 @@ describe("migration 0006 — refresh", () => {
     fresh.close();
   });
 
-  it("upgrades a v5 store preserving events with literal ids and prior_actor values", () => {
+  it("upgrades a v5 store preserving events with literal ids and every column intact", () => {
     const db = v5Store();
     rawInsert(db, baseTask({ title: "survives the refresh rebuild" }));
     event(db, { entity_id: "kt-aaaaaa", type: "created" });
-    event(db, { entity_id: "kt-aaaaaa", type: "status-changed" });
-    // A forced release: the column this migration's rebuild has to carry
-    // across, same trap 0005's own analogous test pins for its own rebuild.
+    // Every nullable column populated deliberately, not just prior_actor: a
+    // rebuild's INSERT...SELECT that silently drops or swaps epic_id,
+    // from_lane/to_lane, ref, reason or title still passed a version of this
+    // test that only checked id and prior_actor. Asserting the FULL row
+    // against a literal below is what actually pins the 12-column copy list.
     event(db, {
       entity_id: "kt-aaaaaa",
-      type: "released",
+      type: "status-changed",
+      epic_id: "kt-epic01",
+      from_lane: "Defined",
+      to_lane: "In Progress",
+      ref: "nt-aaaaaa",
+      reason: "why it moved",
+      title: "the title at the time",
       prior_actor: "feature/x @ /repo/wt-x",
     });
-    db.prepare("DELETE FROM events WHERE id = 2").run();
+    event(db, { entity_id: "kt-aaaaaa", type: "closed" });
+    // A gap in the ids is what distinguishes a rebuild that carries literal
+    // ids across from one that silently renumbers the copy from
+    // INSERT...SELECT's own insertion order.
+    db.prepare("DELETE FROM events WHERE id = 1").run();
 
     expect(readSchemaVersion(db)).toBe(5);
     expect(migrate(db, MIGRATIONS.slice(0, 6))).toBe(1);
@@ -1559,15 +1574,22 @@ describe("migration 0006 — refresh", () => {
     expect(db.prepare("SELECT title FROM tasks WHERE id='kt-aaaaaa'").get()).toEqual({
       title: "survives the refresh rebuild",
     });
-    // A gap in the ids is what distinguishes a rebuild that carries literal
-    // ids across from one that silently renumbers the copy from
-    // INSERT...SELECT's own insertion order.
     const rows = db.prepare("SELECT * FROM events ORDER BY id").all();
-    expect(rows.map((row) => (row as { id: number }).id)).toEqual([1, 3]);
-    expect(rows.map((row) => rowToEvent(row as never).priorActor)).toEqual([
-      null,
-      "feature/x @ /repo/wt-x",
-    ]);
+    expect(rows.map((row) => (row as { id: number }).id)).toEqual([2, 3]);
+    expect(rows[0]).toEqual({
+      id: 2,
+      type: "status-changed",
+      entity_id: "kt-aaaaaa",
+      epic_id: "kt-epic01",
+      actor: "main @ /repo",
+      from_lane: "Defined",
+      to_lane: "In Progress",
+      ref: "nt-aaaaaa",
+      reason: "why it moved",
+      title: "the title at the time",
+      prior_actor: "feature/x @ /repo/wt-x",
+      created_at: TS,
+    });
     db.close();
   });
 

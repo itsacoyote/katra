@@ -316,6 +316,13 @@ describe("refresh reasons", () => {
     // exhaustive switch fails to compile if REFRESH_REASONS gains a member
     // the union does not, which is what proves the type is derived rather
     // than hand-maintained beside it.
+    //
+    // The categories below are this test's own grouping, not a second
+    // vocabulary — see each token's own trailing comment in enums.ts for
+    // why bad-credentials (github, credentials sent and rejected) stays a
+    // separate token from bad-key (linear, same shape of failure), and why
+    // not-found (the external entity is gone) stays separate from gone
+    // (the katra-side ref row is gone) despite sharing a category here.
     const category = (reason: RefreshReason): string => {
       switch (reason) {
         case "gh-not-available":

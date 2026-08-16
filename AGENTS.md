@@ -120,7 +120,7 @@ Don't invent values for these — they're fixed sets, deliberately:
 - **Level:** `epic | task`
 - **Kind** (mirrors Conventional Commits): `feat | fix | refactor | perf | docs | test | chore`
 - **Note kinds:** `general | handoff | decision | acceptance`
-- **Event types, as implemented:** `created`, `claimed`, `released`, `status-changed`, `note-added`, `closed`, `cancelled`, `reopened`, `deleted`, `ref-linked`, `ref-unlinked`. Eleven now that F7's external refs land the two ref events; `ref-status-changed` still waits on providers — declaring a value the code cannot write would put it in a `CHECK` constraint under forward-only migrations, which is expensive to take back. `deleted` and `cancelled` are additions the spec's own list does not have (ADR-008 — `delete` appends its own last event; ADR-003 — a terminal lane distinct from `closed`).
+- **Event types, as implemented:** `created`, `claimed`, `released`, `status-changed`, `note-added`, `closed`, `cancelled`, `reopened`, `deleted`, `ref-linked`, `ref-unlinked`, `ref-status-changed`. Twelve now that F8's migration 0006 widens the `CHECK` — `ref-status-changed` is written by `katra refresh` when an external ref's status actually moves. `deleted`, `cancelled` and `ref-unlinked` are additions the spec's own list does not have (ADR-008; ADR-003; F7 requirement 5).
 
 ## Commits
 

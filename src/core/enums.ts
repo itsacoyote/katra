@@ -153,17 +153,47 @@ export const PRIORITY_DEFAULT = 2 satisfies Priority;
  * the database.
  */
 export const REFRESH_REASONS = [
+  // github (T2 runGh): `gh` is not on PATH at all — findGh's own miss.
   "gh-not-available",
+  // github (T2 runGh): gh exit 4, probed unambiguous — no credentials
+  // present to even try. Distinct from bad-credentials below, which DID
+  // send credentials and had them rejected.
   "gh-unauthenticated",
+  // github (T2 runGh, exit 1 + 404-shaped stdout) or linear (T3, 200 with
+  // errors and null data): the EXTERNAL entity itself does not exist.
+  // Distinct from gone below, which is the katra-side ref vanishing.
   "not-found",
+  // github (T2 runGh, exit 1 + an HTTP 401 "Bad credentials" stderr shape):
+  // credentials were sent and GitHub rejected them. Distinct from
+  // gh-unauthenticated above, which never had credentials to reject.
   "bad-credentials",
+  // github (T2 runGh, exit 1 + "error connecting" stderr) or linear (T3,
+  // fetch threw): a transport failure, not a rejection by either API.
   "network",
+  // github (T2 runGh, execFileSync's own timeout + SIGKILL) or linear (T3,
+  // AbortSignal.timeout firing): the call ran long enough to be aborted.
   "timeout",
+  // linear (T3): env.LINEAR_API_KEY absent — refused before any network
+  // call, not a rejection by Linear.
   "no-key",
+  // linear (T3): Linear returned HTTP 401 for the raw key it was sent —
+  // github's credential-rejection equivalent is bad-credentials above, not
+  // this token; the two providers never share a reason for the same shape
+  // of failure.
   "bad-key",
+  // linear (T3): the response body was not parseable JSON.
   "malformed-response",
+  // github or linear (T3): the stored external_id does not match the
+  // provider's own strict re-derivation pattern — refused before any spawn
+  // or fetch, never a network-observed failure.
   "bad-shape",
+  // refresh (T5): the ref's provider is not one of the two registered
+  // providers (the escape hatch, e.g. "jira") — refused without any
+  // network.
   "no-provider",
+  // refresh (T5): the katra-side ref or task row vanished between being
+  // gathered and its per-ref write (the TOCTOU re-check inside writeTx).
+  // The katra side, not the external one — see not-found above for that.
   "gone",
 ] as const;
 export type RefreshReason = (typeof REFRESH_REASONS)[number];
