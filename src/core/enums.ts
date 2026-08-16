@@ -8,7 +8,12 @@
  * precisely how the two would drift.
  *
  * These are enforced in the database, not just in TypeScript, because types do
- * not survive to runtime and this store is written by concurrent processes.
+ * not survive to runtime and this store is written by concurrent processes —
+ * with one exception. {@link REFRESH_REASONS} is never written to a column
+ * and carries no `CHECK`: it is a closed vocabulary for what the `refresh`
+ * command (F8) reports on stdout/`--json` when a provider degrades, not a
+ * value this store ever persists, so there is no `CHECK` for it to drift from
+ * in the first place.
  */
 
 /** Hierarchy. A `task`'s parent is an `epic`; two levels is the whole tree. */
@@ -78,17 +83,16 @@ export const UNTRIAGED_LANES = ["Defined", "Researching"] as const satisfies rea
 /**
  * What an event records.
  *
- * Eleven now that `ref-linked` and `ref-unlinked` land here — F7's external
- * refs (migration 0005). `ref-status-changed` still waits on the provider
- * cycles (.21+): declaring a value nothing can write would put it in a
- * `CHECK` constraint under forward-only migrations, which makes the mistake
- * expensive to take back.
+ * Twelve now that `ref-status-changed` lands here — F8's provider refresh
+ * cycle (migration 0006), writable at last by the `refresh` command (T5) once
+ * an external ref's status actually moves. `ref-linked` and `ref-unlinked`
+ * arrived first, with F7's external refs (migration 0005).
  *
- * Three of the eleven are not in `docs/katra-spec.md` §5's own list at all:
+ * Four of the twelve are not in `docs/katra-spec.md` §5's own list at all:
  * `deleted` (ADR-008 — `delete` appends its own last event), `cancelled`
- * (ADR-003 — a terminal lane distinct from `closed`), and `ref-unlinked`
- * (F7 requirement 5 — a deliberate addition with no counterpart in the
- * spec's original curated set).
+ * (ADR-003 — a terminal lane distinct from `closed`), `ref-unlinked` (F7
+ * requirement 5), and `ref-status-changed` (F8 requirement 4) — each a
+ * deliberate addition with no counterpart in the spec's original curated set.
  *
  * The order is the rough order a task's life produces them, not alphabetical —
  * it is what a reader of the CHECK constraint sees.
@@ -105,6 +109,7 @@ export const EVENT_TYPES = [
   "deleted",
   "ref-linked",
   "ref-unlinked",
+  "ref-status-changed",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -131,6 +136,37 @@ export type Priority = (typeof PRIORITIES)[number];
 export const PRIORITY_MIN = 0 satisfies Priority;
 export const PRIORITY_MAX = 4 satisfies Priority;
 export const PRIORITY_DEFAULT = 2 satisfies Priority;
+
+/**
+ * Why a `refresh` (F8) could not fill a ref's cached fields.
+ *
+ * Declared here rather than beside the provider code that produces them
+ * (`src/core/providers/`) so the GitHub provider, the Linear provider and the
+ * `refresh` command itself (T2/T3/T5) all import the one canonical set,
+ * instead of three files independently inventing overlapping literal unions.
+ *
+ * Unlike every other set in this module, nothing here is `CHECK`-enforced —
+ * see this file's own module doc. A provider degrades to one of these
+ * literals rather than ever surfacing a raw `Error#message` (epic risk note
+ * 14): the tokens are the whole vocabulary `refresh` reports on stdout and in
+ * `--json`, closed the same way every other set here is closed, just not by
+ * the database.
+ */
+export const REFRESH_REASONS = [
+  "gh-not-available",
+  "gh-unauthenticated",
+  "not-found",
+  "bad-credentials",
+  "network",
+  "timeout",
+  "no-key",
+  "bad-key",
+  "malformed-response",
+  "bad-shape",
+  "no-provider",
+  "gone",
+] as const;
+export type RefreshReason = (typeof REFRESH_REASONS)[number];
 
 /** True when `value` is one of `LEVELS`. */
 export function isLevel(value: unknown): value is Level {

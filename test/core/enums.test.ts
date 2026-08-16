@@ -23,6 +23,8 @@ import {
   PRIORITY_DEFAULT,
   PRIORITY_MAX,
   PRIORITY_MIN,
+  REFRESH_REASONS,
+  type RefreshReason,
   sqlEnum,
   TERMINAL_LANES,
 } from "../../src/core/enums.js";
@@ -148,6 +150,7 @@ describe("event types", () => {
           return "removal";
         case "ref-linked":
         case "ref-unlinked":
+        case "ref-status-changed":
           return "reference";
         default: {
           const exhaustive: never = type;
@@ -168,16 +171,15 @@ describe("event types", () => {
       "removal",
       "reference",
       "reference",
+      "reference",
     ]);
   });
 
-  it("declares the eleven types the schema currently accepts, and no more", () => {
-    // The spec's own list is nine, but not the same nine: `ref-status-changed`
-    // still waits on the provider cycles — declaring a value nothing can
-    // write would put it in a CHECK constraint under forward-only
-    // migrations, expensive to take back. `deleted` (ADR-008), `cancelled`
-    // (ADR-003) and `ref-unlinked` (F7 requirement 5) are additions the
-    // spec's own list does not carry.
+  it("declares the twelve types the schema currently accepts, and no more", () => {
+    // The spec's own list is nine, but not the same nine: `deleted`
+    // (ADR-008), `cancelled` (ADR-003), `ref-unlinked` (F7 requirement 5) and
+    // `ref-status-changed` (F8 requirement 4) are additions the spec's own
+    // list does not carry.
     expect(EVENT_TYPES).toEqual([
       "created",
       "claimed",
@@ -190,9 +192,10 @@ describe("event types", () => {
       "deleted",
       "ref-linked",
       "ref-unlinked",
+      "ref-status-changed",
     ]);
     expect(EVENT_TYPES).toContain("ref-linked");
-    expect(EVENT_TYPES).not.toContain("ref-status-changed");
+    expect(EVENT_TYPES).toContain("ref-status-changed");
   });
 
   it("returns true from isEventType for every declared type and false otherwise", () => {
@@ -202,7 +205,7 @@ describe("event types", () => {
     }
   });
 
-  it("rejects an event type outside the fixed set, naming all eleven", () => {
+  it("rejects an event type outside the fixed set, naming all twelve", () => {
     try {
       narrowEventType("updated");
       expect.unreachable("should have thrown");
@@ -284,6 +287,73 @@ describe("priority", () => {
     for (const bad of [-1, 5, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(isPriority(bad)).toBe(false);
     }
+  });
+});
+
+describe("refresh reasons", () => {
+  it("declares the twelve tokens refresh can report, never persisted", () => {
+    // Unlike every other set in this file, REFRESH_REASONS has no CHECK to
+    // pin against — see enums.ts's own module doc for why: it is a closed
+    // CLI/report vocabulary, not a column constraint.
+    expect(REFRESH_REASONS).toEqual([
+      "gh-not-available",
+      "gh-unauthenticated",
+      "not-found",
+      "bad-credentials",
+      "network",
+      "timeout",
+      "no-key",
+      "bad-key",
+      "malformed-response",
+      "bad-shape",
+      "no-provider",
+      "gone",
+    ]);
+  });
+
+  it("derives the RefreshReason union from the array", () => {
+    // Same compile-time/runtime pairing as EventType and NoteKind above: the
+    // exhaustive switch fails to compile if REFRESH_REASONS gains a member
+    // the union does not, which is what proves the type is derived rather
+    // than hand-maintained beside it.
+    const category = (reason: RefreshReason): string => {
+      switch (reason) {
+        case "gh-not-available":
+        case "gh-unauthenticated":
+        case "no-key":
+        case "bad-key":
+        case "bad-credentials":
+        case "no-provider":
+          return "credential-or-config";
+        case "not-found":
+        case "gone":
+          return "target";
+        case "network":
+        case "timeout":
+        case "malformed-response":
+        case "bad-shape":
+          return "transport";
+        default: {
+          const exhaustive: never = reason;
+          return exhaustive;
+        }
+      }
+    };
+
+    expect(REFRESH_REASONS.map(category)).toEqual([
+      "credential-or-config",
+      "credential-or-config",
+      "target",
+      "credential-or-config",
+      "transport",
+      "transport",
+      "credential-or-config",
+      "credential-or-config",
+      "transport",
+      "transport",
+      "credential-or-config",
+      "target",
+    ]);
   });
 });
 

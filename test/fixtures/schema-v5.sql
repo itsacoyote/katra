@@ -44,7 +44,7 @@ CREATE INDEX task_refs_ref ON task_refs(ref_id);
 -- `events` (ADR-008) for it to guard regardless.
 CREATE TABLE events_new (
   id          INTEGER PRIMARY KEY,
-  type        TEXT NOT NULL CHECK (type IN ('created','claimed','released','status-changed','note-added','closed','cancelled','reopened','deleted','ref-linked','ref-unlinked')),
+  type        TEXT NOT NULL CHECK (type IN ('created','claimed','released','status-changed','note-added','closed','cancelled','reopened','deleted','ref-linked','ref-unlinked','ref-status-changed')),
   entity_id   TEXT NOT NULL,
   epic_id     TEXT,
   actor       TEXT NOT NULL,

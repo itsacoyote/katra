@@ -313,13 +313,17 @@ describe("the stream as a whole", () => {
     // commands land (T4, T9) — this narrows back to EVENT_TYPES once they do.
     // ref-linked/ref-unlinked are declared by migration 0005 but not emitted
     // here either: they come from ref add/remove (T6), not from any task
-    // write path this test drives.
+    // write path this test drives. ref-status-changed is declared by
+    // migration 0006 but not emitted here either: it is written by `refresh`
+    // (F8 T5) reacting to an external provider, not by any task write path
+    // this test drives.
     const notYetWired = new Set([
       "note-added",
       "claimed",
       "released",
       "ref-linked",
       "ref-unlinked",
+      "ref-status-changed",
     ]);
     expect([...emitted].sort()).toEqual([...EVENT_TYPES].filter((t) => !notYetWired.has(t)).sort());
   });
