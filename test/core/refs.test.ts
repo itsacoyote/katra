@@ -562,6 +562,20 @@ describe("unlinkRef", () => {
     expect(listRefs(fixture.store, task)).toEqual([]);
   });
 
+  it("linking or unlinking against a nonexistent task refuses with the create-it-first hint", () => {
+    // requireRefTarget's friendlier not_found (the requireNoteTarget
+    // precedent) — hand-verified during QA, pinned here: the message must
+    // name the recovery command, not just say nothing matched.
+    expect(() => linkRef(fixture.store, "kt-zzzzzz", GITHUB_REF)).toThrowError(
+      /no task matches "kt-zzzzzz" — create it with `katra add` first/,
+    );
+    expect(() => unlinkRef(fixture.store, "kt-zzzzzz", "owner/repo#12")).toThrowError(
+      /no task matches "kt-zzzzzz"/,
+    );
+    expect(refRows()).toHaveLength(0);
+    expect(eventsOfType("ref-linked")).toHaveLength(0);
+  });
+
   it("unlink of never-linked ref refuses", () => {
     const task = seedTask(fixture.store);
 

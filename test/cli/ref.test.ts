@@ -113,6 +113,33 @@ describe("katra ref add", () => {
     expect(result.stderr).toMatch(/--provider/);
   });
 
+  it("refuses --provider without --id, naming the missing half", async () => {
+    // ref.ts routes a missing flag through as an empty string on purpose, so
+    // validateExplicitRef's empty-id refusal is the one message here.
+    const task = await add(["a task"]);
+
+    const result = await runCli(["ref", "add", task, "--provider", "gitlab"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/id must not be empty/);
+  });
+
+  it("refuses a nonexistent task id with the create-it-first hint on add and remove", async () => {
+    const added = await runCli(
+      ["ref", "add", "kt-zzzzzz", "https://github.com/acme/widgets/pull/7"],
+      { cwd: repo.dir },
+    );
+    expect(added.exitCode).toBe(EXIT.user);
+    expect(added.stderr).toMatch(/no task matches "kt-zzzzzz"/);
+    expect(added.stderr).toMatch(/katra add/);
+
+    const removed = await runCli(["ref", "remove", "kt-zzzzzz", "acme/widgets#7"], {
+      cwd: repo.dir,
+    });
+    expect(removed.exitCode).toBe(EXIT.user);
+    expect(removed.stderr).toMatch(/no task matches "kt-zzzzzz"/);
+  });
+
   it("--json round-trips RefResult", async () => {
     const task = await add(["a task"]);
     const url = "https://github.com/acme/widgets/pull/21";

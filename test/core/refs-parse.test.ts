@@ -256,6 +256,36 @@ describe("parseRefInput", () => {
     expect(parseRefInput("https://github.com/owner/re%0Apo/pull/1").recognized).toBe(false);
   });
 
+  it("refuses malformed percent-encoding without throwing (risk note 5)", () => {
+    // decodeURIComponent throws URIError on these; the catch turns it into
+    // the ordinary refusal instead of a crash — the caught branch itself was
+    // hand-verified but unpinned until validate's QA round.
+    const truncated = parseRefInput("https://github.com/o%E0%A4%A/repo/pull/1");
+    expect(truncated.recognized).toBe(false);
+    if (!truncated.recognized) expect(truncated.message).toMatch(/--provider/);
+
+    expect(parseRefInput("https://github.com/o%zz/repo/pull/1").recognized).toBe(false);
+    expect(parseRefInput("https://linear.app/ws%ED%A0%80/issue/ENG-1").recognized).toBe(false);
+  });
+
+  it("refuses recognized-host URLs whose path is not an issue or PR", () => {
+    // Same hosts, wrong shapes — each refuses into the escape hatch rather
+    // than mis-deriving an external id: a commit link, a compare link, a
+    // non-digit issue number, a Linear board link, a malformed team key.
+    const shapes = [
+      "https://github.com/owner/repo/commit/abc123def",
+      "https://github.com/owner/repo/compare/main...feature",
+      "https://github.com/owner/repo/pull/12abc",
+      "https://linear.app/acme/team/ENG/board",
+      "https://linear.app/acme/issue/ENG_451",
+    ];
+    for (const input of shapes) {
+      const result = parseRefInput(input);
+      expect(result.recognized, input).toBe(false);
+      if (!result.recognized) expect(result.message, input).toMatch(/--provider/);
+    }
+  });
+
   it("refuses a bare owner/repo#n whose owner/repo contains a query delimiter or control character", () => {
     // "?" is not excluded by BARE_GITHUB_PATTERN's character class on its
     // own — isCleanSegment is what refuses it, matching the URL-decoded
@@ -532,6 +562,24 @@ describe("validateExplicitRef", () => {
       url: `https://git${LF}lab.example.com/proj/1`,
     });
     expect(newlineHost.valid).toBe(false);
+  });
+
+  it("refuses an empty provider and an empty id, each naming which one", () => {
+    // CLI-reachable: `ref add <task> --provider gitlab` with no --id lands
+    // here as id "" (ref.ts routes missing flags as empty strings on
+    // purpose, so this refusal is the single source of that message).
+    const noProvider = validateExplicitRef({ provider: "", id: "PROJ-1" });
+    expect(noProvider.valid).toBe(false);
+    if (!noProvider.valid) expect(noProvider.message).toMatch(/provider must not be empty/);
+
+    const noId = validateExplicitRef({ provider: "gitlab", id: "   " });
+    expect(noId.valid).toBe(false);
+    if (!noId.valid) expect(noId.message).toMatch(/id must not be empty/);
+  });
+
+  it("refuses a non-string id without throwing, like its provider sibling", () => {
+    const badId = validateExplicitRef({ provider: "gitlab", id: 42 as never });
+    expect(badId.valid).toBe(false);
   });
 
   it("refuses control characters in provider and id (NUL defeats SQLite length())", () => {
