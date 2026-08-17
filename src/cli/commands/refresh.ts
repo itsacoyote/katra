@@ -166,6 +166,9 @@ async function resolveOne(ref: OpenRef, env: NodeJS.ProcessEnv): Promise<Provide
   const provider = providerFor(ref.ref);
   if (provider === undefined) return { resolved: false, reason: "no-provider" };
   try {
+    // `return await`, not `return`: without the await the promise escapes
+    // this try and the catch below never fires — the await IS the defense,
+    // not noise a cleanup may remove (senior round-2 INFO, proven live).
     return await provider.resolve(ref.ref, env);
   } catch {
     return { resolved: false, reason: "malformed-response" };
