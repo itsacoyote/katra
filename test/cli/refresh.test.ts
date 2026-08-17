@@ -1,0 +1,334 @@
+/**
+ * `katra refresh` (F8 T5) — orchestration, exit codes, and the `--json`
+ * contract, exercised through the real CLI. Every scenario here runs with
+ * `gh` stripped from `PATH` and `LINEAR_API_KEY` unset (`isolatedNoGhEnv`) or
+ * a stubbed `gh` script — this suite never makes a real network call; the
+ * live-API dogfood run is T7's job.
+ */
+
+import { chmodSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildRefreshSection } from "../../src/cli/commands/refresh.js";
+import { EXIT } from "../../src/cli/output.js";
+import type { RefreshResult } from "../../src/core/contract.js";
+import { findGit } from "../../src/core/git.js";
+import { openStore } from "../../src/core/store.js";
+import { runCli } from "../helpers/cli.js";
+import type { GitFixture } from "../helpers/fixture.js";
+import { createGitRepo, createNonRepoDir } from "../helpers/fixture.js";
+
+/**
+ * An environment with a real, wrapped `git` but no resolvable `gh` and no
+ * `LINEAR_API_KEY` — see `feature.test.ts`'s identically-named helper for
+ * the full reasoning (PATH replaced, never prefixed).
+ */
+function isolatedNoGhEnv(): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
+  const bin = createNonRepoDir();
+  const real = findGit(process.env);
+  if (real === undefined) throw new Error("no git on PATH to wrap");
+  const script = join(bin.dir, "git");
+  writeFileSync(script, `#!/bin/sh\nexec ${JSON.stringify(real)} "$@"\n`, "utf8");
+  chmodSync(script, 0o755);
+
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
+  delete env.LINEAR_API_KEY;
+
+  return { env, cleanup: bin.cleanup };
+}
+
+/**
+ * `isolatedNoGhEnv`, plus a `gh` on that same isolated `PATH` that always
+ * answers `responseBody` verbatim, whatever it is asked — a fake CLI, not a
+ * mock of `runGh`: this suite runs `refresh` through the real, in-process
+ * CLI end to end, so the double has to be a real, spawnable executable, the
+ * same technique `with-store.test.ts`'s `countingGit` uses for `git`.
+ *
+ * **A Node script, not a shell one.** A first version shelled out to `cat`/
+ * `dirname` to read the response back from a sibling file — both external
+ * commands, resolved via the child's own `PATH` at run time, which is
+ * exactly the narrow, `gh`-excluding `PATH` this environment hands it. That
+ * `PATH` has no `cat`/`dirname` on it either, so the script itself failed
+ * to run and `refresh` read the empty/garbled result as `malformed-response`
+ * — a real failure this exact suite hit once. The shebang points at
+ * `process.execPath` (an absolute path, resolved by the kernel directly,
+ * never by `PATH`), and the script body writes the response with nothing
+ * but Node's own `process.stdout`, so no external command is on the
+ * critical path at all.
+ */
+function stubbedGhEnv(responseBody: string): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
+  const bin = createNonRepoDir();
+  const real = findGit(process.env);
+  if (real === undefined) throw new Error("no git on PATH to wrap");
+  const gitScript = join(bin.dir, "git");
+  writeFileSync(gitScript, `#!/bin/sh\nexec ${JSON.stringify(real)} "$@"\n`, "utf8");
+  chmodSync(gitScript, 0o755);
+
+  const ghScript = join(bin.dir, "gh");
+  writeFileSync(
+    ghScript,
+    `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(responseBody)});\n`,
+    "utf8",
+  );
+  chmodSync(ghScript, 0o755);
+
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
+  delete env.LINEAR_API_KEY;
+
+  return { env, cleanup: bin.cleanup };
+}
+
+/** A `gh api repos/{owner}/{repo}/issues/{n}` body for a merged PR (`github.ts`'s own precedence: `pull_request.merged_at` wins). */
+const MERGED_BODY = JSON.stringify({
+  title: "Fix the bug",
+  state: "closed",
+  draft: false,
+  pull_request: { merged_at: "2026-01-01T00:00:00Z" },
+});
+
+/** Reads one `refs` row directly, bypassing every application read path — the "(DB read)" the no-provider named test calls for. */
+function readRefRow(
+  repoDir: string,
+  externalId: string,
+): { cached_status: unknown; cached_title: unknown; synced_at: unknown } | undefined {
+  const { store } = openStore(repoDir, {});
+  try {
+    return store.db
+      .prepare("SELECT cached_status, cached_title, synced_at FROM refs WHERE external_id = ?")
+      .get(externalId) as
+      | { cached_status: unknown; cached_title: unknown; synced_at: unknown }
+      | undefined;
+  } finally {
+    store.close();
+  }
+}
+
+let repo: GitFixture;
+const cleanups: Array<() => void> = [];
+beforeEach(async () => {
+  repo = createGitRepo();
+  await runCli(["init"], { cwd: repo.dir });
+});
+afterEach(() => {
+  repo.cleanup();
+  while (cleanups.length > 0) cleanups.pop()?.();
+  vi.unstubAllGlobals();
+});
+
+async function add(args: readonly string[]): Promise<string> {
+  return (await runCli(["add", ...args], { cwd: repo.dir })).stdout.trim();
+}
+
+describe("buildRefreshSection", () => {
+  it("truncation-honest when a bound empties a category", () => {
+    const section = buildRefreshSection(["a", "b", "c"], 0);
+
+    expect(section).toEqual({ count: 3, items: [], truncated: true });
+  });
+});
+
+describe("katra refresh", () => {
+  it("no-provider ref -> unresolved no-provider, exit 0, nothing written (DB read)", async () => {
+    const isolated = isolatedNoGhEnv();
+    cleanups.push(isolated.cleanup);
+
+    const task = await add(["a task"]);
+    const linked = await runCli(
+      ["ref", "add", task, "--provider", "jira", "--id", "FOO-1", "--json"],
+      { cwd: repo.dir },
+    );
+    expect(linked.exitCode, linked.stderr).toBe(EXIT.ok);
+
+    const result = await runCli(["refresh", "--json"], { cwd: repo.dir, env: isolated.env });
+
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+    const doc = result.json() as RefreshResult;
+    expect(doc.unresolved.items).toEqual([
+      { provider: "jira", externalId: "FOO-1", reason: "no-provider" },
+    ]);
+    expect(doc.updated.count).toBe(0);
+    expect(doc.unchanged.count).toBe(0);
+
+    const row = readRefRow(repo.dir, "FOO-1");
+    expect(row).toEqual({ cached_status: null, cached_title: null, synced_at: null });
+  });
+
+  it("gh absent -> unresolved gh-not-available, exit 0", async () => {
+    const isolated = isolatedNoGhEnv();
+    cleanups.push(isolated.cleanup);
+
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "https://github.com/acme/widgets/pull/7"], {
+      cwd: repo.dir,
+    });
+
+    const result = await runCli(["refresh", "--json"], { cwd: repo.dir, env: isolated.env });
+
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+    const doc = result.json() as RefreshResult;
+    expect(doc.unresolved.items).toEqual([
+      { provider: "github", externalId: "acme/widgets#7", reason: "gh-not-available" },
+    ]);
+  });
+
+  it("linear no-key -> unresolved no-key, zero network", async () => {
+    const isolated = isolatedNoGhEnv();
+    cleanups.push(isolated.cleanup);
+
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "ENG-451"], { cwd: repo.dir });
+
+    const result = await runCli(["refresh", "--json"], { cwd: repo.dir, env: isolated.env });
+
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+    const doc = result.json() as RefreshResult;
+    expect(doc.unresolved.items).toEqual([
+      { provider: "linear", externalId: "ENG-451", reason: "no-key" },
+    ]);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("stubbed gh merged fills caches, show renders", async () => {
+    const stubbed = stubbedGhEnv(MERGED_BODY);
+    cleanups.push(stubbed.cleanup);
+
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "https://github.com/acme/widgets/pull/7"], {
+      cwd: repo.dir,
+    });
+
+    const result = await runCli(["refresh", "--json"], { cwd: repo.dir, env: stubbed.env });
+
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+    const doc = result.json() as RefreshResult;
+    expect(doc.updated.items).toEqual([
+      { provider: "github", externalId: "acme/widgets#7", from: null, to: "merged" },
+    ]);
+
+    const shown = await runCli(["show", task, "--json"], { cwd: repo.dir });
+    expect(shown.exitCode, shown.stderr).toBe(EXIT.ok);
+    const view = shown.json() as { refs: ReadonlyArray<Record<string, unknown>> };
+    expect(view.refs).toHaveLength(1);
+    expect(view.refs[0]).toMatchObject({
+      externalId: "acme/widgets#7",
+      cachedStatus: "merged",
+      cachedTitle: "Fix the bug",
+    });
+    expect(view.refs[0]?.syncedAt).not.toBeNull();
+  });
+
+  it("second run unchanged, zero events", async () => {
+    const stubbed = stubbedGhEnv(MERGED_BODY);
+    cleanups.push(stubbed.cleanup);
+
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "https://github.com/acme/widgets/pull/7"], {
+      cwd: repo.dir,
+    });
+
+    const first = await runCli(["refresh", "--json"], { cwd: repo.dir, env: stubbed.env });
+    expect((first.json() as RefreshResult).updated.count).toBe(1);
+
+    const second = await runCli(["refresh", "--json"], { cwd: repo.dir, env: stubbed.env });
+    expect(second.exitCode, second.stderr).toBe(EXIT.ok);
+    const doc = second.json() as RefreshResult;
+    expect(doc.updated.count).toBe(0);
+    expect(doc.unchanged.items).toEqual([{ provider: "github", externalId: "acme/widgets#7" }]);
+
+    const log = await runCli(["log", task, "--json"], { cwd: repo.dir });
+    const events = (log.json() as { events: ReadonlyArray<{ type: string }> }).events;
+    expect(events.filter((event) => event.type === "ref-status-changed")).toHaveLength(1);
+  });
+
+  it("explicit ids scope", async () => {
+    const stubbed = stubbedGhEnv(MERGED_BODY);
+    cleanups.push(stubbed.cleanup);
+
+    const taskX = await add(["task x"]);
+    const taskY = await add(["task y"]);
+    await runCli(["ref", "add", taskX, "https://github.com/acme/widgets/pull/1"], {
+      cwd: repo.dir,
+    });
+    await runCli(["ref", "add", taskY, "https://github.com/acme/widgets/pull/2"], {
+      cwd: repo.dir,
+    });
+
+    const result = await runCli(["refresh", taskX, "--json"], { cwd: repo.dir, env: stubbed.env });
+
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+    const doc = result.json() as RefreshResult;
+    expect(doc.totals.refs).toBe(1);
+    expect(doc.updated.items).toEqual([
+      { provider: "github", externalId: "acme/widgets#1", from: null, to: "merged" },
+    ]);
+
+    const untouched = readRefRow(repo.dir, "acme/widgets#2");
+    expect(untouched).toEqual({ cached_status: null, cached_title: null, synced_at: null });
+  });
+
+  it("bogus id refuses", async () => {
+    const isolated = isolatedNoGhEnv();
+    cleanups.push(isolated.cleanup);
+
+    const result = await runCli(["refresh", "kt-zzzzzz"], { cwd: repo.dir, env: isolated.env });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/no task matches "kt-zzzzzz"/);
+  });
+
+  it("--json round-trips RefreshResult with kebab tokens while text renders sentences", async () => {
+    const isolated = isolatedNoGhEnv();
+    cleanups.push(isolated.cleanup);
+
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "--provider", "jira", "--id", "FOO-1"], { cwd: repo.dir });
+
+    const json = await runCli(["refresh", "--json"], { cwd: repo.dir, env: isolated.env });
+    expect((json.json() as RefreshResult).unresolved.items[0]?.reason).toBe("no-provider");
+
+    const text = await runCli(["refresh"], { cwd: repo.dir, env: isolated.env });
+    expect(text.exitCode, text.stderr).toBe(EXIT.ok);
+    expect(text.stdout).toContain("no provider");
+    expect(text.stdout).not.toContain("no-provider");
+  });
+
+  it("mixed outcomes render per-category report with totals", async () => {
+    const stubbed = stubbedGhEnv(MERGED_BODY);
+    cleanups.push(stubbed.cleanup);
+
+    const taskA = await add(["task a"]);
+    const taskC = await add(["task c"]);
+    await runCli(["ref", "add", taskA, "https://github.com/acme/widgets/pull/1"], {
+      cwd: repo.dir,
+    });
+    await runCli(["ref", "add", taskC, "--provider", "jira", "--id", "FOO-1"], {
+      cwd: repo.dir,
+    });
+
+    // First run: A's ref syncs for the first time (updated), C stays
+    // unresolved. A second task's ref is added only after this run, so the
+    // second run below sees it as a fresh sync (updated) alongside A's own
+    // now-unchanged one — all three categories land in that one report.
+    const first = await runCli(["refresh", "--json"], { cwd: repo.dir, env: stubbed.env });
+    expect((first.json() as RefreshResult).updated.count).toBe(1);
+
+    const taskB = await add(["task b"]);
+    await runCli(["ref", "add", taskB, "https://github.com/acme/widgets/pull/2"], {
+      cwd: repo.dir,
+    });
+
+    const second = await runCli(["refresh"], { cwd: repo.dir, env: stubbed.env });
+
+    expect(second.exitCode, second.stderr).toBe(EXIT.ok);
+    expect(second.stdout).toContain("3 ref(s) checked — 1 updated, 1 unchanged, 1 unresolved");
+    expect(second.stdout).toContain("updated (1)");
+    expect(second.stdout).toContain("unchanged (1)");
+    expect(second.stdout).toContain("unresolved (1)");
+    expect(second.stdout).toContain("acme/widgets#2");
+    expect(second.stdout).toContain("acme/widgets#1");
+    expect(second.stdout).toContain("no provider");
+  });
+});

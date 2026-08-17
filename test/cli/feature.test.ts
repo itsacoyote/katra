@@ -14,9 +14,40 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram, wantsJson } from "../../src/cli/program.js";
 import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
+import { findGh, findGit } from "../../src/core/git.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
-import { createGitRepo, git } from "../helpers/fixture.js";
+import { createGitRepo, createNonRepoDir, git } from "../helpers/fixture.js";
+
+/**
+ * An environment with a real, working `git` but no resolvable `gh` and no
+ * `LINEAR_API_KEY` — what `refresh`'s own sweep entry runs under, so its
+ * `--json` invocation can never reach a real network call regardless of
+ * fixture ordering or what the machine running the suite has installed
+ * (`refresh.ts`'s own module docs record the confused-deputy risk this
+ * closes off in tests specifically).
+ *
+ * `PATH` is **replaced**, not prefixed — unlike `with-store.test.ts`'s
+ * `countingGit`, which only needs to intercept git and is happy to leave the
+ * rest of the real `PATH` behind it. Prefixing here would still leave a real
+ * `gh`, if this machine has one, reachable further down the same list; only
+ * a `PATH` containing exactly one directory, holding nothing but a `git`
+ * wrapper, guarantees `findGh` finds nothing no matter what else is
+ * installed.
+ */
+function isolatedNoGhEnv(): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
+  const bin = createNonRepoDir();
+  const real = findGit(process.env);
+  if (real === undefined) throw new Error("no git on PATH to wrap");
+  const script = join(bin.dir, "git");
+  writeFileSync(script, `#!/bin/sh\nexec ${JSON.stringify(real)} "$@"\n`, "utf8");
+  chmodSync(script, 0o755);
+
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
+  delete env.LINEAR_API_KEY;
+
+  return { env, cleanup: bin.cleanup };
+}
 
 /** The database file, for tests that need to break it on purpose. */
 function storeDbPath(dir: string): string {
@@ -48,6 +79,7 @@ const EXPECTED_COMMANDS = [
   "search",
   "recent",
   "stale",
+  "refresh",
 ] as const;
 
 let repo: GitFixture;
@@ -62,7 +94,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all twenty-three commands on the program", () => {
+  it("registers all twenty-four commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -71,7 +103,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(23);
+    expect(registered).toHaveLength(24);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -127,44 +159,79 @@ describe("--json across every command", () => {
       })}\n`,
     );
 
-    const invocations: Array<readonly string[]> = [
-      ["init"],
-      ["add", "another task"],
-      ["show", blocker],
-      ["claim", blocker],
-      ["release", blocker],
-      ["list"],
-      ["update", blocker, "--priority", "1"],
-      ["dep", dependent, "--blocked-by", blocker],
-      ["link", linked, doomed],
-      ["ref", "add", blocker, "https://github.com/acme/widgets/pull/7"],
-      ["close", blocker],
-      ["reopen", blocker],
-      ["cancel", blocker, "--reason", "dropped"],
-      ["delete", doomed, "--force"],
-      ["next"],
+    const isolated = isolatedNoGhEnv();
+
+    // Reshaped from Array<readonly string[]>: refresh's entry is the first
+    // one that must not run under this test's ambient environment — an
+    // isolated `env` per entry, defaulting to none (runCli's own default is
+    // process.env), is what lets it carry that without every other entry
+    // changing shape.
+    const invocations: ReadonlyArray<{
+      readonly args: readonly string[];
+      readonly env?: NodeJS.ProcessEnv;
+    }> = [
+      { args: ["init"] },
+      { args: ["add", "another task"] },
+      { args: ["show", blocker] },
+      { args: ["claim", blocker] },
+      { args: ["release", blocker] },
+      { args: ["list"] },
+      { args: ["update", blocker, "--priority", "1"] },
+      { args: ["dep", dependent, "--blocked-by", blocker] },
+      { args: ["link", linked, doomed] },
+      { args: ["ref", "add", blocker, "https://github.com/acme/widgets/pull/7"] },
+      { args: ["close", blocker] },
+      { args: ["reopen", blocker] },
+      { args: ["cancel", blocker, "--reason", "dropped"] },
+      { args: ["delete", doomed, "--force"] },
+      { args: ["next"] },
       // Deliberately after `delete`: the history of the task just removed is
       // the read only the event stream can answer.
-      ["log", doomed],
-      ["note", "list"],
-      ["brief", epic],
-      ["board", "--digest"],
-      ["migrate", "beads"],
-      ["search", "another"],
-      ["recent"],
-      ["stale"],
+      { args: ["log", doomed] },
+      { args: ["note", "list"] },
+      { args: ["brief", epic] },
+      { args: ["board", "--digest"] },
+      { args: ["migrate", "beads"] },
+      { args: ["search", "another"] },
+      { args: ["recent"] },
+      { args: ["stale"] },
+      { args: ["refresh"], env: isolated.env },
     ];
 
-    const seen = new Set<string>();
-    for (const args of invocations) {
-      const result = await runCli([...args, "--json"], { cwd: repo.dir });
-      seen.add(args[0] as string);
+    try {
+      const seen = new Set<string>();
+      for (const entry of invocations) {
+        const result = await runCli([...entry.args, "--json"], {
+          cwd: repo.dir,
+          ...(entry.env === undefined ? {} : { env: entry.env }),
+        });
+        seen.add(entry.args[0] as string);
 
-      expect(() => JSON.parse(result.stdout), `${args.join(" ")} emitted non-JSON`).not.toThrow();
-      expect(result.stderr, `${args.join(" ")} wrote to stderr under --json`).toBe("");
+        expect(
+          () => JSON.parse(result.stdout),
+          `${entry.args.join(" ")} emitted non-JSON`,
+        ).not.toThrow();
+        expect(result.stderr, `${entry.args.join(" ")} wrote to stderr under --json`).toBe("");
+      }
+
+      expect([...seen].sort()).toEqual([...EXPECTED_COMMANDS].sort());
+    } finally {
+      isolated.cleanup();
     }
+  });
 
-    expect([...seen].sort()).toEqual([...EXPECTED_COMMANDS].sort());
+  it("the refresh sweep entry's env excludes gh and LINEAR_API_KEY", () => {
+    const isolated = isolatedNoGhEnv();
+    try {
+      expect(findGh(isolated.env)).toBeUndefined();
+      expect(isolated.env.LINEAR_API_KEY).toBeUndefined();
+      // Not vacuous: the same construction really does resolve a working
+      // git, which is what proves PATH was narrowed deliberately rather
+      // than simply broken.
+      expect(findGit(isolated.env)).toBeDefined();
+    } finally {
+      isolated.cleanup();
+    }
   });
 });
 

@@ -23,7 +23,7 @@
 
 import type { MigrationReport } from "./beads/types.js";
 import type { ClaimInfo } from "./claims/types.js";
-import type { Kind, Lane, Level, NoteKind, Priority } from "./enums.js";
+import type { Kind, Lane, Level, NoteKind, Priority, RefreshReason } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
 import type { Note } from "./notes/types.js";
 import type { Ref } from "./refs/types.js";
@@ -618,6 +618,80 @@ export interface SearchResult {
   readonly query: string;
   readonly hits: readonly SearchHit[];
   readonly truncated: boolean;
+}
+
+/**
+ * One bounded category of `refresh` (F8 T5) outcomes — the same "a bound
+ * reports itself" shape `EventPage`/`RecentResult`/`StaleResult` already use,
+ * generic here because `refresh` has three such categories
+ * ({@link RefreshResult}) sharing one bounding rule rather than one each.
+ *
+ * `count` is the true, uncapped total in this category; `items` is capped at
+ * `refresh.ts`'s own bound, and `truncated` says whether that cap actually
+ * cut anything — including the case a bound of `0` empties `items` entirely
+ * while `count` still reports the real number.
+ */
+export interface RefreshSection<T> {
+  readonly count: number;
+  readonly items: readonly T[];
+  readonly truncated: boolean;
+}
+
+/** One ref whose cached `status`/`title` moved this run — `refresh`'s "updated" category. */
+export interface RefreshUpdatedRef {
+  readonly provider: string;
+  readonly externalId: string;
+  /** The status before this run, or `null` when the ref had never synced. */
+  readonly from: string | null;
+  readonly to: string;
+}
+
+/** One ref whose cached `status`/`title` already matched — `refresh`'s "unchanged" category. Nothing was written but `synced_at`. */
+export interface RefreshUnchangedRef {
+  readonly provider: string;
+  readonly externalId: string;
+}
+
+/**
+ * One ref `refresh` could not resolve, and the fixed reason why — `refresh`'s
+ * "unresolved" category. `reason` is the raw kebab-case token
+ * ({@link RefreshReason}, T1's `enums.ts`); `refresh.ts` renders it to a
+ * sentence for text output, but `--json` carries the token verbatim, the same
+ * split every other closed-vocabulary field in katra keeps.
+ */
+export interface RefreshUnresolvedRef {
+  readonly provider: string;
+  readonly externalId: string;
+  readonly reason: RefreshReason;
+}
+
+/** The exact, uncapped counts behind {@link RefreshResult}'s three sections — a rollup, not a substitute for them (`BoardCounts`'s own precedent). */
+export interface RefreshTotals {
+  /** Unique refs this run considered — `updated + unchanged + unresolved`, exactly. */
+  readonly refs: number;
+  readonly updated: number;
+  readonly unchanged: number;
+  readonly unresolved: number;
+}
+
+/**
+ * What `refresh` prints (F8 T5, spec req 5-8).
+ *
+ * `refresh` resolves every open task's linked refs (or just the given ids')
+ * against their providers and reports exactly one of three outcomes per
+ * unique ref: `updated` (the cache changed, `ref-status-changed` recorded
+ * it), `unchanged` (the cache already matched), or `unresolved` (a provider
+ * could not answer, or none is registered for it — `refs/repo.ts`'s
+ * `applyRefresh` reporting a vanished ref folds into this category too, as
+ * reason `"gone"`). Nothing about which category a ref lands in ever touches
+ * `tasks` — `refresh` never moves a lane, closes anything, or changes
+ * `updated_at` (spec §7's write-boundary line).
+ */
+export interface RefreshResult {
+  readonly totals: RefreshTotals;
+  readonly updated: RefreshSection<RefreshUpdatedRef>;
+  readonly unchanged: RefreshSection<RefreshUnchangedRef>;
+  readonly unresolved: RefreshSection<RefreshUnresolvedRef>;
 }
 
 /** What `--help --json` prints: the usage screen, as data. */

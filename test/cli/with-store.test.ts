@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CliContext } from "../../src/cli/program.js";
-import { withStore } from "../../src/cli/with-store.js";
+import { withStore, withStoreAsync } from "../../src/cli/with-store.js";
 import { actorFromIdentity, createIdentityResolver } from "../../src/core/actor.js";
 import { findGit } from "../../src/core/git.js";
 import { openStore } from "../../src/core/store.js";
@@ -113,4 +113,28 @@ describe("withStore's identity wiring", () => {
       expect(counting.calls()).toHaveLength(3);
     },
   );
+});
+
+describe("withStoreAsync", () => {
+  it("withStoreAsync post-await store access survives", async () => {
+    // The exact trap this function exists to avoid (with-store.ts's own
+    // docs): `try { return { result: fn(store), warnings }; } finally {
+    // store.close(); }` against an async `fn` closes the handle the moment
+    // `fn` returns its promise, not when the promise settles — so anything
+    // `fn` does after its own first `await` runs against an already-closed
+    // connection. A `.prepare()` call on a closed better-sqlite3 handle
+    // throws "The database connection is not open"; this proves it does not.
+    const r = repo();
+    const bootstrap = openStore(r.dir, { createIfMissing: true });
+    bootstrap.store.close();
+
+    const context = testContext(r.dir, process.env);
+
+    const { result } = await withStoreAsync(context, async (store) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      return store.db.prepare("SELECT 1 AS one").get() as { one: number };
+    });
+
+    expect(result.one).toBe(1);
+  });
 });
