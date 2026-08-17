@@ -696,6 +696,30 @@ describe("linear provider: title bounding", () => {
   const ref = buildRef({ provider: "linear", externalId: "ABC-1" });
   const env = { LINEAR_API_KEY: LINEAR_KEY_SENTINEL };
 
+  it("strips before capping — a screened character never eats the visible budget", async () => {
+    // Cap-then-strip would remove the BEL after the cut, leaving one short of
+    // the constant; strip-then-cap yields exactly the constant. Pins the
+    // ordering sanitizeProviderTitle promises (senior round-2 residual).
+    const title = `abc${BEL}def${"y".repeat(MAX_CACHED_TITLE_LENGTH + 50)}`;
+    fetchImpl = () =>
+      Promise.resolve(
+        fakeResponse(
+          200,
+          textStream(
+            JSON.stringify({ data: { issue: { title, state: { type: "backlog" } } } }),
+          ),
+        ),
+      );
+
+    const result = await linearProvider.resolve(ref, env);
+
+    expect(result.resolved).toBe(true);
+    if (result.resolved) {
+      expect(result.title).toHaveLength(MAX_CACHED_TITLE_LENGTH);
+      expect(result.title?.startsWith("abcdef")).toBe(true);
+    }
+  });
+
   it("caps a title over MAX_CACHED_TITLE_LENGTH to exactly the constant", async () => {
     const longTitle = "y".repeat(MAX_CACHED_TITLE_LENGTH + 50);
     fetchImpl = () =>
