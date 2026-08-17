@@ -17,37 +17,7 @@ import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
 import { findGh, findGit } from "../../src/core/git.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
-import { createGitRepo, createNonRepoDir, git } from "../helpers/fixture.js";
-
-/**
- * An environment with a real, working `git` but no resolvable `gh` and no
- * `LINEAR_API_KEY` — what `refresh`'s own sweep entry runs under, so its
- * `--json` invocation can never reach a real network call regardless of
- * fixture ordering or what the machine running the suite has installed
- * (`refresh.ts`'s own module docs record the confused-deputy risk this
- * closes off in tests specifically).
- *
- * `PATH` is **replaced**, not prefixed — unlike `with-store.test.ts`'s
- * `countingGit`, which only needs to intercept git and is happy to leave the
- * rest of the real `PATH` behind it. Prefixing here would still leave a real
- * `gh`, if this machine has one, reachable further down the same list; only
- * a `PATH` containing exactly one directory, holding nothing but a `git`
- * wrapper, guarantees `findGh` finds nothing no matter what else is
- * installed.
- */
-function isolatedNoGhEnv(): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
-  const bin = createNonRepoDir();
-  const real = findGit(process.env);
-  if (real === undefined) throw new Error("no git on PATH to wrap");
-  const script = join(bin.dir, "git");
-  writeFileSync(script, `#!/bin/sh\nexec ${JSON.stringify(real)} "$@"\n`, "utf8");
-  chmodSync(script, 0o755);
-
-  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
-  delete env.LINEAR_API_KEY;
-
-  return { env, cleanup: bin.cleanup };
-}
+import { createGitRepo, git, isolatedNoGhEnv } from "../helpers/fixture.js";
 
 /** The database file, for tests that need to break it on purpose. */
 function storeDbPath(dir: string): string {
@@ -161,50 +131,51 @@ describe("--json across every command", () => {
 
     const isolated = isolatedNoGhEnv();
 
-    // Reshaped from Array<readonly string[]>: refresh's entry is the first
-    // one that must not run under this test's ambient environment — an
-    // isolated `env` per entry, defaulting to none (runCli's own default is
-    // process.env), is what lets it carry that without every other entry
-    // changing shape.
-    const invocations: ReadonlyArray<{
-      readonly args: readonly string[];
-      readonly env?: NodeJS.ProcessEnv;
-    }> = [
-      { args: ["init"] },
-      { args: ["add", "another task"] },
-      { args: ["show", blocker] },
-      { args: ["claim", blocker] },
-      { args: ["release", blocker] },
-      { args: ["list"] },
-      { args: ["update", blocker, "--priority", "1"] },
-      { args: ["dep", dependent, "--blocked-by", blocker] },
-      { args: ["link", linked, doomed] },
-      { args: ["ref", "add", blocker, "https://github.com/acme/widgets/pull/7"] },
-      { args: ["close", blocker] },
-      { args: ["reopen", blocker] },
-      { args: ["cancel", blocker, "--reason", "dropped"] },
-      { args: ["delete", doomed, "--force"] },
-      { args: ["next"] },
+    // Reshaped from Array<readonly string[]>: refresh's entry carries an
+    // isolated env; every other entry carries the ambient process.env
+    // explicitly, so `env` is never optional here and the call site below is
+    // a plain `env: entry.env` pass-through (runCli's own default) with no
+    // conditional spread.
+    const bareInvocations: ReadonlyArray<readonly string[]> = [
+      ["init"],
+      ["add", "another task"],
+      ["show", blocker],
+      ["claim", blocker],
+      ["release", blocker],
+      ["list"],
+      ["update", blocker, "--priority", "1"],
+      ["dep", dependent, "--blocked-by", blocker],
+      ["link", linked, doomed],
+      ["ref", "add", blocker, "https://github.com/acme/widgets/pull/7"],
+      ["close", blocker],
+      ["reopen", blocker],
+      ["cancel", blocker, "--reason", "dropped"],
+      ["delete", doomed, "--force"],
+      ["next"],
       // Deliberately after `delete`: the history of the task just removed is
       // the read only the event stream can answer.
-      { args: ["log", doomed] },
-      { args: ["note", "list"] },
-      { args: ["brief", epic] },
-      { args: ["board", "--digest"] },
-      { args: ["migrate", "beads"] },
-      { args: ["search", "another"] },
-      { args: ["recent"] },
-      { args: ["stale"] },
+      ["log", doomed],
+      ["note", "list"],
+      ["brief", epic],
+      ["board", "--digest"],
+      ["migrate", "beads"],
+      ["search", "another"],
+      ["recent"],
+      ["stale"],
+    ];
+
+    const invocations: ReadonlyArray<{
+      readonly args: readonly string[];
+      readonly env: NodeJS.ProcessEnv;
+    }> = [
+      ...bareInvocations.map((args) => ({ args, env: process.env })),
       { args: ["refresh"], env: isolated.env },
     ];
 
     try {
       const seen = new Set<string>();
       for (const entry of invocations) {
-        const result = await runCli([...entry.args, "--json"], {
-          cwd: repo.dir,
-          ...(entry.env === undefined ? {} : { env: entry.env }),
-        });
+        const result = await runCli([...entry.args, "--json"], { cwd: repo.dir, env: entry.env });
         seen.add(entry.args[0] as string);
 
         expect(

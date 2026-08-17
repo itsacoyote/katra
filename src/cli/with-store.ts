@@ -31,7 +31,7 @@
  */
 
 import type { StoreWarning } from "../core/db/locate.js";
-import type { OpenStore } from "../core/store.js";
+import type { OpenStore, OpenStoreResult } from "../core/store.js";
 import { openStore } from "../core/store.js";
 import type { CliContext } from "./program.js";
 
@@ -40,18 +40,25 @@ export interface StoreOutcome<T> {
   readonly warnings: readonly StoreWarning[];
 }
 
-/** Runs `fn` against the repository's store. */
-export function withStore<T>(context: CliContext, fn: (store: OpenStore) => T): StoreOutcome<T> {
-  // The context's own resolvers, not fresh ones: both are memoised per
-  // invocation, so a command that opens the store and writes several events
-  // resolves the actor and the identity each exactly once — and `actor`
-  // itself is fused from this same `identity`, so passing both never spawns
-  // git twice for the same worktree-and-branch pair.
-  const { store, warnings } = openStore(context.cwd, {
+/**
+ * `openStore`, called the one way both siblings below need it — the
+ * context's own resolvers, not fresh ones: both are memoised per invocation,
+ * so a command that opens the store and writes several events resolves the
+ * actor and the identity each exactly once — and `actor` itself is fused
+ * from this same `identity`, so passing both never spawns git twice for the
+ * same worktree-and-branch pair.
+ */
+function openContextStore(context: CliContext): OpenStoreResult {
+  return openStore(context.cwd, {
     env: context.env,
     actor: context.actor,
     identity: context.identity,
   });
+}
+
+/** Runs `fn` against the repository's store. */
+export function withStore<T>(context: CliContext, fn: (store: OpenStore) => T): StoreOutcome<T> {
+  const { store, warnings } = openContextStore(context);
   try {
     return { result: fn(store), warnings };
   } finally {
@@ -64,11 +71,7 @@ export async function withStoreAsync<T>(
   context: CliContext,
   fn: (store: OpenStore) => Promise<T>,
 ): Promise<StoreOutcome<T>> {
-  const { store, warnings } = openStore(context.cwd, {
-    env: context.env,
-    actor: context.actor,
-    identity: context.identity,
-  });
+  const { store, warnings } = openContextStore(context);
   try {
     const result = await fn(store);
     return { result, warnings };

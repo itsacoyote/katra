@@ -137,4 +137,27 @@ describe("withStoreAsync", () => {
 
     expect(result.one).toBe(1);
   });
+
+  it("threads openStore's warnings through into the async outcome", async () => {
+    // Mirrors add-show.test.ts's CLI-level "surfaces the GIT_COMMON_DIR
+    // warning from show" scenario, but exercises withStoreAsync directly:
+    // `return { result, warnings }` is a line withStoreAsync does not share
+    // with withStore's own (each has its own copy, one sync, one async), so
+    // it earns its own proof rather than resting on withStore's CLI-level
+    // coverage alone.
+    const r = repo();
+    const bootstrap = openStore(r.dir, { createIfMissing: true });
+    bootstrap.store.close();
+
+    const other = repo();
+    const otherBootstrap = openStore(other.dir, { createIfMissing: true });
+    otherBootstrap.store.close();
+
+    const env = { ...process.env, GIT_COMMON_DIR: join(other.dir, ".git") };
+    const context = testContext(r.dir, env);
+
+    const { warnings } = await withStoreAsync(context, async (store) => store.actor());
+
+    expect(warnings.some((warning) => warning.code === "ambient-git-dir")).toBe(true);
+  });
 });

@@ -18,26 +18,30 @@
  *    `listOpenTaskRefsFor` (T4) scopes to just those tasks' refs. Both
  *    already dedupe to one entry per unique `refs.id` (`OpenRef`'s own
  *    docs); this function does no deduplication of its own.
- * 2. **Resolve.** Once per `OpenRef`, sequentially (epic risk note 12: no
- *    total budget, accepted for v1 — dedup by ref already halves the real
- *    cost), entirely **outside any transaction**: `writeTx` is synchronous
- *    and a provider's `resolve` is not, so the two must never overlap (epic
- *    risk note 5). `providerFor` (T3's registry) picks the provider by the
- *    ref's own `provider` field; no match resolves to `unresolved
- *    "no-provider"` without ever calling anything network-shaped — the
- *    escape-hatch ref case (`--provider jira ...`, ADR-014). `context.env`
- *    is threaded into every `resolve` call — providers never read
- *    `process.env` themselves (T3's own structural pin) — which is what
- *    makes an isolated test/sweep environment (no `gh`, no
- *    `LINEAR_API_KEY`) actually bite regardless of what the real process
- *    environment happens to hold.
- * 3. **Write.** Once resolution is done and no more network calls remain,
- *    each resolved outcome goes through `applyRefresh` (T4's public,
- *    per-ref `writeTx` wrapper) — one transaction per ref, never per holder.
- *    `applyRefresh`'s own `"gone"` result (the ref vanished between being
- *    gathered and this write) folds into the `unresolved` category here as
- *    reason `"gone"`, exactly like any other degraded outcome — never a
- *    thrown error that would abort every ref still queued behind it.
+ * 2. **Resolve, then write — per ref, never batched.** For each `OpenRef` in
+ *    turn: `resolve` first (network — `providerFor`, T3's registry, picks
+ *    the provider by the ref's own `provider` field; no match resolves to
+ *    `unresolved "no-provider"` without ever calling anything
+ *    network-shaped, the escape-hatch ref case, `--provider jira ...`,
+ *    ADR-014 — `context.env` is threaded into every `resolve` call, since
+ *    providers never read `process.env` themselves, T3's own structural
+ *    pin, which is what makes an isolated test/sweep environment (no `gh`,
+ *    no `LINEAR_API_KEY`) actually bite regardless of what the real process
+ *    environment holds), then, once that `await` has settled, `applyRefresh`
+ *    (T4's public, per-ref `writeTx` wrapper — itself fully synchronous)
+ *    writes it before the loop moves to the next ref. **Never** a
+ *    resolve-everything-then-write-everything pass over two arrays: epic
+ *    risk note 5's "no transaction across an `await`" still holds exactly
+ *    — `writeTx` is synchronous and never itself spans an `await` — but
+ *    going ref-by-ref, rather than batching every resolve before any write,
+ *    is what lets an interrupted run (a crash, a `SIGKILL` partway through)
+ *    keep whatever it already wrote instead of losing a whole batch of
+ *    already-resolved outcomes to the one ref that never got the chance to
+ *    write. `applyRefresh`'s own `"gone"` result (the ref vanished between
+ *    being gathered and this write) folds into the `unresolved` category
+ *    here as reason `"gone"`, exactly like any other degraded outcome —
+ *    never a thrown error that would abort every ref still queued behind
+ *    it.
  *
  * **Exactly three outcomes per ref** (spec req 5): `updated` (the cache
  * changed — `applyRefresh` reports `"changed"`), `unchanged` (the cache
@@ -47,6 +51,14 @@
  * failure, the same reasoning `next` finding nothing ready is not one. Only
  * a genuinely malformed invocation — a nonexistent explicit id, today — is
  * a usage-shaped refusal with a non-zero exit.
+ *
+ * **`refresh <a closed/cancelled task's id>` reads as zero refs, not a
+ * refusal.** `listOpenTaskRefsFor` (T4) is still lane-filtered even when a
+ * task is named explicitly — a deliberate choice on T4's part, not an
+ * oversight here: a task in a terminal lane contributes no rows, exactly as
+ * if it held no refs at all, so that run reports `0 ref(s) checked` and
+ * exits 0 rather than refusing or silently refreshing something the
+ * "refresh only open work" invariant was never meant to cover.
  *
  * **Confused deputy, named and accepted (epic risk note 4).** `refresh` is,
  * by construction, an oracle for whatever GitHub/Linear credentials this
@@ -131,17 +143,40 @@ const REASON_SENTENCES = {
   gone: "ref no longer exists",
 } satisfies Record<RefreshReason, string>;
 
-/** Resolves one ref's provider outcome — never throws; the registry-miss and the provider's own failure both become the ordinary `resolved: false` arm. */
+/**
+ * Resolves one ref's provider outcome — never throws; the registry-miss and
+ * the provider's own failure both become the ordinary `resolved: false` arm.
+ *
+ * The `try`/`catch` is defense-in-depth, not a path this suite can pin
+ * through the CLI: `Provider.resolve`'s own contract is never-throw, and
+ * both `github.ts`/`linear.ts` prove it in their own suite
+ * (`test/core/providers.test.ts`) — the same asymmetry `output.ts` accepts
+ * for its own structurally-unreachable `internal` branch (that module's
+ * `exitCodeFor` docs). A provider that broke the contract anyway would
+ * otherwise abort every ref still queued behind it with an unhandled
+ * rejection instead of degrading just the one ref that misbehaved — `"gone"`
+ * and `"no-provider"` fold a real ref-side vanish and a missing registry
+ * entry into `unresolved` the identical way, and this is that same fold for
+ * a provider bug. `"malformed-response"` (a fixed token, never
+ * `String(error)`) is the honest bucket: this really is "a response came
+ * back and this could not read it as one of the known shapes," the same
+ * reasoning `classifyGhFailure`'s own catch-all in `core/git.ts` uses.
+ */
 async function resolveOne(ref: OpenRef, env: NodeJS.ProcessEnv): Promise<ProviderResult> {
   const provider = providerFor(ref.ref);
   if (provider === undefined) return { resolved: false, reason: "no-provider" };
-  return provider.resolve(ref.ref, env);
+  try {
+    return await provider.resolve(ref.ref, env);
+  } catch {
+    return { resolved: false, reason: "malformed-response" };
+  }
 }
 
 /**
- * The whole orchestration: gather, resolve (network, no transaction open),
- * then write (one `applyRefresh` transaction per ref). See this module's
- * docs for the full three-step account.
+ * The whole orchestration: for each gathered ref, resolve (network, no
+ * transaction open) then immediately write (one `applyRefresh` transaction
+ * per ref) before moving to the next one. See this module's docs for the
+ * full per-ref, never-batched account.
  */
 async function runRefresh(
   store: OpenStore,
@@ -156,19 +191,13 @@ async function runRefresh(
           ids.map((id) => requireId(store, id)),
         );
 
-  // Resolution happens for every gathered ref before any of them are
-  // written — sequential, outside any transaction (this module's docs,
-  // step 2).
-  const resolutions: Array<{ readonly ref: OpenRef; readonly outcome: ProviderResult }> = [];
-  for (const ref of refs) {
-    resolutions.push({ ref, outcome: await resolveOne(ref, env) });
-  }
-
   const updated: RefreshUpdatedRef[] = [];
   const unchanged: RefreshUnchangedRef[] = [];
   const unresolved: RefreshUnresolvedRef[] = [];
 
-  for (const { ref, outcome } of resolutions) {
+  for (const ref of refs) {
+    const outcome = await resolveOne(ref, env);
+
     if (!outcome.resolved) {
       unresolved.push({
         provider: ref.ref.provider,
@@ -222,6 +251,10 @@ async function runRefresh(
 // ---------------------------------------------------------------------------
 
 function formatRefreshResult(result: RefreshResult): string {
+  // Every oneLine below is defense-in-depth too, and just as unpinnable in
+  // this suite's own tests: provider/externalId ride in through F7's
+  // --provider/--id escape hatch with no character-class restriction, so a
+  // hostile value is a real, if untested-here, input this render must survive.
   const blocks: string[] = [];
   const { totals } = result;
 

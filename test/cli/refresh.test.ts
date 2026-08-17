@@ -1,41 +1,31 @@
 /**
  * `katra refresh` (F8 T5) — orchestration, exit codes, and the `--json`
  * contract, exercised through the real CLI. Every scenario here runs with
- * `gh` stripped from `PATH` and `LINEAR_API_KEY` unset (`isolatedNoGhEnv`) or
- * a stubbed `gh` script — this suite never makes a real network call; the
- * live-API dogfood run is T7's job.
+ * `gh` stripped from `PATH` and `LINEAR_API_KEY` unset (`isolatedNoGhEnv`,
+ * `test/helpers/fixture.ts`) or a stubbed `gh` script — this suite never
+ * makes a real network call; the live-API dogfood run is T7's job.
  */
 
 import { chmodSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildRefreshSection } from "../../src/cli/commands/refresh.js";
+import { buildRefreshSection, MAX_REFRESH_SECTION_ITEMS } from "../../src/cli/commands/refresh.js";
 import { EXIT } from "../../src/cli/output.js";
 import type { RefreshResult } from "../../src/core/contract.js";
-import { findGit } from "../../src/core/git.js";
+import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
 import { openStore } from "../../src/core/store.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
-import { createGitRepo, createNonRepoDir } from "../helpers/fixture.js";
+import {
+  createGitRepo,
+  createNonRepoDir,
+  isolatedNoGhEnv,
+  writeGitWrapper,
+} from "../helpers/fixture.js";
 
-/**
- * An environment with a real, wrapped `git` but no resolvable `gh` and no
- * `LINEAR_API_KEY` — see `feature.test.ts`'s identically-named helper for
- * the full reasoning (PATH replaced, never prefixed).
- */
-function isolatedNoGhEnv(): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
-  const bin = createNonRepoDir();
-  const real = findGit(process.env);
-  if (real === undefined) throw new Error("no git on PATH to wrap");
-  const script = join(bin.dir, "git");
-  writeFileSync(script, `#!/bin/sh\nexec ${JSON.stringify(real)} "$@"\n`, "utf8");
-  chmodSync(script, 0o755);
-
-  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
-  delete env.LINEAR_API_KEY;
-
-  return { env, cleanup: bin.cleanup };
-}
+/** Absolute path to better-sqlite3's own entry point — resolved from this file, then embedded verbatim into a generated script that lives outside the project tree and cannot resolve the bare specifier itself. */
+const BETTER_SQLITE3_PATH = createRequire(import.meta.url).resolve("better-sqlite3");
 
 /**
  * `isolatedNoGhEnv`, plus a `gh` on that same isolated `PATH` that always
@@ -58,16 +48,57 @@ function isolatedNoGhEnv(): { readonly env: NodeJS.ProcessEnv; cleanup(): void }
  */
 function stubbedGhEnv(responseBody: string): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
   const bin = createNonRepoDir();
-  const real = findGit(process.env);
-  if (real === undefined) throw new Error("no git on PATH to wrap");
-  const gitScript = join(bin.dir, "git");
-  writeFileSync(gitScript, `#!/bin/sh\nexec ${JSON.stringify(real)} "$@"\n`, "utf8");
-  chmodSync(gitScript, 0o755);
+  writeGitWrapper(bin.dir);
 
   const ghScript = join(bin.dir, "gh");
   writeFileSync(
     ghScript,
     `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(responseBody)});\n`,
+    "utf8",
+  );
+  chmodSync(ghScript, 0o755);
+
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
+  delete env.LINEAR_API_KEY;
+
+  return { env, cleanup: bin.cleanup };
+}
+
+/**
+ * `stubbedGhEnv`, except the `gh` double first deletes the ref's own
+ * `task_refs`/`refs` rows — through a **second** better-sqlite3 connection
+ * to the same store file, opened from inside the generated script itself —
+ * and only then answers with `responseBody`. Simulates the real TOCTOU
+ * `applyRefreshWithin` re-`SELECT`s to catch: the ref vanishes in the gap
+ * between `resolve`'s network round trip and this run's own write.
+ *
+ * `require(${BETTER_SQLITE3_PATH})` rather than a bare
+ * `require("better-sqlite3")`: the script lives in a throwaway temp
+ * directory outside the project tree, so Node's own module resolution,
+ * walking up from the script's location, would never find the project's
+ * `node_modules` — the absolute path resolved once here (via
+ * `createRequire`) sidesteps that lookup entirely.
+ */
+function vanishingGhEnv(
+  responseBody: string,
+  repoDir: string,
+): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
+  const bin = createNonRepoDir();
+  writeGitWrapper(bin.dir);
+
+  const dbPath = join(repoDir, ".git", STORE_DIR_NAME, DB_FILE_NAME);
+  const ghScript = join(bin.dir, "gh");
+  writeFileSync(
+    ghScript,
+    [
+      `#!${process.execPath}`,
+      `const Database = require(${JSON.stringify(BETTER_SQLITE3_PATH)});`,
+      `const db = new Database(${JSON.stringify(dbPath)});`,
+      `db.prepare("DELETE FROM task_refs").run();`,
+      `db.prepare("DELETE FROM refs").run();`,
+      `db.close();`,
+      `process.stdout.write(${JSON.stringify(responseBody)});`,
+    ].join("\n"),
     "utf8",
   );
   chmodSync(ghScript, 0o755);
@@ -124,6 +155,17 @@ describe("buildRefreshSection", () => {
     const section = buildRefreshSection(["a", "b", "c"], 0);
 
     expect(section).toEqual({ count: 3, items: [], truncated: true });
+  });
+
+  it("over MAX_REFRESH_SECTION_ITEMS caps to exactly that many, reporting the true count", () => {
+    const items = Array.from({ length: MAX_REFRESH_SECTION_ITEMS + 1 }, (_, i) => i);
+
+    const section = buildRefreshSection(items);
+
+    expect(section.count).toBe(MAX_REFRESH_SECTION_ITEMS + 1);
+    expect(section.items).toHaveLength(MAX_REFRESH_SECTION_ITEMS);
+    expect(section.items).toEqual(items.slice(0, MAX_REFRESH_SECTION_ITEMS));
+    expect(section.truncated).toBe(true);
   });
 });
 
@@ -189,6 +231,26 @@ describe("katra refresh", () => {
       { provider: "linear", externalId: "ENG-451", reason: "no-key" },
     ]);
     expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("ref vanishes mid-flight (deleted while gh is answering) -> unresolved gone, exit 0", async () => {
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "https://github.com/acme/widgets/pull/7"], {
+      cwd: repo.dir,
+    });
+
+    const vanishing = vanishingGhEnv(MERGED_BODY, repo.dir);
+    cleanups.push(vanishing.cleanup);
+
+    const result = await runCli(["refresh", "--json"], { cwd: repo.dir, env: vanishing.env });
+
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+    const doc = result.json() as RefreshResult;
+    expect(doc.unresolved.items).toEqual([
+      { provider: "github", externalId: "acme/widgets#7", reason: "gone" },
+    ]);
+    expect(doc.updated.count).toBe(0);
+    expect(doc.unchanged.count).toBe(0);
   });
 
   it("stubbed gh merged fills caches, show renders", async () => {
