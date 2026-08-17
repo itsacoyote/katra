@@ -79,7 +79,7 @@ import type { OpenStore } from "../store.js";
 import { MAX_CANDIDATES, requireResolved, resolveId } from "../tasks/ids.js";
 import { getTask } from "../tasks/repo.js";
 import { CONTROL_CHARS_SOURCE, capText } from "../text.js";
-import { MAX_CACHED_TITLE_LENGTH } from "./parse.js";
+import { MAX_CACHED_STATUS_LENGTH, MAX_CACHED_TITLE_LENGTH } from "./parse.js";
 import type { Ref, RefreshOutcome } from "./types.js";
 
 /**
@@ -692,6 +692,20 @@ export function listRefsFor(store: OpenStore, taskId: string): Ref[] {
  * fresher holder read (see that function's docs for why the two deliberately
  * do not share one query: a scoping read taken before a network round trip
  * and a fan-out read taken at write time cannot promise to agree).
+ *
+ * **Warning for `refresh` (T5): this is a pre-network snapshot, nothing
+ * more.** `listOpenTaskRefs`/`listOpenTaskRefsFor` run once, before any
+ * provider `resolve` call. By the time a resolved outcome reaches
+ * `applyRefresh`'s write, real time has passed — a network round trip,
+ * possibly several, sequenced across every ref in the run (epic risk note
+ * 12: sequential resolution) — and `holderIds` here can already be stale: a
+ * holder can unlink, a new one can link, the ref itself can vanish. Treat
+ * `holderIds` as scope-planning input only (which refs are worth resolving,
+ * roughly who cares about the answer), never as the authoritative set to
+ * write an event against — `applyRefresh`'s own fan-out re-reads fresh,
+ * inside its transaction, for exactly this reason, and a caller that instead
+ * events off this field is reading a snapshot that was never promised to
+ * still be true.
  */
 export interface OpenRef {
   readonly refId: number;
@@ -700,15 +714,17 @@ export interface OpenRef {
 }
 
 /**
- * Groups the flat ref+holder rows {@link listOpenTaskRefs}/
- * {@link listOpenTaskRefsFor} share into one {@link OpenRef} per unique
- * `refs.id`, holder ids in the query's own order (`task_refs`'s rowid — link
- * order, the same convention {@link linkedRefRows} documents).
+ * Groups the flat ref+holder rows {@link openRefRows} produces into one
+ * {@link OpenRef} per unique `refs.id`, holder ids in the query's own order
+ * (`task_refs`'s rowid — link order, the same convention {@link linkedRefRows}
+ * documents). Relies on `Map`'s own iteration order — insertion order, per
+ * spec — rather than tracking a parallel list of the ids seen: the row scan
+ * below inserts each `refs.id` into `byId` at most once, in the order it
+ * first appears, which is already the order this needs to return in.
  */
 function groupOpenRefRows(
   rows: ReadonlyArray<RefRow & { readonly holder_id: unknown }>,
 ): OpenRef[] {
-  const order: number[] = [];
   const byId = new Map<number, { readonly ref: Ref; readonly holderIds: string[] }>();
 
   for (const row of rows) {
@@ -719,23 +735,49 @@ function groupOpenRefRows(
     if (entry === undefined) {
       entry = { ref: record.ref, holderIds: [] };
       byId.set(record.id, entry);
-      order.push(record.id);
     }
     entry.holderIds.push(holderId);
   }
 
-  return order.map((refId) => {
-    const entry = byId.get(refId);
-    if (entry === undefined) {
-      // Unreachable: every id in `order` was inserted into `byId` in the same
-      // loop iteration, immediately above.
-      throw new KatraException({
-        code: "internal",
-        message: "groupOpenRefRows lost a ref id it just grouped",
-      });
-    }
-    return { refId, ref: entry.ref, holderIds: entry.holderIds };
-  });
+  return Array.from(byId, ([refId, entry]) => ({
+    refId,
+    ref: entry.ref,
+    holderIds: entry.holderIds,
+  }));
+}
+
+/**
+ * The one query {@link listOpenTaskRefs}/{@link listOpenTaskRefsFor} both
+ * run: refs joined through `task_refs` to `tasks`, filtered to open (non-
+ * {@link TERMINAL_LANES}) holders, optionally further restricted to
+ * `taskIds`. One SQL block and one lane filter, so the "open" invariant both
+ * public functions promise cannot drift between an unscoped and a scoped
+ * copy of the same `WHERE`.
+ *
+ * `taskIds === undefined` means unscoped (every open task); an **empty**
+ * array is the scoped-to-nothing case and returns with no query at all — a
+ * bare SQL `IN ()` is invalid syntax, not an empty-set match.
+ */
+function openRefRows(
+  store: OpenStore,
+  taskIds?: readonly string[],
+): Array<RefRow & { readonly holder_id: unknown }> {
+  if (taskIds !== undefined && taskIds.length === 0) return [];
+
+  const scopeClause =
+    taskIds === undefined ? "" : `AND t.id IN (${taskIds.map(() => "?").join(",")})`;
+
+  return store.db
+    .prepare(
+      `SELECT r.*, tr.task_id AS holder_id
+         FROM refs r
+         JOIN task_refs tr ON tr.ref_id = r.id
+         JOIN tasks t ON t.id = tr.task_id
+        WHERE t.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
+        ${scopeClause}
+        ORDER BY r.id, tr.rowid`,
+    )
+    .all(...(taskIds ?? [])) as Array<RefRow & { readonly holder_id: unknown }>;
 }
 
 /**
@@ -753,18 +795,7 @@ function groupOpenRefRows(
  * job cares which level a holder is, only whether it is still open.
  */
 export function listOpenTaskRefs(store: OpenStore): OpenRef[] {
-  const rows = store.db
-    .prepare(
-      `SELECT r.*, tr.task_id AS holder_id
-         FROM refs r
-         JOIN task_refs tr ON tr.ref_id = r.id
-         JOIN tasks t ON t.id = tr.task_id
-        WHERE t.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
-        ORDER BY r.id, tr.rowid`,
-    )
-    .all() as Array<RefRow & { readonly holder_id: unknown }>;
-
-  return groupOpenRefRows(rows);
+  return groupOpenRefRows(openRefRows(store));
 }
 
 /**
@@ -785,22 +816,7 @@ export function listOpenTaskRefs(store: OpenStore): OpenRef[] {
  * `IN ()` is invalid syntax, not an empty-set match.
  */
 export function listOpenTaskRefsFor(store: OpenStore, taskIds: readonly string[]): OpenRef[] {
-  if (taskIds.length === 0) return [];
-
-  const placeholders = taskIds.map(() => "?").join(",");
-  const rows = store.db
-    .prepare(
-      `SELECT r.*, tr.task_id AS holder_id
-         FROM refs r
-         JOIN task_refs tr ON tr.ref_id = r.id
-         JOIN tasks t ON t.id = tr.task_id
-        WHERE t.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
-          AND t.id IN (${placeholders})
-        ORDER BY r.id, tr.rowid`,
-    )
-    .all(...taskIds) as Array<RefRow & { readonly holder_id: unknown }>;
-
-  return groupOpenRefRows(rows);
+  return groupOpenRefRows(openRefRows(store, taskIds));
 }
 
 /**
@@ -884,7 +900,11 @@ export type ApplyRefreshResult =
  * malformed external data — every real provider (T3) validates its own
  * status vocabulary before ever calling this, and an empty string reaching
  * here means something upstream skipped straight past its own `unresolved`
- * branch.
+ * branch. Length is a different story: `status` still goes through the same
+ * silent `capText` as `title`, bounded to {@link MAX_CACHED_STATUS_LENGTH} —
+ * a real provider's status is a short enum word nowhere near that bound, but
+ * this seam caps first and trusts second, the same backstop reasoning as
+ * `title`'s, not a claim that a legitimate value ever needs it.
  *
  * **Diffs on `status` *and* `title` together** — a title-only change (the
  * PR's headline was edited, its state did not move) still counts as
@@ -937,22 +957,23 @@ export function applyRefreshWithin(
 
   const previousStatus = narrowNullableText(currentRow.cached_status, "cached_status");
   const previousTitle = narrowNullableText(currentRow.cached_title, "cached_title");
+  const nextStatus = capText(outcome.status, MAX_CACHED_STATUS_LENGTH).text;
   const nextTitle = sanitizeCachedTitle(outcome.title);
 
-  if (outcome.status === previousStatus && nextTitle === previousTitle) {
+  if (nextStatus === previousStatus && nextTitle === previousTitle) {
     store.db.prepare("UPDATE refs SET synced_at = ? WHERE id = ?").run(ctx.syncedAt, refId);
     return { kind: "unchanged" };
   }
 
   store.db
     .prepare("UPDATE refs SET cached_status = ?, cached_title = ?, synced_at = ? WHERE id = ?")
-    .run(outcome.status, nextTitle, ctx.syncedAt, refId);
+    .run(nextStatus, nextTitle, ctx.syncedAt, refId);
 
   return {
     kind: "changed",
     externalId: narrowText(currentRow.external_id, "external_id"),
     from: previousStatus,
-    to: outcome.status,
+    to: nextStatus,
   };
 }
 
@@ -975,12 +996,25 @@ export function applyRefreshWithin(
  * exactly two events, one per holder, each carrying that holder's own
  * `epicIdFor` — never one event shared between them.
  *
+ * **Not lane-filtered — unlike `listOpenTaskRefs`.** The fan-out reads every
+ * row `task_refs` has for this ref, holder lane and all: a task that closed
+ * while its PR was still mid-flight gets its own `ref-status-changed` event
+ * too, recording that the ref it once linked moved, exactly as its own
+ * history should (epic risk note 9: "fan out ... to EVERY current holder
+ * task", no terminal-lane carve-out). `listOpenTaskRefs`'s lane filter only
+ * decides which refs a `refresh` run resolves in the first place — once a
+ * ref's outcome is being written, every current holder hears about it,
+ * whatever lane it sits in.
+ *
  * The event's `reason` is the status transition, rendered `"OLD -> NEW"` in
  * this one place — `"OLD"` reads `"none"` when the ref had never synced
  * before (`applyRefreshWithin`'s `from: null`), since there is no prior
- * status to name. `ref` carries the qualified external id, matching
- * `ref-linked`/`ref-unlinked`'s own convention; `fromLane`/`toLane` stay
- * `NULL` — a ref's status is not a lane, and this event never touches one.
+ * status to name. A title-only change (status unchanged) still renders as
+ * `"OLD -> OLD"` — worth T6's rendering layer treating distinctly from a
+ * real transition when it gets there; nothing here changes because of it.
+ * `ref` carries the qualified external id, matching `ref-linked`/
+ * `ref-unlinked`'s own convention; `fromLane`/`toLane` stay `NULL` — a ref's
+ * status is not a lane, and this event never touches one.
  *
  * `actor` is resolved once, before the transaction — the same reason
  * `linkRef`/`unlinkRef` do: resolving it spawns git subprocesses, and doing
@@ -998,8 +1032,12 @@ export function applyRefresh(
 
     if (result.kind !== "changed") return result;
 
+    // Ordered by task_refs' own rowid (link order) — the same convention
+    // linkedRefRows/openRefRows use — so the event fan-out below is
+    // deterministic rather than whatever order an unordered scan happens to
+    // produce.
     const holderRows = store.db
-      .prepare("SELECT task_id FROM task_refs WHERE ref_id = ?")
+      .prepare("SELECT task_id FROM task_refs WHERE ref_id = ? ORDER BY rowid")
       .all(refId) as Array<{
       readonly task_id: unknown;
     }>;

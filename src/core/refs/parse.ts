@@ -134,6 +134,19 @@ export const MAX_PROVIDER_LENGTH = 64;
 export const MAX_CACHED_TITLE_LENGTH = 500;
 
 /**
+ * `refs.cached_status`'s bound — same reasoning and same enforcement point as
+ * {@link MAX_CACHED_TITLE_LENGTH}: no DDL `CHECK` (migration 0005), capped
+ * silently at `refs/repo.ts`'s `applyRefreshWithin` rather than refused. A
+ * real provider's status vocabulary is a short enum word (`open`, `merged`,
+ * `unstarted`, ...) — this bound is not sized to any one of them, only to
+ * comfortably outlast every provider's vocabulary katra ships or is likely to
+ * add, so it never has to move for a legitimate value while still stopping a
+ * hostile or malformed response from writing an unbounded string into the
+ * column.
+ */
+export const MAX_CACHED_STATUS_LENGTH = 100;
+
+/**
  * What every `parseRefInput` refusal ends with (ADR-014's escape hatch) — one
  * literal string, so a caller can rely on the exact flag names never drifting
  * between one refusal reason and another.
