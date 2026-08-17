@@ -153,7 +153,11 @@ export const PRIORITY_DEFAULT = 2 satisfies Priority;
  * the database.
  */
 export const REFRESH_REASONS = [
-  // github (T2 runGh): `gh` is not on PATH at all — findGh's own miss.
+  // github (T2 runGh): `gh` is not on PATH at all — findGh's own miss — or is
+  // on PATH but cannot actually be run (an unexecutable file, a permission
+  // error, a same-named directory: runGh's GH_UNRUNNABLE_CODES). Either way
+  // `gh` never started, so there is nothing to distinguish from the caller's
+  // side.
   "gh-not-available",
   // github (T2 runGh): gh exit 4, probed unambiguous — no credentials
   // present to even try. Distinct from bad-credentials below, which DID
@@ -171,8 +175,11 @@ export const REFRESH_REASONS = [
   // github (T2 runGh, exit 1 + "error connecting" stderr) or linear (T3,
   // fetch threw): a transport failure, not a rejection by either API.
   "network",
-  // github (T2 runGh, execFileSync's own timeout + SIGKILL) or linear (T3,
-  // AbortSignal.timeout firing): the call ran long enough to be aborted.
+  // github (T2 runGh, execFileSync's own timeout firing — SIGKILL reaches
+  // the direct child but is not guaranteed to reach a grandchild it left
+  // holding stdout open, so this fires on the wall clock alone, not on
+  // proof the process tree actually died) or linear (T3, AbortSignal.timeout
+  // firing): the call ran long enough to be aborted.
   "timeout",
   // linear (T3): env.LINEAR_API_KEY absent — refused before any network
   // call, not a rejection by Linear.

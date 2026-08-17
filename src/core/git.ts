@@ -96,9 +96,10 @@ export function findGh(env: NodeJS.ProcessEnv): string | undefined {
  * name)` is still relative, and `execFileSync` resolves a relative `file`
  * against the `cwd` it is handed. `runGit` sets that `cwd` to the repository
  * it is asked about, so a relative entry would let a repository plant its own
- * executable on the search path; `runGh` never sets a `cwd` at all, but the
- * rule is the same regardless — a relative `PATH` entry is a misconfiguration
- * katra has no business honouring, so it is skipped rather than resolved.
+ * executable on the search path; `runGh` pins its own `cwd` to `tmpdir()`
+ * rather than a repository, but the rule is the same regardless — a relative
+ * `PATH` entry is a misconfiguration katra has no business honouring, so it
+ * is skipped rather than resolved.
  * Worse on Windows: `join(".", "git.exe")` collapses to a bare name with no
  * separator, which is exactly the input that makes libuv probe the current
  * directory first — F1's original finding, reintroduced.
@@ -249,15 +250,31 @@ const GH_MAX_STDOUT_BYTES = 1024 * 1024;
  * list, so nothing here can shadow them.
  *
  * Probed against this machine's real, keyring-backed `gh auth`: of this
- * entire list, only `PATH`, `HOME` and `LANG` were actually set in the
- * probing environment, and `gh api repos/cli/cli/issues/1` still
- * authenticated and returned real data through exactly those three. `gh`'s
- * own credential lookup does not need the rest of a caller's environment, so
- * the rest is not forwarded. A full `{ ...env }` spread would hand `gh` —
- * and anything a compromised `gh` install shells out to — every secret
- * already living in this process's environment, `LINEAR_API_KEY` (F8's
- * second provider's own credential) among them, which has no business
- * anywhere near a GitHub CLI invocation.
+ * entire list, only `PATH`, `HOME`, `LANG`, `XDG_RUNTIME_DIR` and
+ * `DBUS_SESSION_BUS_ADDRESS` were actually set in the probing environment,
+ * and `gh api repos/cli/cli/issues/1` still authenticated and returned real
+ * data through exactly those five. `gh`'s own credential lookup does not need
+ * the rest of a caller's environment, so the rest is not forwarded. A full
+ * `{ ...env }` spread would hand `gh` — and anything a compromised `gh`
+ * install shells out to — every secret already living in this process's
+ * environment, `LINEAR_API_KEY` (F8's second provider's own credential)
+ * among them, which has no business anywhere near a GitHub CLI invocation.
+ *
+ * `runGit` takes the opposite choice deliberately, not by oversight: it
+ * keeps the caller's full `env` and sets no timeout, because git legitimately
+ * needs whatever credential helper, SSH agent or proxy config the user's own
+ * environment provides to operate against the user's own repository — there
+ * is no untrusted-input boundary there the way there is here, where `gh`'s
+ * arguments are built from ref fields (epic risk note 2).
+ *
+ * `GITHUB_ENTERPRISE_TOKEN` sits beside `GH_ENTERPRISE_TOKEN` — both are
+ * documented `gh` credential variables for a non-github.com host, and only
+ * forwarding one while claiming to support `GH_HOST` would silently drop
+ * whichever form a caller happened to use. `DBUS_SESSION_BUS_ADDRESS` and
+ * `XDG_RUNTIME_DIR` are not secrets, only socket paths: `gh`'s keyring
+ * backend (`godbus`) needs them to reach the session bus at all off this
+ * machine's default socket, and without them a keyring-backed `gh auth`
+ * degrades to `gh-unauthenticated` even when the user is, in fact, logged in.
  */
 const GH_ENV_ALLOWLIST = [
   "PATH",
@@ -268,8 +285,11 @@ const GH_ENV_ALLOWLIST = [
   "LOCALAPPDATA",
   "XDG_CONFIG_HOME",
   "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+  "DBUS_SESSION_BUS_ADDRESS",
   "GH_TOKEN",
   "GH_ENTERPRISE_TOKEN",
+  "GITHUB_ENTERPRISE_TOKEN",
   "GH_HOST",
   "GH_CONFIG_DIR",
   "GITHUB_TOKEN",

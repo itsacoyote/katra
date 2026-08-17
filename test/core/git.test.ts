@@ -8,7 +8,15 @@
  * katra spawns anything.
  */
 
-import { chmodSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
@@ -121,6 +129,35 @@ describe("the process-spawning boundary", () => {
   const spawning =
     /\bchild_process\b|\bexecFileSync\b|\bexecFile\b|\bexecSync\b|(?<!\.)\bexec\(|\bspawn(?:Sync)?\(|\bfork\(/;
   const dynamicRequire = /\bcreateRequire\b/;
+  // Wrapper libraries that shell out under a friendlier API — execa/zx/
+  // shelljs/node-pty all spawn processes internally, cross-spawn is the
+  // Windows-shim `spawn` itself ships on top of, and simple-git shells out
+  // to git the same way this module does deliberately in exactly one place.
+  // Reaching for any of these reopens the door findGit/findGh close, one
+  // layer removed — checked against source text below AND against
+  // package.json's own dependency names, so *adding* one is caught even
+  // before anything imports it.
+  const thirdPartySpawner = /\b(execa|zx|shelljs|cross-spawn|node-pty|simple-git)\b/;
+  // .ts/.tsx/.cts/.mts — every TypeScript source extension the compiler
+  // recognizes, not just the plain ".ts" the original sweep checked.
+  const sourceExtension = /\.[cm]?tsx?$/;
+
+  it("declares no third-party process-spawning wrapper as a dependency", () => {
+    const packageJsonPath = fileURLToPath(new URL("../../package.json", import.meta.url));
+    const pkg = JSON.parse(readFileSync(packageJsonPath, "utf8")) as {
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+    };
+    // devDependencies too: a test file can spawn a process exactly as easily
+    // as source can, and this module's own tests are the proof — they shell
+    // out to real git/gh stubs constantly.
+    const declared = [
+      ...Object.keys(pkg.dependencies ?? {}),
+      ...Object.keys(pkg.devDependencies ?? {}),
+    ];
+
+    expect(declared.filter((name) => thirdPartySpawner.test(name))).toEqual([]);
+  });
 
   it("its spawning pattern catches a bare exec( call without flagging RegExp/Database .exec(", () => {
     // The probe this widening exists to pass: child_process's own async,
@@ -134,7 +171,7 @@ describe("the process-spawning boundary", () => {
     expect(spawning.test("db.exec(sql)")).toBe(false);
   });
 
-  it("is the only module under src that spawns a subprocess, and the only one that dynamically requires", () => {
+  it("is the only module under src that spawns, dynamically requires, or reaches for a third-party spawner", () => {
     // Structural, because review vigilance already failed once: `findGit`'s
     // absolute-path lookup is F1's fix for a real Windows PATH-shadowing
     // finding, and a second `execFileSync("git", …)` written for the actor
@@ -146,6 +183,7 @@ describe("the process-spawning boundary", () => {
     // else goes through it.
     const spawnOffenders: string[] = [];
     const createRequireOffenders: string[] = [];
+    const thirdPartyOffenders: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
@@ -153,23 +191,28 @@ describe("the process-spawning boundary", () => {
           walk(full);
           continue;
         }
-        if (!entry.name.endsWith(".ts")) continue;
+        if (!sourceExtension.test(entry.name)) continue;
         const rel = relative(root, full).replaceAll("\\", "/");
         const stripped = code(readFileSync(full, "utf8"));
         if (rel !== allowedSpawn && spawning.test(stripped)) spawnOffenders.push(rel);
         if (rel !== allowedCreateRequire && dynamicRequire.test(stripped)) {
           createRequireOffenders.push(rel);
         }
+        if (thirdPartySpawner.test(stripped)) thirdPartyOffenders.push(rel);
       }
     };
     walk(root);
 
     expect(spawnOffenders).toEqual([]);
     expect(createRequireOffenders).toEqual([]);
+    expect(thirdPartyOffenders).toEqual([]);
 
-    // A guard on the guard: if the regex broke, the sweep above would pass by
-    // finding nothing anywhere. The allowed module must still match it.
+    // A guard on the guard: if a regex broke, the sweep above would pass by
+    // finding nothing anywhere. Both allowed modules must still match theirs.
     expect(spawning.test(code(readFileSync(join(root, allowedSpawn), "utf8")))).toBe(true);
+    expect(dynamicRequire.test(code(readFileSync(join(root, allowedCreateRequire), "utf8")))).toBe(
+      true,
+    );
   });
 });
 
@@ -467,18 +510,30 @@ describe("runGh", () => {
   );
 
   it.runIf(onPosix)(
-    "forces both GH_ overrides to 1 even when the caller's env sets them to 0",
+    "forces both GH_ overrides to 1 and pins cwd to tmpdir(), even when the caller's env/cwd differ",
     () => {
       // GH_PROMPT_DISABLED and GH_NO_UPDATE_NOTIFIER are runGh's own
       // hardening — always forced, not merely defaulted, so a caller-supplied
-      // "0" must still lose.
+      // "0" must still lose. cwd is pinned the same way: an ambient
+      // directory is never something this call should depend on.
       const dir = createNonRepoDir();
       cleanups.push(() => dir.cleanup());
       writeExecutableStub(
         dir.dir,
         "gh",
-        'echo "GH_PROMPT_DISABLED=$GH_PROMPT_DISABLED"\necho "GH_NO_UPDATE_NOTIFIER=$GH_NO_UPDATE_NOTIFIER"\n',
+        'echo "GH_PROMPT_DISABLED=$GH_PROMPT_DISABLED"\n' +
+          'echo "GH_NO_UPDATE_NOTIFIER=$GH_NO_UPDATE_NOTIFIER"\n' +
+          'echo "PWD=$(pwd)"\n',
       );
+      // chdir into the fixture first so the cwd pin is discriminating: without
+      // this, the test runner's own ambient cwd could coincidentally already
+      // be outside tmpdir() (or, on a system where it happens to sit under
+      // tmpdir(), inside it) and the assertion would not actually prove
+      // runGh set cwd at all — provable by mutation, the same discipline the
+      // relative-PATH tests above use.
+      const previousCwd = process.cwd();
+      process.chdir(dir.dir);
+      cleanups.push(() => process.chdir(previousCwd));
 
       const result = runGh(
         { PATH: dir.dir, GH_PROMPT_DISABLED: "0", GH_NO_UPDATE_NOTIFIER: "0" },
@@ -487,7 +542,7 @@ describe("runGh", () => {
 
       expect(result).toEqual({
         ok: true,
-        stdout: "GH_PROMPT_DISABLED=1\nGH_NO_UPDATE_NOTIFIER=1",
+        stdout: `GH_PROMPT_DISABLED=1\nGH_NO_UPDATE_NOTIFIER=1\nPWD=${realpathSync.native(tmpdir())}`,
       });
     },
   );
