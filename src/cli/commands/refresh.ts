@@ -131,9 +131,11 @@ export function buildRefreshSection<T>(
  * text output only — `--json` always carries the raw token. `satisfies
  * Record<RefreshReason, string>` is what makes T1 adding a thirteenth reason
  * without updating this map a compile error here, rather than a silently
- * unrendered token.
+ * unrendered token. Exported (like buildRefreshSection) so the WORDING of
+ * every sentence is pinnable — the satisfies clause guarantees presence,
+ * not spelling (QA round-1 gap).
  */
-const REASON_SENTENCES = {
+export const REASON_SENTENCES = {
   "gh-not-available": "gh not available",
   "gh-unauthenticated": "gh not authenticated",
   "not-found": "not found",

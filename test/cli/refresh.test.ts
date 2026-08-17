@@ -10,7 +10,11 @@ import { chmodSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildRefreshSection, MAX_REFRESH_SECTION_ITEMS } from "../../src/cli/commands/refresh.js";
+import {
+  buildRefreshSection,
+  MAX_REFRESH_SECTION_ITEMS,
+  REASON_SENTENCES,
+} from "../../src/cli/commands/refresh.js";
 import { EXIT } from "../../src/cli/output.js";
 import type { RefreshResult } from "../../src/core/contract.js";
 import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
@@ -73,6 +77,14 @@ function vanishingGhEnv(
   return { env, cleanup: bin.cleanup };
 }
 
+/** The same PR while still open — `MERGED_BODY`'s sibling, for the real-transition test. */
+const OPEN_BODY = JSON.stringify({
+  title: "Fix the bug",
+  state: "open",
+  draft: false,
+  pull_request: { merged_at: null },
+});
+
 /** A `gh api repos/{owner}/{repo}/issues/{n}` body for a merged PR (`github.ts`'s own precedence: `pull_request.merged_at` wins). */
 const MERGED_BODY = JSON.stringify({
   title: "Fix the bug",
@@ -113,6 +125,28 @@ afterEach(() => {
 async function add(args: readonly string[]): Promise<string> {
   return (await runCli(["add", ...args], { cwd: repo.dir })).stdout.trim();
 }
+
+describe("REASON_SENTENCES", () => {
+  it("every reason token renders its exact documented sentence", () => {
+    // The satisfies clause guarantees a sentence EXISTS per token; this pins
+    // the wording itself — a typo in any of the twelve shipped green before
+    // (QA round-1 gap). Update deliberately when wording changes.
+    expect(REASON_SENTENCES).toEqual({
+      "gh-not-available": "gh not available",
+      "gh-unauthenticated": "gh not authenticated",
+      "not-found": "not found",
+      "bad-credentials": "bad credentials",
+      network: "network error",
+      timeout: "timed out",
+      "no-key": "LINEAR_API_KEY not set",
+      "bad-key": "bad LINEAR_API_KEY",
+      "malformed-response": "malformed response",
+      "bad-shape": "not a valid reference for its provider",
+      "no-provider": "no provider",
+      gone: "ref no longer exists",
+    });
+  });
+});
 
 describe("buildRefreshSection", () => {
   it("truncation-honest when a bound empties a category", () => {
@@ -175,6 +209,9 @@ describe("katra refresh", () => {
     expect(doc.unresolved.items).toEqual([
       { provider: "github", externalId: "acme/widgets#7", reason: "gh-not-available" },
     ]);
+    // AC3's named proof: nothing written — by direct DB read, not the report.
+    const row = readRefRow(repo.dir, "acme/widgets#7");
+    expect(row).toMatchObject({ cached_status: null, cached_title: null, synced_at: null });
   });
 
   it("linear no-key -> unresolved no-key, zero network", async () => {
@@ -195,6 +232,9 @@ describe("katra refresh", () => {
       { provider: "linear", externalId: "ENG-451", reason: "no-key" },
     ]);
     expect(fetchSpy).not.toHaveBeenCalled();
+    // AC3's named proof for the no-key path too: direct DB read.
+    const row = readRefRow(repo.dir, "ENG-451");
+    expect(row).toMatchObject({ cached_status: null, cached_title: null, synced_at: null });
   });
 
   it("ref vanishes mid-flight (deleted while gh is answering) -> unresolved gone, exit 0", async () => {
@@ -215,6 +255,33 @@ describe("katra refresh", () => {
     ]);
     expect(doc.updated.count).toBe(0);
     expect(doc.unchanged.count).toBe(0);
+  });
+
+  it("a real transition (open -> merged across two runs) reports updated with both values", async () => {
+    // AC2 at the CLI layer: first run caches open, second run's stub answers
+    // merged — the report must carry the genuine two-value transition, not a
+    // first-sync (none -> X) shape (QA round-1 gap).
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "https://github.com/acme/widgets/pull/7"], {
+      cwd: repo.dir,
+    });
+
+    const openStub = stubbedGhEnv(OPEN_BODY);
+    cleanups.push(openStub.cleanup);
+    const first = await runCli(["refresh", "--json"], { cwd: repo.dir, env: openStub.env });
+    expect(first.exitCode, first.stderr).toBe(EXIT.ok);
+    expect((first.json() as RefreshResult).updated.items).toEqual([
+      { provider: "github", externalId: "acme/widgets#7", from: null, to: "open" },
+    ]);
+
+    const mergedStub = stubbedGhEnv(MERGED_BODY);
+    cleanups.push(mergedStub.cleanup);
+    const second = await runCli(["refresh"], { cwd: repo.dir, env: mergedStub.env });
+    expect(second.exitCode, second.stderr).toBe(EXIT.ok);
+    expect(second.stdout).toContain("open -> merged");
+
+    const row = readRefRow(repo.dir, "acme/widgets#7");
+    expect(row?.cached_status).toBe("merged");
   });
 
   it("stubbed gh merged fills caches, show renders", async () => {

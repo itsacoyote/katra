@@ -829,6 +829,35 @@ describe("applyRefreshWithin / applyRefresh", () => {
     });
   });
 
+  it("a real status transition (open -> merged) updates the cache and events exactly once", () => {
+    // AC2's literal scenario — two DIFFERENT stored-vs-resolved values, not
+    // first-sync (null -> X) and not title-only (X -> X). QA round-1 found
+    // every prior "transition" test was one of those two shapes.
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    applyRefresh(fixture.store, refId, { status: "open", title: "Fix bug" });
+    const result = applyRefresh(fixture.store, refId, { status: "merged", title: "Fix bug" });
+
+    expect(result).toEqual({
+      kind: "changed",
+      externalId: GITHUB_REF.externalId,
+      from: "open",
+      to: "merged",
+    });
+    expect(refRows()[0]?.cached_status).toBe("merged");
+
+    const events = eventsOfType("ref-status-changed");
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      entity_id: task,
+      ref: GITHUB_REF.externalId,
+      reason: "open -> merged",
+      actor: ACTOR,
+    });
+  });
+
   it("identical second -> unchanged + synced_at bump + NO event", () => {
     const task = seedTask(fixture.store);
     linkRef(fixture.store, task, GITHUB_REF);
