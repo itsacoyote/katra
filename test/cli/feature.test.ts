@@ -191,19 +191,24 @@ describe("--json across every command", () => {
     }
   });
 
-  it("the refresh sweep entry's env excludes gh and LINEAR_API_KEY", () => {
-    const isolated = isolatedNoGhEnv();
-    try {
-      expect(findGh(isolated.env)).toBeUndefined();
-      expect(isolated.env.LINEAR_API_KEY).toBeUndefined();
-      // Not vacuous: the same construction really does resolve a working
-      // git, which is what proves PATH was narrowed deliberately rather
-      // than simply broken.
-      expect(findGit(isolated.env)).toBeDefined();
-    } finally {
-      isolated.cleanup();
-    }
-  });
+  // POSIX-gated like every stub-executable test (git.test.ts precedent): the
+  // isolated env's git wrapper is a shebang script Windows cannot execute.
+  it.runIf(process.platform !== "win32")(
+    "the refresh sweep entry's env excludes gh and LINEAR_API_KEY",
+    () => {
+      const isolated = isolatedNoGhEnv();
+      try {
+        expect(findGh(isolated.env)).toBeUndefined();
+        expect(isolated.env.LINEAR_API_KEY).toBeUndefined();
+        // Not vacuous: the same construction really does resolve a working
+        // git, which is what proves PATH was narrowed deliberately rather
+        // than simply broken.
+        expect(findGit(isolated.env)).toBeDefined();
+      } finally {
+        isolated.cleanup();
+      }
+    },
+  );
 });
 
 describe("exit codes", () => {

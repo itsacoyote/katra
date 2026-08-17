@@ -45,7 +45,13 @@ async function add(args: readonly string[]): Promise<string> {
   return (await runCli(["add", ...args], { cwd: repo.dir })).stdout.trim();
 }
 
-describe("F8 story: refresh fills caches, T6's rendering shows them", () => {
+// Stub executables are POSIX shebang scripts — unexecutable on Windows, the
+// same platform trade test/core/git.test.ts already makes for its own stub
+// tests (it.runIf(onPosix) there). The behavior stays covered on Windows by
+// the mocked unit layers (providers.test.ts, git.test.ts's classification).
+const onPosix = process.platform !== "win32";
+
+describe.runIf(onPosix)("F8 story: refresh fills caches, T6's rendering shows them", () => {
   it("refreshes a shared github ref and a keyless linear ref, rendering both honestly", async () => {
     const stubbed = stubbedGhEnv(MERGED_BODY);
     cleanups.push(stubbed.cleanup);

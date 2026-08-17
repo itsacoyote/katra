@@ -167,7 +167,13 @@ describe("buildRefreshSection", () => {
   });
 });
 
-describe("katra refresh", () => {
+// Stub executables are POSIX shebang scripts — unexecutable on Windows, the
+// same platform trade test/core/git.test.ts already makes for its own stub
+// tests (it.runIf(onPosix) there). The behavior stays covered on Windows by
+// the mocked unit layers (providers.test.ts, git.test.ts's classification).
+const onPosix = process.platform !== "win32";
+
+describe.runIf(onPosix)("katra refresh", () => {
   it("no-provider ref -> unresolved no-provider, exit 0, nothing written (DB read)", async () => {
     const isolated = isolatedNoGhEnv();
     cleanups.push(isolated.cleanup);
