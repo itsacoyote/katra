@@ -33,7 +33,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { accessSync, constants as fsConstants, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import type { RefreshReason } from "./enums.js";
 import { KatraException } from "./errors.js";
@@ -107,19 +108,41 @@ function resolveOnPath(env: NodeJS.ProcessEnv, name: string): string | undefined
   if (path === "") return undefined;
 
   // PATHEXT is Windows' list of extensions an extensionless name can take.
+  // Entries are required to start with "." — the format Windows itself
+  // documents — so a malformed or hostile PATHEXT cannot make this build a
+  // candidate like "gitEXE" (no separator) from an entry with none.
   const suffixes =
     process.platform === "win32"
-      ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((ext) => ext !== "")
+      ? (env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter((ext) => ext.startsWith("."))
       : [""];
 
   for (const dir of path.split(delimiter)) {
     if (dir === "" || !isAbsolute(dir)) continue;
     for (const suffix of suffixes) {
       const candidate = join(dir, `${name}${suffix}`);
-      if (existsSync(candidate)) return candidate;
+      if (isExecutableFile(candidate)) return candidate;
     }
   }
   return undefined;
+}
+
+/**
+ * True when `candidate` is a regular file this process can execute.
+ *
+ * A directory or an unreadable/unexecutable file sitting at the right name
+ * is not a "found" the caller should stop searching on: PATH resolution
+ * keeps walking past it, the same way a shell's own lookup does, so a
+ * mode-000 decoy — or a same-named directory — earlier on `PATH` cannot
+ * shadow the real binary later on it.
+ */
+function isExecutableFile(candidate: string): boolean {
+  try {
+    if (!statSync(candidate).isFile()) return false;
+    accessSync(candidate, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** Runs `git` in `cwd`, returning stdout or a classified failure. */
@@ -212,6 +235,74 @@ function explainGitFailure(failure: GitFailure): KatraException {
 /** `execFileSync`'s `timeout` for `gh` (epic risk note 11, probed real). */
 const GH_TIMEOUT_MS = 5000;
 
+/**
+ * `execFileSync`'s `maxBuffer` for `gh` — 1 MiB, Node's own default made
+ * deliberate rather than implicit: large enough for any single issue/PR body
+ * this ever reads, small enough that a compromised or malfunctioning `gh`
+ * cannot make this process buffer an unbounded response.
+ */
+const GH_MAX_STDOUT_BYTES = 1024 * 1024;
+
+/**
+ * Every environment variable `runGh` forwards to `gh`, plus the two
+ * overrides {@link buildGhEnv} always forces last — never sourced from this
+ * list, so nothing here can shadow them.
+ *
+ * Probed against this machine's real, keyring-backed `gh auth`: of this
+ * entire list, only `PATH`, `HOME` and `LANG` were actually set in the
+ * probing environment, and `gh api repos/cli/cli/issues/1` still
+ * authenticated and returned real data through exactly those three. `gh`'s
+ * own credential lookup does not need the rest of a caller's environment, so
+ * the rest is not forwarded. A full `{ ...env }` spread would hand `gh` —
+ * and anything a compromised `gh` install shells out to — every secret
+ * already living in this process's environment, `LINEAR_API_KEY` (F8's
+ * second provider's own credential) among them, which has no business
+ * anywhere near a GitHub CLI invocation.
+ */
+const GH_ENV_ALLOWLIST = [
+  "PATH",
+  "Path",
+  "HOME",
+  "USERPROFILE",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "GH_TOKEN",
+  "GH_ENTERPRISE_TOKEN",
+  "GH_HOST",
+  "GH_CONFIG_DIR",
+  "GITHUB_TOKEN",
+  "HTTP_PROXY",
+  "http_proxy",
+  "HTTPS_PROXY",
+  "https_proxy",
+  "NO_PROXY",
+  "no_proxy",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  "LANG",
+  "LC_ALL",
+  "TZ",
+  "SystemRoot",
+  "COMSPEC",
+  "PATHEXT",
+  "TEMP",
+  "TMP",
+] as const;
+
+/** Builds the env `runGh` hands to `execFileSync`: the allowlist, then the two forced overrides last. */
+function buildGhEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const filtered: NodeJS.ProcessEnv = {};
+  for (const key of GH_ENV_ALLOWLIST) {
+    const value = env[key];
+    if (value !== undefined) filtered[key] = value;
+  }
+  filtered.GH_PROMPT_DISABLED = "1";
+  filtered.GH_NO_UPDATE_NOTIFIER = "1";
+  return filtered;
+}
+
 /** What `runGh` hands back — never a throw. */
 export type GhResult =
   | { readonly ok: true; readonly stdout: string }
@@ -229,20 +320,38 @@ export type GhResult =
  * always one of those fixed literals, never `String(error)` or
  * `error.message` — gh's own text can carry nothing katra chose to say.
  *
+ * `args` is passed through exactly as given — argv array only, never a shell
+ * string, the same discipline `runGit` follows — and this function does not
+ * inspect or reshape it. The caller (the GitHub provider, T3) is the one that
+ * knows a ref's expected `owner`/`repo`/`n` shape and is responsible for
+ * refusing anything that does not match before it ever reaches here, and for
+ * putting `--` before a positional where the specific `gh` subcommand needs
+ * one (epic risk note 3). This runner adds neither.
+ *
  * `findGh`'s own miss short-circuits before any spawn: `gh-not-available`,
  * no `execFileSync` call, no timeout to wait out.
  *
- * Every other outcome comes from a real `gh` invocation, hardened the same
- * way `runGit` is — `stdio: ["ignore", "pipe", "pipe"]`, argv array only,
- * never a shell string — plus two things `runGit` does not need:
+ * Every other outcome comes from a real `gh` invocation, hardened well beyond
+ * `runGit`:
  *
+ * - `cwd: tmpdir()`. `gh api` needs no repository context — T3 calls it with
+ *   a fully-qualified `owner/repo` — so this is pinned explicitly rather than
+ *   left to inherit whatever directory the katra process happens to be
+ *   running in; an ambient `cwd` is not something this call should ever
+ *   depend on.
  * - `timeout: 5000` + `killSignal: "SIGKILL"`. `refresh` has no total budget
- *   (epic risk note 12); a single hung call still must not hang the run.
- * - `GH_PROMPT_DISABLED=1` and `GH_NO_UPDATE_NOTIFIER=1`, merged over
- *   whatever `env` already carries. `gh` run non-interactively still checks
- *   for an update and would otherwise print a banner to stderr that has
- *   nothing to do with the call that was made; disabling both is the
- *   documented, probed way to keep `gh`'s output to exactly the response.
+ *   (epic risk note 12); a single hung call still must not hang the run. The
+ *   `SIGKILL` reaches the direct `gh` child only — a grandchild process `gh`
+ *   itself spawned and left running is not something this function can clean
+ *   up (a `execFileSync`-is-synchronous limit, accepted rather than worked
+ *   around; see {@link classifyGhFailure} for the one place that limit is
+ *   visible in the result).
+ * - `maxBuffer: 1 MiB` ({@link GH_MAX_STDOUT_BYTES}).
+ * - An **allowlisted** environment ({@link buildGhEnv}), not a full spread of
+ *   `env` — see {@link GH_ENV_ALLOWLIST}. `GH_PROMPT_DISABLED=1` and
+ *   `GH_NO_UPDATE_NOTIFIER=1` are forced last, always: `gh` run
+ *   non-interactively still checks for an update and would otherwise print a
+ *   banner to stderr that has nothing to do with the call that was made.
  *
  * `gh`'s own exit codes are read from the caught error, never printed: exit
  * `4` is the one unambiguous code (probed) — no credentials were even
@@ -259,11 +368,13 @@ export function runGh(env: NodeJS.ProcessEnv, args: string[]): GhResult {
 
   try {
     const stdout = execFileSync(gh, args, {
-      env: { ...env, GH_PROMPT_DISABLED: "1", GH_NO_UPDATE_NOTIFIER: "1" },
+      cwd: tmpdir(),
+      env: buildGhEnv(env),
       encoding: "utf8",
       stdio: ["ignore", "pipe", "pipe"],
       timeout: GH_TIMEOUT_MS,
       killSignal: "SIGKILL",
+      maxBuffer: GH_MAX_STDOUT_BYTES,
     });
     return { ok: true, stdout: stdout.trim() };
   } catch (error) {
@@ -271,10 +382,26 @@ export function runGh(env: NodeJS.ProcessEnv, args: string[]): GhResult {
   }
 }
 
+/**
+ * `execFileSync`'s `error.code` values meaning `gh` itself never ran — as
+ * distinct from `gh` running and failing on its own terms. `ENOENT` is
+ * `findGh`'s own TOCTOU (the binary vanished between the check and the
+ * exec — the same shape `runGit`'s own `readFailure` already guards
+ * against); `EACCES`/`EPERM` are permission failures; `EISDIR` is a
+ * same-named directory (some platforms report that as `EACCES` instead —
+ * `resolveOnPath`'s own `isExecutableFile` already defends against exactly
+ * that shape, so this set covers the case only for whatever slips past a
+ * TOCTOU there too); `ENOEXEC` is a file that is not a recognizable
+ * executable. Every one of these means `gh` never started, so
+ * `gh-not-available` — the same reason `findGh`'s own miss reports — is the
+ * honest answer, not a guess at what `gh` would have said.
+ */
+const GH_UNRUNNABLE_CODES = new Set(["ENOENT", "EACCES", "EPERM", "EISDIR", "ENOEXEC"]);
+
 interface GhFailure {
-  readonly spawnFailed: boolean;
-  /** Non-null exactly when `execFileSync`'s own timeout killed the process. */
-  readonly signal: string | null;
+  readonly code: string | null;
+  /** True exactly when `execFileSync`'s own timeout killed the process. */
+  readonly timedOut: boolean;
   readonly status: number | null;
   readonly stdout: string;
   readonly stderr: string;
@@ -283,14 +410,14 @@ interface GhFailure {
 function readGhFailure(error: unknown): GhFailure {
   const err = error as {
     code?: unknown;
-    signal?: unknown;
     status?: unknown;
     stdout?: unknown;
     stderr?: unknown;
   };
+  const code = typeof err.code === "string" ? err.code : null;
   return {
-    spawnFailed: err.code === "ENOENT",
-    signal: typeof err.signal === "string" ? err.signal : null,
+    code,
+    timedOut: code === "ETIMEDOUT",
     status: typeof err.status === "number" ? err.status : null,
     stdout: typeof err.stdout === "string" ? err.stdout : "",
     stderr: typeof err.stderr === "string" ? err.stderr : "",
@@ -318,35 +445,47 @@ function readJsonHttpStatus(stdout: string): string | undefined {
 }
 
 /**
- * Turns a caught `runGh` failure into a `RefreshReason` — every branch probed
- * against the real `gh` (epic comment 1, libraries lens):
+ * Turns a caught `runGh` failure into a `RefreshReason` — every branch either
+ * a Node/OS-level `error.code` or probed against the real `gh` (epic comment
+ * 1, libraries lens), checked in this order:
  *
- * - A spawn-level `ENOENT` (the binary vanished between `findGh`'s check and
- *   the actual exec — the same TOCTOU `runGit`'s own `readFailure` already
- *   guards against) reads as `gh-not-available`, the same reason `findGh`'s
- *   own miss reports.
- * - A non-null `signal` is `execFileSync`'s timeout having fired — the only
- *   signal this module ever configures is its own `killSignal`, so any
- *   signal at all means the call ran the full 5s and was killed.
+ * - {@link GH_UNRUNNABLE_CODES} — `gh` itself never ran. `gh-not-available`,
+ *   the same reason `findGh`'s own miss reports.
+ * - `error.code === "ETIMEDOUT"` — checked directly, never `error.signal`.
+ *   `execFileSync`'s timeout can fire and still report a **null** `signal`:
+ *   a `gh` invocation whose child backgrounds a grandchild holding the
+ *   stdout pipe open (probed real — the immediate child can exit cleanly on
+ *   its own, `status: 0`, before the wall-clock timeout needs to kill
+ *   anything, while the read on stdout keeps blocking on that grandchild)
+ *   still sets `code: "ETIMEDOUT"` with `signal: null`. Keying off `signal`,
+ *   as an earlier version of this function did, silently misclassifies that
+ *   shape as something other than a timeout.
+ * - `error.code === "ENOBUFS"` — `maxBuffer` exceeded. `gh` is technically
+ *   still running or ran to completion, but this process refused to keep
+ *   reading; there is no response left to classify, so it lands in the same
+ *   bucket an unparseable body does: `malformed-response`.
  * - Exit `4` is unauthenticated, unambiguously (probed: no credentials
  *   present at all, distinct from credentials that were sent and rejected).
- * - Exit `1` is overloaded across three shapes, told apart in the order
- *   they were probed to be mutually exclusive: `stderr` containing
- *   `"error connecting"` is a transport failure that never reached GitHub;
- *   otherwise `stdout`'s JSON `status` field settles it — `"404"` is the
- *   external entity not existing, `"401"` is credentials GitHub rejected.
- * - Anything else on exit `1` — a shape this module has not seen because
- *   nothing in F8's scope produces it (`gh api` returning some other status,
- *   a body that is not JSON at all) — is the one bucket honestly named for
- *   "a response came back and this parser could not read it as one of the
- *   above": `malformed-response`, not a guess at which of the other reasons
- *   it most resembles.
+ * - Exit `1` is overloaded across three shapes, told apart in the order they
+ *   were probed to be mutually exclusive: `stderr` containing `"error
+ *   connecting"` is a transport failure that never reached GitHub; otherwise
+ *   `stdout`'s JSON `status` field settles it — `"404"` is the external
+ *   entity not existing, `"401"` is credentials GitHub rejected, read from
+ *   the JSON body on stdout, never from gh's own stderr summary line.
+ * - Anything else — an exit-1 body this module has not seen probed, or a
+ *   `gh` invocation that never reaches the API at all (T3 passing a shape
+ *   `gh` itself rejects before making a request is one real, katra-side way
+ *   to land here) — lands on the one bucket honestly named for "a response
+ *   came back and this could not read it as one of the above":
+ *   `malformed-response`, the same defensive catch-all `ENOBUFS` uses, not a
+ *   guess at which of the other reasons it most resembles.
  */
 function classifyGhFailure(error: unknown): RefreshReason {
   const failure = readGhFailure(error);
 
-  if (failure.spawnFailed) return "gh-not-available";
-  if (failure.signal !== null) return "timeout";
+  if (failure.code !== null && GH_UNRUNNABLE_CODES.has(failure.code)) return "gh-not-available";
+  if (failure.timedOut) return "timeout";
+  if (failure.code === "ENOBUFS") return "malformed-response";
   if (failure.status === 4) return "gh-unauthenticated";
   if (failure.stderr.includes("error connecting")) return "network";
 

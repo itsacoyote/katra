@@ -22,9 +22,12 @@ afterEach(() => {
 
 const onPosix = process.platform !== "win32";
 
-/** Writes an executable `#!/bin/sh` stub named `gh` into `dir` and returns its path. */
-function writeGhStub(dir: string, body: string): string {
-  const script = join(dir, "gh");
+/** A raw carriage return — built via `fromCharCode`, never typed literally. */
+const CR = String.fromCharCode(13);
+
+/** Writes an executable `#!/bin/sh name` stub into `dir` and returns its path. */
+function writeExecutableStub(dir: string, name: string, body: string): string {
+  const script = join(dir, name);
   writeFileSync(script, `#!/bin/sh\n${body}`, "utf8");
   chmodSync(script, 0o755);
   return script;
@@ -53,9 +56,7 @@ describe("findGit", () => {
   it.runIf(onPosix)("finds git in a directory it was given and not elsewhere", () => {
     const dir = createNonRepoDir();
     cleanups.push(() => dir.cleanup());
-    const script = join(dir.dir, "git");
-    writeFileSync(script, "#!/bin/sh\necho fake\n", "utf8");
-    chmodSync(script, 0o755);
+    const script = writeExecutableStub(dir.dir, "git", "echo fake\n");
 
     expect(findGit({ PATH: dir.dir })).toBe(script);
   });
@@ -86,7 +87,54 @@ describe("runGit", () => {
 });
 
 describe("the process-spawning boundary", () => {
-  it("is the only module under src that spawns a subprocess", () => {
+  const root = fileURLToPath(new URL("../../src", import.meta.url));
+  const allowedSpawn = "core/git.ts";
+  // createRequire (`node:module`) synthesizes a CommonJS `require()` inside
+  // ESM — a known way to obtain a module without a static `import` a naive
+  // scanner might rely on. This scanner reads raw text rather than parsing
+  // imports, so it is not actually blind to that: a `require("child_process")`
+  // argument still trips the `child_process` alternative in `spawning` below
+  // regardless of how `require` was obtained. What is worth keeping to
+  // exactly one, audited, unrelated file is the *capability* itself —
+  // `version.ts`'s read of package.json's own version at load time, nothing
+  // to do with spawning.
+  const allowedCreateRequire = "version.ts";
+
+  // Comments stripped: several modules *explain* the rule, and matching
+  // their prose would fail on the documentation rather than the code.
+  const code = (source: string): string =>
+    source.replaceAll(/\/\*[\s\S]*?\*\//g, "").replaceAll(/\/\/[^\n]*/g, "");
+
+  // `child_process` (bare — `\b` already sits at the ":" boundary, so this
+  // matches both "node:child_process" and a prefix-less "child_process")
+  // covers every function this module could call by simply requiring the
+  // module at all. `execFile`/`fork(` have no colliding name elsewhere in
+  // this codebase and are matched as bare words/calls; `spawn`/`spawnSync`
+  // are call-anchored for symmetry. `exec(` is deliberately NOT a bare
+  // `\bexec\(`: `RegExp.prototype.exec` and better-sqlite3's
+  // `Database.prototype.exec` are both named `exec` and are called all over
+  // this codebase (`core/clock.ts`, `core/refs/parse.ts`,
+  // `core/beads/mapping.ts`, `core/db/migrate.ts`) — a bare pattern would
+  // flag every one of them. The negative lookbehind for `.` excludes exactly
+  // those method calls while still catching child_process's own bare,
+  // unqualified `exec(cmd, cb)`.
+  const spawning =
+    /\bchild_process\b|\bexecFileSync\b|\bexecFile\b|\bexecSync\b|(?<!\.)\bexec\(|\bspawn(?:Sync)?\(|\bfork\(/;
+  const dynamicRequire = /\bcreateRequire\b/;
+
+  it("its spawning pattern catches a bare exec( call without flagging RegExp/Database .exec(", () => {
+    // The probe this widening exists to pass: child_process's own async,
+    // shell-string `exec(cmd, cb)` has no Sync suffix and no distinguishing
+    // prefix, so a pattern that only matched execFileSync/execSync/spawn
+    // would miss it entirely.
+    expect(spawning.test('exec("rm -rf /", cb);')).toBe(true);
+    // And the reason it cannot be a bare `\bexec\(`: these are the real,
+    // legitimate calls already living in this codebase.
+    expect(spawning.test("PATTERN.exec(input)")).toBe(false);
+    expect(spawning.test("db.exec(sql)")).toBe(false);
+  });
+
+  it("is the only module under src that spawns a subprocess, and the only one that dynamically requires", () => {
     // Structural, because review vigilance already failed once: `findGit`'s
     // absolute-path lookup is F1's fix for a real Windows PATH-shadowing
     // finding, and a second `execFileSync("git", …)` written for the actor
@@ -96,16 +144,8 @@ describe("the process-spawning boundary", () => {
     // the CI matrix and be wrong only in the repository of whoever gets
     // attacked. So this asserts the shape instead: one door, and everything
     // else goes through it.
-    const root = fileURLToPath(new URL("../../src", import.meta.url));
-    const allowed = "core/git.ts";
-
-    // Comments stripped: several modules *explain* the rule, and matching
-    // their prose would fail on the documentation rather than the code.
-    const code = (source: string): string =>
-      source.replaceAll(/\/\*[\s\S]*?\*\//g, "").replaceAll(/\/\/[^\n]*/g, "");
-    const spawning = /node:child_process|\bexecFileSync\b|\bexecSync\b|\bspawnSync\b|\bspawn\(/;
-
-    const offenders: string[] = [];
+    const spawnOffenders: string[] = [];
+    const createRequireOffenders: string[] = [];
     const walk = (dir: string): void => {
       for (const entry of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, entry.name);
@@ -115,17 +155,21 @@ describe("the process-spawning boundary", () => {
         }
         if (!entry.name.endsWith(".ts")) continue;
         const rel = relative(root, full).replaceAll("\\", "/");
-        if (rel === allowed) continue;
-        if (spawning.test(code(readFileSync(full, "utf8")))) offenders.push(rel);
+        const stripped = code(readFileSync(full, "utf8"));
+        if (rel !== allowedSpawn && spawning.test(stripped)) spawnOffenders.push(rel);
+        if (rel !== allowedCreateRequire && dynamicRequire.test(stripped)) {
+          createRequireOffenders.push(rel);
+        }
       }
     };
     walk(root);
 
-    expect(offenders).toEqual([]);
+    expect(spawnOffenders).toEqual([]);
+    expect(createRequireOffenders).toEqual([]);
 
     // A guard on the guard: if the regex broke, the sweep above would pass by
     // finding nothing anywhere. The allowed module must still match it.
-    expect(spawning.test(code(readFileSync(join(root, allowed), "utf8")))).toBe(true);
+    expect(spawning.test(code(readFileSync(join(root, allowedSpawn), "utf8")))).toBe(true);
   });
 });
 
@@ -137,13 +181,24 @@ describe("relative PATH entries", () => {
     // `tools/git` would be executed. On Windows `join(".", "git.exe")`
     // collapses to a bare name, which is the exact input that makes libuv
     // probe the current directory first: F1's finding, reintroduced.
+    //
+    // Without the chdir below, `join("tools", "git")` resolves against
+    // whatever directory the test runner happens to be in — which has no
+    // "tools/git" either way, so the assertion would pass even with the
+    // `!isAbsolute` guard deleted. Changing into the fixture directory makes
+    // the relative path resolve to a real, existing file the guard has to
+    // actively refuse — provable by mutation, not just by construction.
     const dir = createNonRepoDir();
     cleanups.push(() => dir.cleanup());
     const bin = join(dir.dir, "tools");
     mkdirSync(bin, { recursive: true });
-    const planted = join(bin, "git");
-    writeFileSync(planted, "#!/bin/sh\necho hijacked\n", "utf8");
-    chmodSync(planted, 0o755);
+    const planted = writeExecutableStub(bin, "git", "echo hijacked\n");
+
+    const previousCwd = process.cwd();
+    process.chdir(dir.dir);
+    // LIFO: this must pop — and restore cwd — before dir.cleanup() removes
+    // the directory this process is sitting in.
+    cleanups.push(() => process.chdir(previousCwd));
 
     // Relative entries — including "." — must be ignored entirely.
     expect(findGit({ PATH: "tools" })).toBeUndefined();
@@ -167,7 +222,7 @@ describe("findGh", () => {
   it.runIf(onPosix)("finds gh in a directory it was given, absolute, and not elsewhere", () => {
     const dir = createNonRepoDir();
     cleanups.push(() => dir.cleanup());
-    const script = writeGhStub(dir.dir, "echo fake\n");
+    const script = writeExecutableStub(dir.dir, "gh", "echo fake\n");
 
     const found = findGh({ PATH: dir.dir });
 
@@ -184,19 +239,46 @@ describe("findGh", () => {
   });
 
   it.runIf(onPosix)("skips a relative PATH entry rather than resolving it", () => {
-    // Same discipline as findGit's own relative-entry test: a bare `"gh"`
-    // resolved from a relative PATH entry is the Windows PATH-shadowing
-    // finding all over again, just for the second binary.
+    // Same discipline — and same chdir requirement — as findGit's own
+    // relative-entry test above: a bare `"gh"` resolved from a relative PATH
+    // entry is the Windows PATH-shadowing finding all over again, just for
+    // the second binary, and without the chdir the relative path never
+    // resolves to anything real regardless of the guard.
     const dir = createNonRepoDir();
     cleanups.push(() => dir.cleanup());
     const bin = join(dir.dir, "tools");
     mkdirSync(bin, { recursive: true });
-    const planted = writeGhStub(bin, "echo hijacked\n");
+    const planted = writeExecutableStub(bin, "gh", "echo hijacked\n");
+
+    const previousCwd = process.cwd();
+    process.chdir(dir.dir);
+    cleanups.push(() => process.chdir(previousCwd));
 
     expect(findGh({ PATH: "tools" })).toBeUndefined();
     expect(findGh({ PATH: "." })).toBeUndefined();
     expect(findGh({ PATH: bin })).toBe(planted);
   });
+
+  it.runIf(onPosix)(
+    "skips an unexecutable candidate and keeps walking to a later PATH entry",
+    () => {
+      // A mode-000 file at the right name is not a "found" — resolveOnPath
+      // keeps walking past it, the same way a shell's own PATH lookup would,
+      // so a decoy earlier on PATH cannot shadow the real binary later on it.
+      const blockedDir = createNonRepoDir();
+      cleanups.push(() => blockedDir.cleanup());
+      const blocked = writeExecutableStub(blockedDir.dir, "gh", "echo should-not-run\n");
+      chmodSync(blocked, 0o000);
+
+      const realDir = createNonRepoDir();
+      cleanups.push(() => realDir.cleanup());
+      const real = writeExecutableStub(realDir.dir, "gh", "echo real\n");
+
+      const found = findGh({ PATH: `${blockedDir.dir}${delimiter}${realDir.dir}` });
+
+      expect(found).toBe(real);
+    },
+  );
 });
 
 describe("runGh", () => {
@@ -214,7 +296,7 @@ describe("runGh", () => {
     // exit 4 is the one unambiguous code — no credentials presented at all.
     const dir = createNonRepoDir();
     cleanups.push(() => dir.cleanup());
-    writeGhStub(dir.dir, "exit 4\n");
+    writeExecutableStub(dir.dir, "gh", "exit 4\n");
 
     const result = runGh({ PATH: dir.dir }, ["api", "repos/x/y/issues/1"]);
 
@@ -226,8 +308,9 @@ describe("runGh", () => {
     // own JSON error body on stdout, `"status":"404"` included.
     const dir = createNonRepoDir();
     cleanups.push(() => dir.cleanup());
-    writeGhStub(
+    writeExecutableStub(
       dir.dir,
+      "gh",
       'echo \'{"message":"Not Found","documentation_url":"https://docs.github.com/rest","status":"404"}\'\nexit 1\n',
     );
 
@@ -236,13 +319,40 @@ describe("runGh", () => {
     expect(result).toEqual({ ok: false, reason: "not-found" });
   });
 
+  it.runIf(onPosix)(
+    "classifies exit 1 with a pretty-printed CRLF 401 body as bad-credentials",
+    () => {
+      // Probed real: gh's pretty-printed error body for a rejected token uses
+      // CRLF line endings, not bare LF. JSON.parse tolerates that as ordinary
+      // whitespace — this pins that readJsonHttpStatus actually does, rather
+      // than something that only happens to work on the compact 404 shape.
+      const dir = createNonRepoDir();
+      cleanups.push(() => dir.cleanup());
+      const jsonBody =
+        `{${CR}\n` +
+        `  "message": "Bad credentials",${CR}\n` +
+        `  "documentation_url": "https://docs.github.com/rest",${CR}\n` +
+        `  "status": "401"${CR}\n` +
+        `}`;
+      // `printf %s` never interprets its argument — the CRLF bytes above are
+      // already real, so nothing here depends on the stub shell's own
+      // backslash-escape handling.
+      writeExecutableStub(dir.dir, "gh", `printf %s '${jsonBody}'\nexit 1\n`);
+
+      const result = runGh({ PATH: dir.dir }, ["api", "repos/x/y"]);
+
+      expect(result).toEqual({ ok: false, reason: "bad-credentials" });
+    },
+  );
+
   it.runIf(onPosix)("classifies exit 1 with an 'error connecting' stderr as network", () => {
     // Probed real: pointing gh at an unreachable host exits 1 with
     // "error connecting to <host>" on stderr and nothing on stdout.
     const dir = createNonRepoDir();
     cleanups.push(() => dir.cleanup());
-    writeGhStub(
+    writeExecutableStub(
       dir.dir,
+      "gh",
       "echo 'error connecting to api.github.invalid' 1>&2\n" +
         "echo 'check your internet connection or https://githubstatus.com' 1>&2\n" +
         "exit 1\n",
@@ -253,12 +363,57 @@ describe("runGh", () => {
     expect(result).toEqual({ ok: false, reason: "network" });
   });
 
+  it.runIf(onPosix)("classifies an unrecognized exit 1 shape as malformed-response", () => {
+    // A shape none of the probed branches match — gh itself rejecting a bad
+    // invocation before ever reaching the API, for instance — must still
+    // resolve to a fixed reason rather than falling through unhandled.
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    writeExecutableStub(dir.dir, "gh", "echo 'unknown flag: --bogus' 1>&2\nexit 1\n");
+
+    const result = runGh({ PATH: dir.dir }, ["api", "--bogus"]);
+
+    expect(result).toEqual({ ok: false, reason: "malformed-response" });
+  });
+
+  it.runIf(onPosix)("classifies an exceeded maxBuffer as malformed-response, fast", () => {
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    // 2 MB, comfortably over the 1 MiB maxBuffer. `yes`/`head` are external
+    // binaries, so the real PATH is appended after the stub directory the
+    // same way the timeout test below resolves `sleep`.
+    writeExecutableStub(dir.dir, "gh", "yes x | head -c 2000000\n");
+    const env = { PATH: `${dir.dir}${delimiter}${process.env.PATH ?? ""}` };
+
+    const start = Date.now();
+    const result = runGh(env, ["api", "repos/x/y"]);
+    const elapsed = Date.now() - start;
+
+    expect(result).toEqual({ ok: false, reason: "malformed-response" });
+    // "Fast" pins that this is maxBuffer firing immediately, not the 5s
+    // execFileSync timeout also happening to classify the same way.
+    expect(elapsed).toBeLessThan(2000);
+  });
+
+  it.runIf(onPosix)("classifies a self-signaled crash as malformed-response, not timeout", () => {
+    // `signal !== null` used to be the entire timeout check — a crash also
+    // sets `signal` (SIGSEGV) without `code` ever being `ETIMEDOUT`, which
+    // the old check would have misread as a timeout.
+    const dir = createNonRepoDir();
+    cleanups.push(() => dir.cleanup());
+    writeExecutableStub(dir.dir, "gh", "kill -SEGV $$\n");
+
+    const result = runGh({ PATH: dir.dir }, ["api", "repos/x/y"]);
+
+    expect(result).toEqual({ ok: false, reason: "malformed-response" });
+  });
+
   it.runIf(onPosix)(
     "SIGKILLs a stub that outlives the timeout and reports timeout, in bounded time",
     () => {
       const dir = createNonRepoDir();
       cleanups.push(() => dir.cleanup());
-      writeGhStub(dir.dir, "sleep 30\n");
+      writeExecutableStub(dir.dir, "gh", "sleep 30\n");
       // `sleep` is an external binary, not a shell builtin, so the stub's own
       // PATH must still resolve it — the real PATH is appended after the stub
       // directory so `gh` itself keeps resolving to the fake ahead of any real
@@ -278,21 +433,90 @@ describe("runGh", () => {
     },
   );
 
-  it.runIf(onPosix)("passes both GH_ environment overrides to the spawned process", () => {
-    // GH_PROMPT_DISABLED and GH_NO_UPDATE_NOTIFIER are runGh's own hardening —
-    // always set on the spawned process, not something a caller opts into.
+  it.runIf(onPosix)(
+    "classifies ETIMEDOUT with a null signal as timeout (grandchild holds stdout open)",
+    () => {
+      const dir = createNonRepoDir();
+      cleanups.push(() => dir.cleanup());
+      const pidFile = join(dir.dir, "grandchild.pid");
+      // The immediate child backgrounds a grandchild that inherits the stdout
+      // pipe and holds it open well past the timeout, then exits cleanly
+      // itself — nothing left for SIGKILL to actually terminate. execFileSync
+      // still reports ETIMEDOUT (the wall clock fired waiting for stdout to
+      // close) but signal comes back null — probed real, and exactly why
+      // classification keys off `code`, never `signal`.
+      writeExecutableStub(dir.dir, "gh", `(sleep 6 & echo $! > ${pidFile})\nexit 0\n`);
+      cleanups.push(() => {
+        try {
+          const pid = Number(readFileSync(pidFile, "utf8").trim());
+          if (Number.isInteger(pid)) process.kill(pid, "SIGKILL");
+        } catch {
+          // Already gone, or the file was never written — nothing to clean up.
+        }
+      });
+      // `sleep` is an external binary the grandchild needs to actually resolve
+      // and run for the full 6s — without the real PATH appended, the shell
+      // fails to find it, the grandchild exits immediately, and the pipe
+      // closes right away instead of staying open past the timeout.
+      const env = { PATH: `${dir.dir}${delimiter}${process.env.PATH ?? ""}` };
+
+      const result = runGh(env, ["api", "repos/x/y/issues/1"]);
+
+      expect(result).toEqual({ ok: false, reason: "timeout" });
+    },
+  );
+
+  it.runIf(onPosix)(
+    "forces both GH_ overrides to 1 even when the caller's env sets them to 0",
+    () => {
+      // GH_PROMPT_DISABLED and GH_NO_UPDATE_NOTIFIER are runGh's own
+      // hardening — always forced, not merely defaulted, so a caller-supplied
+      // "0" must still lose.
+      const dir = createNonRepoDir();
+      cleanups.push(() => dir.cleanup());
+      writeExecutableStub(
+        dir.dir,
+        "gh",
+        'echo "GH_PROMPT_DISABLED=$GH_PROMPT_DISABLED"\necho "GH_NO_UPDATE_NOTIFIER=$GH_NO_UPDATE_NOTIFIER"\n',
+      );
+
+      const result = runGh(
+        { PATH: dir.dir, GH_PROMPT_DISABLED: "0", GH_NO_UPDATE_NOTIFIER: "0" },
+        [],
+      );
+
+      expect(result).toEqual({
+        ok: true,
+        stdout: "GH_PROMPT_DISABLED=1\nGH_NO_UPDATE_NOTIFIER=1",
+      });
+    },
+  );
+
+  it.runIf(onPosix)(
+    "never forwards a caller env var outside the allowlist to the spawned process",
+    () => {
+      // The allowlist, not a full `{ ...env }` spread, is what keeps a
+      // secret like LINEAR_API_KEY (F8's other provider's own credential)
+      // away from a `gh` invocation entirely.
+      const dir = createNonRepoDir();
+      cleanups.push(() => dir.cleanup());
+      writeExecutableStub(dir.dir, "gh", 'echo "LINEAR_API_KEY=[$LINEAR_API_KEY]"\n');
+
+      const result = runGh({ PATH: dir.dir, LINEAR_API_KEY: "sentinel-should-not-leak" }, []);
+
+      expect(result).toEqual({ ok: true, stdout: "LINEAR_API_KEY=[]" });
+    },
+  );
+
+  it.runIf(onPosix)("does not mutate the env object it was given", () => {
     const dir = createNonRepoDir();
     cleanups.push(() => dir.cleanup());
-    writeGhStub(
-      dir.dir,
-      'echo "GH_PROMPT_DISABLED=$GH_PROMPT_DISABLED"\necho "GH_NO_UPDATE_NOTIFIER=$GH_NO_UPDATE_NOTIFIER"\n',
-    );
+    writeExecutableStub(dir.dir, "gh", "exit 0\n");
+    const env = { PATH: dir.dir };
+    const original = { ...env };
 
-    const result = runGh({ PATH: dir.dir }, []);
+    runGh(env, []);
 
-    expect(result).toEqual({
-      ok: true,
-      stdout: "GH_PROMPT_DISABLED=1\nGH_NO_UPDATE_NOTIFIER=1",
-    });
+    expect(env).toEqual(original);
   });
 });

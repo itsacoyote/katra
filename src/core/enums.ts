@@ -163,7 +163,8 @@ export const REFRESH_REASONS = [
   // errors and null data): the EXTERNAL entity itself does not exist.
   // Distinct from gone below, which is the katra-side ref vanishing.
   "not-found",
-  // github (T2 runGh, exit 1 + an HTTP 401 "Bad credentials" stderr shape):
+  // github (T2 runGh, exit 1 + an HTTP 401 "Bad credentials" body — read
+  // from the JSON on stdout, never gh's own stderr summary line):
   // credentials were sent and GitHub rejected them. Distinct from
   // gh-unauthenticated above, which never had credentials to reject.
   "bad-credentials",
@@ -181,7 +182,11 @@ export const REFRESH_REASONS = [
   // this token; the two providers never share a reason for the same shape
   // of failure.
   "bad-key",
-  // linear (T3): the response body was not parseable JSON.
+  // linear (T3): the response body was not parseable JSON. Also github's
+  // (T2 runGh) own defensive catch-all — an exceeded maxBuffer (ENOBUFS) or
+  // an exit-1 body that matched none of the probed shapes above — the same
+  // "a response came back and this could not read it" bucket, not a guess
+  // at which of the other reasons it most resembles.
   "malformed-response",
   // github or linear (T3): the stored external_id does not match the
   // provider's own strict re-derivation pattern — refused before any spawn
