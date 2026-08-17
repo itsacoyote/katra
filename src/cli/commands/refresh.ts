@@ -71,6 +71,11 @@
  * in — recorded here rather than worked around, because the fix (verifying
  * a ref's repo against the current repo's own remotes, say) is out of this
  * feature's scope and was never part of the spec's requirements for F8.
+ * The acceptance covers the whole consequence, not just the probe: a
+ * resolved answer's status and title are PERSISTED to the store's cache
+ * columns, rendered by `show`/`brief`/`--json`, and recorded in the event
+ * log's transition text — an attacker-chosen private entity's title becomes
+ * durable, replicated data, not a transient read (validate round-2 scan).
  *
  * **The token -> sentence render mapping is owned here** ({@link
  * REASON_SENTENCES}), not in `core/enums.ts` alongside `RefreshReason`
@@ -96,7 +101,7 @@ import type { OpenRef } from "../../core/refs/repo.js";
 import { applyRefresh, listOpenTaskRefs, listOpenTaskRefsFor } from "../../core/refs/repo.js";
 import type { OpenStore } from "../../core/store.js";
 import { requireId } from "../../core/tasks/ids.js";
-import { oneLine } from "../format.js";
+import { clamp, oneLine, SNIPPET_WIDTH } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStoreAsync } from "../with-store.js";
@@ -282,7 +287,7 @@ function formatRefreshResult(result: RefreshResult): string {
     result.updated,
     result.updated.items.map(
       (item) =>
-        `  ${oneLine(item.provider)}: ${oneLine(item.externalId)}  ` +
+        `  ${oneLine(item.provider)}: ${clamp(oneLine(item.externalId), SNIPPET_WIDTH)}  ` +
         `${oneLine(item.from ?? "none")} -> ${oneLine(item.to)}`,
     ),
   );
@@ -290,7 +295,7 @@ function formatRefreshResult(result: RefreshResult): string {
     "unchanged",
     result.unchanged,
     result.unchanged.items.map(
-      (item) => `  ${oneLine(item.provider)}: ${oneLine(item.externalId)}`,
+      (item) => `  ${oneLine(item.provider)}: ${clamp(oneLine(item.externalId), SNIPPET_WIDTH)}`,
     ),
   );
   push(
@@ -298,7 +303,7 @@ function formatRefreshResult(result: RefreshResult): string {
     result.unresolved,
     result.unresolved.items.map(
       (item) =>
-        `  ${oneLine(item.provider)}: ${oneLine(item.externalId)}  ${REASON_SENTENCES[item.reason]}`,
+        `  ${oneLine(item.provider)}: ${clamp(oneLine(item.externalId), SNIPPET_WIDTH)}  ${REASON_SENTENCES[item.reason]}`,
     ),
   );
 

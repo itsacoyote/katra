@@ -416,7 +416,7 @@ export function runGh(env: NodeJS.ProcessEnv, args: string[]): GhResult {
  * `gh-not-available` — the same reason `findGh`'s own miss reports — is the
  * honest answer, not a guess at what `gh` would have said.
  */
-const GH_UNRUNNABLE_CODES = new Set(["ENOENT", "EACCES", "EPERM", "EISDIR", "ENOEXEC"]);
+const GH_UNRUNNABLE_CODES = new Set(["ENOENT", "EACCES", "EPERM", "EISDIR", "ENOEXEC", "EINVAL"]);
 
 interface GhFailure {
   readonly code: string | null;

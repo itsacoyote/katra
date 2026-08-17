@@ -441,7 +441,7 @@ const EVENT_TYPE_WIDTH = columnWidth(EVENT_TYPES, (type) => type);
  * is the render-side bound that stops that from reaching a terminal as one
  * unbroken line; `--json` still carries `snippet` verbatim.
  */
-const SNIPPET_WIDTH = 200;
+export const SNIPPET_WIDTH = 200;
 
 /**
  * Cuts a title to `width`, marking the cut with an ellipsis.
@@ -454,7 +454,7 @@ const SNIPPET_WIDTH = 200;
  * The ellipsis costs one of the `width` characters, so a clamped string still
  * occupies exactly `width` columns and {@link columnWidth} agrees with it.
  */
-function clamp(text: string, width: number): string {
+export function clamp(text: string, width: number): string {
   // Only zero is degenerate. An earlier version guarded `width <= 1` on the
   // claim that a one-character result would be too wide — but "…" *is* one
   // character, and returning the first character bare made the bound stop
