@@ -597,4 +597,33 @@ describe("recent and untrusted event fields", () => {
     expect(out).not.toMatch(/^flush/m);
     expect(out).not.toMatch(/^cut/m);
   });
+
+  it("aligns the event-type column the same whether or not a ref-status-changed row is present (F8 T6)", async () => {
+    // `ref-status-changed` (18 characters) overflowed the old hardcoded
+    // `padTo(event.type, 14)`: `padTo` never truncates, so nothing was cut,
+    // but every row after that one shifted its trailing columns four
+    // characters right of every shorter-typed row.
+    //
+    // Both events share one entityId and no title so the type column is the
+    // only thing that can vary in width between the two rows — entityId and
+    // title are rendered unpadded here, unlike formatEventLog's own columns,
+    // so a differing entityId length would otherwise confound the offset
+    // comparison below.
+    const { formatBoard } = await import("../../src/cli/format.js");
+    const ENTITY = "kt-000001";
+    seedEvent(fixture.store, { type: "created", entityId: ENTITY, reason: "reason-a" });
+    seedEvent(fixture.store, {
+      type: "ref-status-changed",
+      entityId: ENTITY,
+      reason: "open -> merged",
+    });
+
+    const out = formatBoard(readBoard(fixture.store));
+
+    const createdRow = out.split("\n").find((line) => line.includes("reason-a"));
+    const refRow = out.split("\n").find((line) => line.includes("open -> merged"));
+    expect(createdRow).toBeDefined();
+    expect(refRow).toBeDefined();
+    expect(createdRow?.indexOf("reason-a")).toBe(refRow?.indexOf("open -> merged"));
+  });
 });

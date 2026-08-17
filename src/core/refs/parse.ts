@@ -15,7 +15,26 @@
  * spec prose alone, so the numbered comments trace back to that record.
  */
 
-import { textWidth } from "../text.js";
+/**
+ * {@link CONTROL_CHARS_PATTERN}: control and line-separator characters that
+ * must never survive into a value this module hands back -- whether
+ * reconstructed (a decoded path segment feeding {@link ParsedRef}) or stored
+ * verbatim (an explicit `--url`, {@link validateExplicitRef}): the C0
+ * controls (NUL through Unit Separator -- covering NUL, tab, CR, LF, ESC),
+ * DEL, the C1 controls, and the two Unicode line separators LINE SEPARATOR /
+ * PARAGRAPH SEPARATOR -- invisible to a terminal, line breaks to any other
+ * renderer. The same set `cli/format.ts`'s `oneLine` strips at render time
+ * (AGENTS.md); this module refuses them outright instead, since it is the
+ * boundary where they would otherwise start looking like ordinary,
+ * already-validated data.
+ *
+ * Imported from `core/text.ts` (F8 T2/T6's consolidation) rather than
+ * declared here -- `cli/format.ts` and this module each carried an
+ * identical private copy of the same character class before that export
+ * existed; this is the one that now points at it instead of being the
+ * third.
+ */
+import { CONTROL_CHARS_PATTERN, textWidth } from "../text.js";
 import type {
   ExplicitRef,
   ExplicitRefInput,
@@ -28,24 +47,6 @@ import type {
 
 const GITHUB_HOST = "github.com";
 const LINEAR_HOST = "linear.app";
-
-/**
- * Control and line-separator characters that must never survive into a
- * value this module hands back -- whether reconstructed (a decoded path
- * segment feeding {@link ParsedRef}) or stored verbatim (an explicit
- * `--url`, {@link validateExplicitRef}): the C0 controls (NUL through
- * Unit Separator -- covering NUL, tab, CR, LF, ESC), DEL, the C1
- * controls, and the two Unicode line separators LINE SEPARATOR /
- * PARAGRAPH SEPARATOR -- invisible to a terminal, line breaks to any
- * other renderer. The same set `cli/format.ts`'s `oneLine` strips at
- * render time (AGENTS.md); this module refuses them outright instead,
- * since it is the boundary where they would otherwise start looking
- * like ordinary, already-validated data. Every codepoint below is
- * written as an explicit unicode escape, never a raw byte in this file
- * (house rule).
- */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
-const CONTROL_CHARS_PATTERN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 /**
  * What a decoded GitHub/Linear path segment -- owner, repo, or Linear

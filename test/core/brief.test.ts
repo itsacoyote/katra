@@ -487,6 +487,37 @@ describe("activity and untrusted event fields", () => {
     expect(out).toContain("flush");
     expect(out).not.toMatch(/^flush/m);
   });
+
+  it("aligns the event-type column the same whether or not a ref-status-changed row is present (F8 T6)", async () => {
+    // `ref-status-changed` (18 characters) overflowed the old hardcoded
+    // `padTo(event.type, 14)`/`.padEnd(14)`: `padTo` never truncates, so
+    // nothing was cut, but every row after that one shifted its trailing
+    // columns four characters right of every shorter-typed row — a
+    // misalignment `formatEventLog` never had, since it self-sizes.
+    const { formatBrief, formatTaskView } = await import("../../src/cli/format.js");
+    const { viewTask } = await import("../../src/core/tasks/view.js");
+    const task = seedTask(fixture.store, { title: "a task" });
+    seedEvent(fixture.store, { type: "created", entityId: task, reason: "reason-a" });
+    seedEvent(fixture.store, {
+      type: "ref-status-changed",
+      entityId: task,
+      reason: "open -> merged",
+    });
+
+    for (const out of [
+      formatBrief(briefEntity(fixture.store, task)),
+      formatTaskView(viewTask(fixture.store, task)),
+    ]) {
+      const createdRow = out.split("\n").find((line) => line.includes("reason-a"));
+      const refRow = out.split("\n").find((line) => line.includes("open -> merged"));
+      expect(createdRow).toBeDefined();
+      expect(refRow).toBeDefined();
+      // Both rows' trailing content must start at the identical column —
+      // proof the type column is padded to one shared width regardless of
+      // which specific types appear in this particular render.
+      expect(createdRow?.indexOf("reason-a")).toBe(refRow?.indexOf("open -> merged"));
+    }
+  });
 });
 
 describe("viewTask's claim (F4)", () => {
@@ -533,6 +564,102 @@ describe("viewTask's refs (F7 T5)", () => {
     const task = seedTask(fixture.store);
 
     expect(viewTask(fixture.store, task).refs).toEqual([]);
+  });
+});
+
+describe("formatBrief/formatTaskView render a ref's cached fields (F8 T6)", () => {
+  const SYNCED_AT = "2026-01-01T00:00:00.000Z";
+  const NOW = "2026-01-01T00:03:00.000Z";
+
+  /**
+   * Links a ref, then writes its cache columns directly — the write seam
+   * `refresh`'s `applyRefreshWithin` alone reaches in production, exercised
+   * here without a live provider (T6 is a rendering task, not T5's own).
+   */
+  function seedCachedRef(
+    taskId: string,
+    fields: { status: string | null; title: string | null; syncedAt: string | null },
+  ): void {
+    fixture.store.db
+      .prepare(
+        "UPDATE refs SET cached_status = ?, cached_title = ?, synced_at = ? " +
+          "WHERE id = (SELECT ref_id FROM task_refs WHERE task_id = ?)",
+      )
+      .run(fields.status, fields.title, fields.syncedAt, taskId);
+  }
+
+  it("renders a hostile stored title sanitized in show/brief, verbatim in the data --json reads from", async () => {
+    // `cached_title` carries no CHECK and is provider-sourced (GitHub/Linear
+    // response text) — sanitized once already at the refresh write seam
+    // (`sanitizeCachedTitle`), but never trusted a second time less at
+    // render, the same discipline every other stored-text surface in this
+    // file follows. Built by codepoint so no invisible literal sits in test
+    // source, the same technique the sibling tests in this file use.
+    const { linkRef } = await import("../../src/core/refs/repo.js");
+    const { formatBrief, formatTaskView } = await import("../../src/cli/format.js");
+    const { viewTask } = await import("../../src/core/tasks/view.js");
+    const ESC = String.fromCharCode(0x1b);
+    const NL = String.fromCharCode(0x0a);
+    const hostileTitle = `evil${ESC}[31m${NL}flush`;
+    const task = seedTask(fixture.store, { title: "a task" });
+    linkRef(fixture.store, task, {
+      provider: "github",
+      externalId: "owner/repo#12",
+      url: "https://github.com/owner/repo/pull/12",
+    });
+    seedCachedRef(task, { status: "merged", title: hostileTitle, syncedAt: SYNCED_AT });
+
+    const briefOut = formatBrief(briefEntity(fixture.store, task), NOW);
+    const showOut = formatTaskView(viewTask(fixture.store, task), NOW);
+
+    for (const out of [briefOut, showOut]) {
+      expect(out).toContain("flush");
+      expect(out).not.toContain(ESC);
+      // An embedded newline would give stored text its own flush-left line,
+      // indistinguishable from a line the renderer itself printed.
+      expect(out).not.toMatch(/^flush/m);
+    }
+
+    // The data reads --json actually serializes carry the value verbatim —
+    // sanitizing is a render concern, never applied to what is stored.
+    expect(briefEntity(fixture.store, task).refs[0]?.cachedTitle).toBe(hostileTitle);
+    expect(viewTask(fixture.store, task).refs[0]?.cachedTitle).toBe(hostileTitle);
+  });
+
+  it("renders exactly as F7 did when every cached field is still null (pin)", async () => {
+    const { linkRef } = await import("../../src/core/refs/repo.js");
+    const { formatBrief } = await import("../../src/cli/format.js");
+    const task = seedTask(fixture.store, { title: "a task" });
+    linkRef(fixture.store, task, {
+      provider: "github",
+      externalId: "owner/repo#12",
+      url: "https://github.com/owner/repo/pull/12",
+    });
+
+    const out = formatBrief(briefEntity(fixture.store, task), NOW);
+
+    expect(out).toContain(
+      `${"refs".padEnd(12)}github: owner/repo#12  https://github.com/owner/repo/pull/12`,
+    );
+  });
+
+  it("renders a relative synced age, and a malformed stored timestamp without throwing", async () => {
+    const { linkRef } = await import("../../src/core/refs/repo.js");
+    const { formatBrief } = await import("../../src/cli/format.js");
+    const task = seedTask(fixture.store, { title: "a task" });
+    linkRef(fixture.store, task, { provider: "linear", externalId: "ENG-451", url: null });
+    seedCachedRef(task, { status: "unstarted", title: null, syncedAt: SYNCED_AT });
+
+    expect(formatBrief(briefEntity(fixture.store, task), NOW)).toContain("synced 3m ago");
+
+    // `refs.synced_at` carries no format CHECK — a malformed stored value
+    // must degrade to "no age shown", the same `claimLiveness` treatment a
+    // malformed `presence.last_seen` already gets, never a thrown exception
+    // turning `show`/`brief` into an exit 1 over a display detail.
+    seedCachedRef(task, { status: "unstarted", title: null, syncedAt: "not-a-timestamp" });
+
+    expect(() => formatBrief(briefEntity(fixture.store, task), NOW)).not.toThrow();
+    expect(formatBrief(briefEntity(fixture.store, task), NOW)).not.toContain("synced");
   });
 });
 
