@@ -70,8 +70,10 @@ beforeEach(() => {
   fixture = createStoreFixture({ actor: ACTOR });
 });
 afterEach(() => {
-  fixture.cleanup();
+  // Hook cleared FIRST: if cleanup ever throws, a stale hook must not leak
+  // into the next test's transactions.
   writeTxSpy.hook = undefined;
+  fixture.cleanup();
 });
 
 /** Every row in `refs`, for direct-DB assertions the spec calls for by name. */
