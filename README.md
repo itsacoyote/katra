@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, external refs that link tasks to GitHub PRs and Linear issues, and twenty-three commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. Provider plugins that resolve refs live are still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, external refs that link tasks to GitHub PRs and Linear issues with live status through `refresh`, and twenty-four commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. Reconcile — acting on that live status — is still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -234,11 +234,41 @@ katra: not a recognized github.com or linear.app reference URL — store it expl
 $ katra ref add kt-28fs2e --provider gitlab --id "acme/tool!9" --url https://gitlab.com/acme/tool/-/merge_requests/9
 ```
 
-Nothing here touches the network: refs are stored links with room for cached status and title, which stay empty until provider plugins land. `ref remove` takes the url, the qualified id, or `provider:id` when two refs collide, and linking/unlinking is recorded in the task's history like every other write.
+`ref add` itself never touches the network. `ref remove` takes the url, the qualified id, or `provider:id` when two refs collide, and linking/unlinking is recorded in the task's history like every other write.
+
+### Live status
+
+`katra refresh` asks each ref's tracker what actually happened — GitHub through your already-authenticated `gh`, Linear through its API with `LINEAR_API_KEY` in the environment — and fills the caches `show` and `brief` render:
+
+```console
+$ katra refresh
+2 ref(s) checked — 1 updated, 1 unchanged, 0 unresolved
+
+updated (1)
+  linear: GRI-4  none -> unstarted
+
+unchanged (1)
+  github: itsacoyote/katra#13
+
+$ katra show kt-qyeewf
+  refs        linear: GRI-4  unstarted  Set up your teams  · synced just now
+```
+
+A real change lands in the task's history as a `ref-status-changed` event; an unchanged ref just bumps its sync time. Offline, unauthenticated, or an unknown provider is a *state*, not a failure — every ref reports its reason and `refresh` exits 0:
+
+```console
+$ katra refresh
+2 ref(s) checked — 0 updated, 1 unchanged, 1 unresolved
+
+unresolved (1)
+  linear: GRI-4  LINEAR_API_KEY not set
+```
+
+`refresh` is pure read on the external side and never moves a task — acting on what it learned is `reconcile`'s job, deliberately a separate, explicit command ([ADR-015](docs/decisions/ADR-015-built-in-provider-registry.md) covers why providers are built-in rather than discovered plugins).
 
 ## Still to come
 
-Provider plugins that resolve refs live (cached status/title, `refresh`, `reconcile`), and snapshots. The [spec](docs/katra-spec.md) describes all of it.
+Reconcile (acting on refreshed external status — preview by default, the only path external state can move a task), external provider discovery, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
 
 Until `snapshot` lands, the store lives only in your `.git` directory: it is not shareable, not reviewable in a pull request, and does not survive a fresh clone.
 
