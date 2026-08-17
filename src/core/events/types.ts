@@ -29,9 +29,21 @@ export interface StoredEvent {
   /** Both set on `status-changed`, both null otherwise. */
   readonly fromLane: Lane | null;
   readonly toLane: Lane | null;
-  /** The note id, on `note-added`. Dangles once the note cascades away. */
+  /**
+   * On `note-added`, the note's id — dangles once the note cascades away.
+   * On `ref-linked` / `ref-unlinked` (F7) and `ref-status-changed` (F8), the
+   * ref's qualified external id (`owner/repo#12`, `ENG-451`) — never
+   * `refs.id`, the internal rowid `refs/types.ts`'s `Ref` docs say is never
+   * published. Null on every other type.
+   */
   readonly ref: string | null;
-  /** Why — close and cancel only. Never a title; see `title`. */
+  /**
+   * Why. On `closed` / `cancelled`, the caller's `--reason`. On
+   * `ref-status-changed` (F8), the status transition itself, rendered
+   * `"OLD -> NEW"` (`refs/repo.ts`'s `applyRefresh` formats it in the one
+   * place that does) — `"OLD"` reads `"none"` when the ref had never synced
+   * before this write. Never a title; see `title`. Null on every other type.
+   */
   readonly reason: string | null;
   /** The entity's title at the time, on `created` and `deleted`. */
   readonly title: string | null;

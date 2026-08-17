@@ -118,6 +118,22 @@ export const MAX_URL_LENGTH = 2048;
 export const MAX_PROVIDER_LENGTH = 64;
 
 /**
+ * `refs.cached_title`'s bound — unlike {@link MAX_EXTERNAL_ID_LENGTH} /
+ * {@link MAX_URL_LENGTH} / {@link MAX_PROVIDER_LENGTH}, **not** a DDL `CHECK`:
+ * migration 0005's own docstring is explicit that a provider's status/title
+ * vocabulary is not that migration's to define. Enforced instead at the write
+ * seam that fills the column — `refs/repo.ts`'s `applyRefreshWithin` (F8 T4) —
+ * which caps rather than refuses (that function's own docs), so a hostile or
+ * merely verbose tracker response never blows out the store (epic requirement
+ * 8). Declared here, beside the other stored-value bounds this same module
+ * already owns, rather than in `providers/`: the GitHub provider (F8 T3)
+ * imports this constant for its own `capText` call rather than inlining the
+ * number a second time, which is what makes T3 depend on T4 and not the
+ * reverse — `core/refs` never imports `core/providers`.
+ */
+export const MAX_CACHED_TITLE_LENGTH = 500;
+
+/**
  * What every `parseRefInput` refusal ends with (ADR-014's escape hatch) — one
  * literal string, so a caller can rely on the exact flag names never drifting
  * between one refusal reason and another.

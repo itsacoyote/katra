@@ -128,3 +128,23 @@ export interface Ref {
   readonly cachedTitle: string | null;
   readonly syncedAt: string | null;
 }
+
+/**
+ * What `refs/repo.ts`'s `applyRefreshWithin` (F8 T4) accepts once a provider
+ * has resolved a ref — the row-mutation core's own, repo-local input shape
+ * (iter-3 MED-2), deliberately **not** imported from `core/providers/` (F8
+ * T3): `core/refs` is the lower of the two layers — T3's GitHub provider
+ * imports `MAX_CACHED_TITLE_LENGTH` from this package's `parse.ts` (the
+ * T3 -> T4 dependency edge) — so the reverse import here would close a cycle.
+ * `core/providers/types.ts`'s own `Provider.resolve` return type is a richer
+ * discriminated union (`resolved {status, title} | unresolved {reason}`, plus
+ * whatever discriminant tag distinguishes the two arms); its `resolved` arm
+ * is structurally wider than this interface, not narrower, so passing it
+ * straight through as `outcome` type-checks with no cast — TypeScript's
+ * excess-property check only fires on a fresh object *literal*, never on a
+ * variable of a wider type.
+ */
+export interface RefreshOutcome {
+  readonly status: string;
+  readonly title: string | null;
+}
