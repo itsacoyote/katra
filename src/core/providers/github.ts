@@ -107,7 +107,7 @@ function deriveStatus(body: GithubIssueBody): GithubStatus | undefined {
     pullRequest !== null && typeof pullRequest === "object"
       ? (pullRequest as { readonly merged_at?: unknown }).merged_at
       : undefined;
-  if (typeof mergedAt === "string" && mergedAt.length > 0) return "merged";
+  if (typeof mergedAt === "string" && mergedAt.trim().length > 0) return "merged";
   if (body.draft === true) return "draft";
   if (body.state === "open" || body.state === "closed") return body.state;
   return undefined;

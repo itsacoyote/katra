@@ -547,6 +547,33 @@ describe("linear provider: dispatch table", () => {
   const ref = buildRef({ provider: "linear", externalId: "ABC-1" });
   const env = { LINEAR_API_KEY: LINEAR_KEY_SENTINEL };
 
+  it("an errored body stream leaves no unhandled rejection", async () => {
+    // reader.cancel() REJECTS on an already-errored stream; an unhandled copy
+    // of that rejection crashes the real binary (vitest's own handler masks
+    // it, which is why this test registers its own) and Node's default dump
+    // can carry the Authorization header to stderr. Security round-2 HIGH.
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => void unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      const erroring = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(8));
+          controller.error(new TypeError("terminated"));
+        },
+      });
+      fetchImpl = () => Promise.resolve(fakeResponse(200, erroring));
+
+      const result = await linearProvider.resolve(ref, env);
+      await new Promise((done) => setTimeout(done, 50));
+
+      expect(result).toEqual({ resolved: false, reason: "network" });
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("401 dispatches to bad-key", async () => {
     fetchImpl = () => Promise.resolve(fakeResponse(401, textStream("{}")));
 

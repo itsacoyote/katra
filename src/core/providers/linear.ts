@@ -148,7 +148,15 @@ async function readBounded(response: Response): Promise<string> {
     text += decoder.decode();
     return text;
   } finally {
-    void reader.cancel();
+    // `cancel()` REJECTS when the stream is already errored — a reset
+    // connection, or this request's own `AbortSignal` firing mid-read (the
+    // exact case the module header documents). `void` discards the promise
+    // but not the rejection, which then has no handler and terminates the
+    // process under Node's default `--unhandled-rejections=throw` — and the
+    // dumped cause chain can carry the Authorization header. Whatever errored
+    // the stream is already the value the caller classifies; this second copy
+    // of it is genuinely nothing to report.
+    void reader.cancel().catch(() => undefined);
   }
 }
 
