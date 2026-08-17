@@ -184,10 +184,15 @@ export const REFRESH_REASONS = [
   // linear (T3): env.LINEAR_API_KEY absent — refused before any network
   // call, not a rejection by Linear.
   "no-key",
-  // linear (T3): Linear returned HTTP 401 for the raw key it was sent —
-  // github's credential-rejection equivalent is bad-credentials above, not
-  // this token; the two providers never share a reason for the same shape
-  // of failure.
+  // linear (T3): Linear returned HTTP 401 for the raw key it was sent, or
+  // HTTP 400 for the same key sent Bearer-prefixed by mistake (probed
+  // real: Linear's GraphQL endpoint treats a "Bearer <key>" Authorization
+  // header as a malformed request, not a credential it evaluates and
+  // rejects — but the underlying mistake is the same wrong key
+  // presentation, so both statuses dispatch here) — github's
+  // credential-rejection equivalent is bad-credentials above, not this
+  // token; the two providers never share a reason for the same shape of
+  // failure.
   "bad-key",
   // linear (T3): the response body was not parseable JSON. Also github's
   // (T2 runGh) own defensive catch-all — an exceeded maxBuffer (ENOBUFS) or

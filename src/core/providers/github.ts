@@ -12,42 +12,67 @@
  * needed, so an escape-hatch ref with a `null` url still resolves fine.
  *
  * **Status derivation precedence** (epic risk note 2, probed real):
- * `pull_request.merged_at` present → `merged`; else top-level `draft ===
- * true` → `draft`; else the raw `state` field (`open`/`closed`) passed
- * through. A merged PR is reported `merged` regardless of what `draft` or
- * `state` also say — see {@link deriveStatus}.
+ * `pull_request.merged_at` present and non-empty → `merged`; else top-level
+ * `draft === true` → `draft`; else the raw `state` field (`open`/`closed`)
+ * passed through. A merged PR is reported `merged` regardless of what
+ * `draft` or `state` also say — see {@link deriveStatus}.
  */
 
 import { runGh } from "../git.js";
-import { MAX_CACHED_TITLE_LENGTH } from "../refs/parse.js";
+import { MAX_EXTERNAL_ID_LENGTH } from "../refs/parse.js";
 import type { Ref } from "../refs/types.js";
-import { CONTROL_CHARS_PATTERN, capText } from "../text.js";
+import { parseJsonObject, sanitizeProviderTitle } from "./shared.js";
 import type { Provider, ProviderResult } from "./types.js";
 
 /**
  * `owner/repo#n`, re-derived from `ref.externalId` with this provider's own
  * strict pattern — never trusted from `ref.provider === "github"` alone
  * (epic risk note 3). `validateExplicitRef`'s `--provider/--id/--url` escape
- * hatch stores any id string under any provider name, so a hostile id
- * shaped like a `gh` flag (`-R evil/repo`, `--jq .token`) must refuse before
- * it ever becomes an argv element passed to {@link runGh} — matching the
- * shape is not the same question as "is this safe to spawn with", and this
- * pattern answers both at once by being anchored end to end: an input the
- * character classes allow piece-by-piece but that carries one extra
- * character anywhere (a space, a second `#`, a trailing letter on the issue
- * number) still refuses whole, never partially matches and falls through.
+ * hatch stores any id string under any provider name, so a hostile id must
+ * be refused before its pieces are spliced into an argv element passed to
+ * {@link runGh}.
  *
- * Owner/repo characters are `[A-Za-z0-9._-]` only — GitHub's own charset,
- * permissive but closed, the same one `refs/parse.ts`'s bare-form pattern
- * documents as "a lossless round trip through GitHub's own naming"; `n` is
- * digits only.
+ * **What actually prevents flag injection is the constant `repos/` prefix**
+ * on the argv element {@link resolve} builds
+ * (`` repos/${owner}/${repo}/issues/${n} ``), not this pattern's charset:
+ * `owner` never becomes the *first* character of the string handed to
+ * `execFileSync` — that position is permanently `r` — so even a value
+ * starting with `-` cannot make `gh` read the argument as a flag. This
+ * pattern's job is narrower and separate: refuse a shape that is not a
+ * plausible `owner/repo#n` at all (a space, a stray `#`, an embedded
+ * `$()`/`;` — see the hostile-shape tests) and match GitHub's own naming
+ * rules closely enough that a legitimate owner/repo round-trips.
+ *
+ * Each segment requires a non-`-` first character
+ * (`[A-Za-z0-9._][A-Za-z0-9._-]*`) — GitHub itself does not allow a
+ * repository or owner name to start with a hyphen either, so this also
+ * happens to reject `-foo/bar#1`, but that is a shape correction, not the
+ * safety mechanism described above. `n` is digits only.
+ *
+ * A segment that is exactly `.` or `..` passes this charset (neither
+ * character is forbidden on its own) but is refused separately by
+ * {@link isDotSegment} — the identical special case `refs/parse.ts`'s own
+ * `isCleanSegment` carves out, for the same reason cited there: ordinary
+ * path handling treats `.`/`..` specially, so a segment meant to name a
+ * GitHub owner or repo should never silently be one of those two reserved
+ * tokens instead.
  */
-const GITHUB_EXTERNAL_ID_PATTERN = /^([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)#([0-9]+)$/;
+const GITHUB_EXTERNAL_ID_PATTERN =
+  /^([A-Za-z0-9._][A-Za-z0-9._-]*)\/([A-Za-z0-9._][A-Za-z0-9._-]*)#([0-9]+)$/;
+
+/** True for exactly `.` or `..` — see {@link GITHUB_EXTERNAL_ID_PATTERN}'s docs. */
+function isDotSegment(segment: string): boolean {
+  return segment === "." || segment === "..";
+}
 
 /**
- * The four katra-side statuses a GitHub ref can resolve to (epic risk note
- * 10) — derived, never a raw GitHub field read verbatim. Order matches
- * {@link deriveStatus}'s precedence, not alphabetical.
+ * The katra-side statuses a GitHub ref can resolve to (epic risk note 10) —
+ * derived, never a raw GitHub field read verbatim. Order matches
+ * {@link deriveStatus}'s precedence, not alphabetical. Kept only as the
+ * source `GithubStatus` derives from (typescript-tips: derive types from
+ * values) — {@link deriveStatus}'s own return type already closes off
+ * anything outside this set at compile time, so nothing downstream
+ * re-validates membership at runtime.
  */
 const GITHUB_STATUSES = ["merged", "draft", "open", "closed"] as const;
 type GithubStatus = (typeof GITHUB_STATUSES)[number];
@@ -65,26 +90,16 @@ interface GithubIssueBody {
   readonly pull_request: unknown;
 }
 
-/** Parses `stdout` as a GitHub issue/PR body, or `undefined` for anything that is not a JSON object — never throws. */
-function parseIssueBody(stdout: string): GithubIssueBody | undefined {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    return undefined;
-  }
-  if (parsed === null || typeof parsed !== "object") return undefined;
-  return parsed as GithubIssueBody;
-}
-
 /**
  * Applies the precedence documented in this module's header, reading
  * `merged_at` from inside `pull_request` (never a top-level field) and
  * validating `state` against exactly `"open"`/`"closed"` rather than
  * trusting it — this is an HTTP response body, not a value katra produced.
- * Returns `undefined` when none of the three branches produces a known
- * status, so the caller can degrade to `malformed-response` instead of
- * guessing.
+ * `merged_at` must be a **non-empty** string: an empty string is not a
+ * timestamp, and a response shaped that way should fall through to the
+ * `draft`/`state` checks rather than being read as "merged". Returns
+ * `undefined` when none of the three branches produces a known status, so
+ * the caller can degrade to `malformed-response` instead of guessing.
  */
 function deriveStatus(body: GithubIssueBody): GithubStatus | undefined {
   const pullRequest = body.pull_request;
@@ -92,60 +107,49 @@ function deriveStatus(body: GithubIssueBody): GithubStatus | undefined {
     pullRequest !== null && typeof pullRequest === "object"
       ? (pullRequest as { readonly merged_at?: unknown }).merged_at
       : undefined;
-  if (typeof mergedAt === "string") return "merged";
+  if (typeof mergedAt === "string" && mergedAt.length > 0) return "merged";
   if (body.draft === true) return "draft";
   if (body.state === "open" || body.state === "closed") return body.state;
   return undefined;
 }
 
-/**
- * Bounds a provider-supplied title the same way the write seam
- * (`refs/repo.ts`'s `applyRefreshWithin`) backstops it one layer down:
- * screened of every control character via the imported
- * {@link CONTROL_CHARS_PATTERN} (never a second copy of the character
- * class), then capped to {@link MAX_CACHED_TITLE_LENGTH} code points with
- * {@link capText} (epic risk note 7). Never refuses: a control character or
- * an oversized title is not a reason to fail the whole resolve, only to
- * bound what comes out of it. A non-string `title` (missing from the
- * response) becomes `null` — "no title" is an ordinary outcome, not a
- * parse failure.
- */
-function sanitizeTitle(title: unknown): string | null {
-  if (typeof title !== "string") return null;
-  const screened = title.replaceAll(new RegExp(CONTROL_CHARS_PATTERN.source, "g"), "");
-  return capText(screened, MAX_CACHED_TITLE_LENGTH).text;
-}
-
 async function resolve(ref: Ref, env: NodeJS.ProcessEnv): Promise<ProviderResult> {
+  if (ref.externalId.length > MAX_EXTERNAL_ID_LENGTH) {
+    return { resolved: false, reason: "bad-shape" };
+  }
+
   const shape = GITHUB_EXTERNAL_ID_PATTERN.exec(ref.externalId);
   if (shape === null) {
     return { resolved: false, reason: "bad-shape" };
   }
   const [, owner, repo, n] = shape;
+  if (owner === undefined || repo === undefined || n === undefined) {
+    return { resolved: false, reason: "bad-shape" };
+  }
+  if (isDotSegment(owner) || isDotSegment(repo)) {
+    return { resolved: false, reason: "bad-shape" };
+  }
 
   const result = runGh(env, ["api", `repos/${owner}/${repo}/issues/${n}`]);
   if (!result.ok) {
     return { resolved: false, reason: result.reason };
   }
 
-  const body = parseIssueBody(result.stdout);
-  if (body === undefined) {
+  const raw = parseJsonObject(result.stdout);
+  if (raw === undefined) {
     return { resolved: false, reason: "malformed-response" };
   }
+  const body = raw as GithubIssueBody;
 
   const status = deriveStatus(body);
-  if (status === undefined || !GITHUB_STATUSES.includes(status)) {
+  if (status === undefined) {
     return { resolved: false, reason: "malformed-response" };
   }
 
   return {
     resolved: true,
-    // No capText here, unlike title: status has already passed the
-    // vocabulary check above, a strictly stronger guarantee than a length
-    // bound for a fixed set of short literals — capping past it would cap
-    // nothing real.
     status,
-    title: sanitizeTitle(body.title),
+    title: sanitizeProviderTitle(body.title),
   };
 }
 

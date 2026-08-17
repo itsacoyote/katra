@@ -7,20 +7,28 @@
  * derivation, and reason dispatch, never a real `gh` or a real network call.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GhResult } from "../../src/core/git.js";
 import { githubProvider } from "../../src/core/providers/github.js";
-import { linearProvider } from "../../src/core/providers/linear.js";
+import {
+  LINEAR_MAX_BODY_BYTES,
+  LINEAR_TIMEOUT_MS,
+  linearProvider,
+} from "../../src/core/providers/linear.js";
 import { PROVIDERS, providerFor } from "../../src/core/providers/registry.js";
 import type { ProviderResult } from "../../src/core/providers/types.js";
-import { MAX_CACHED_TITLE_LENGTH } from "../../src/core/refs/parse.js";
+import { MAX_CACHED_TITLE_LENGTH, MAX_EXTERNAL_ID_LENGTH } from "../../src/core/refs/parse.js";
 import type { Ref } from "../../src/core/refs/types.js";
 
 /** A raw BEL control byte, built via `fromCharCode` — house rule: no raw control bytes as literals in a committed file. */
 const BEL = String.fromCharCode(7);
+/** A literal double quote, built via `fromCharCode` to avoid escaping it inside double-quoted source. */
+const DQUOTE = String.fromCharCode(34);
+/** A literal backslash, built via `fromCharCode` for the same reason. */
+const BACKSLASH = String.fromCharCode(92);
 
 /** A fake key, obviously not a real one — house rule: tests use sentinel strings only, never a real credential. */
 const LINEAR_KEY_SENTINEL = "lin_test_sentinel_not_a_real_key_000000";
@@ -81,27 +89,87 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-/** Builds a fake `Response` carrying just what `linear.ts` reads: `status`, `ok`, `text()`. */
-function fakeResponse(status: number, body: string): Response {
+/** A real `ReadableStream` yielding `text` as UTF-8 bytes in one chunk — `readBounded` reads a genuine stream, so the fixture is a genuine stream too, not a `.text()` stand-in. */
+function textStream(text: string): ReadableStream<Uint8Array> {
+  const bytes = new TextEncoder().encode(text);
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(bytes);
+      controller.close();
+    },
+  });
+}
+
+/** A real `ReadableStream` yielding a single all-zero chunk of `byteLength` bytes — for proving `readBounded`'s size bound fires on a real streamed read, not a pre-materialized string. */
+function oversizedStream(byteLength: number): ReadableStream<Uint8Array> {
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new Uint8Array(byteLength));
+      controller.close();
+    },
+  });
+}
+
+/** Builds a fake `Response` carrying just what `linear.ts` reads: `status`, `ok`, and a real streamed `body`. */
+function fakeResponse(status: number, body: ReadableStream<Uint8Array>): Response {
   return {
     status,
     ok: status >= 200 && status < 300,
-    text: () => Promise.resolve(body),
+    body,
   } as unknown as Response;
 }
 
 // --- structural: no provider file reads process.env directly ---------------
 
 describe("env injection", () => {
-  it("neither provider file references process.env", () => {
-    const root = fileURLToPath(new URL("../../src/core/providers", import.meta.url));
-    const stripComments = (source: string): string =>
-      source.replaceAll(/\/\*[\s\S]*?\*\//g, "").replaceAll(/\/\/[^\n]*/g, "");
+  /**
+   * Strips block comments entirely, and strips a `//` line comment only
+   * when `//` is the first non-whitespace content on its line — never a
+   * `//` appearing later in the line, which would otherwise treat the rest
+   * of a string literal (a `https://...` URL, most notably) as a comment
+   * and silently hide real code from the scan below.
+   */
+  function stripComments(source: string): string {
+    const withoutBlockComments = source.replaceAll(/\/\*[\s\S]*?\*\//g, "");
+    return withoutBlockComments
+      .split("\n")
+      .map((line) => (/^\s*\/\//.test(line) ? "" : line))
+      .join("\n");
+  }
 
-    for (const file of ["github.ts", "linear.ts", "registry.ts", "types.ts"]) {
+  function providerSourceFiles(): { readonly root: string; readonly files: readonly string[] } {
+    const root = fileURLToPath(new URL("../../src/core/providers", import.meta.url));
+    const files = readdirSync(root, { withFileTypes: true })
+      .filter(
+        (entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"),
+      )
+      .map((entry) => entry.name);
+    return { root, files };
+  }
+
+  it("no provider source file references the process global, directly or via node:process", () => {
+    const { root, files } = providerSourceFiles();
+    // Globbed, not a hardcoded list — a new file under providers/ (shared.ts
+    // today, anything added later) is covered automatically.
+    expect(files.length).toBeGreaterThanOrEqual(4);
+
+    for (const file of files) {
       const source = stripComments(readFileSync(join(root, file), "utf8"));
-      expect(source, `${file} must not reference process.env`).not.toMatch(/\bprocess\.env\b/);
+      // The whole `process` token, not just `process.env`: a destructuring
+      // read (`const { env } = process`) or `node:process` import specifier
+      // never contains the substring "process.env" at all, and a narrower
+      // pattern would miss both.
+      expect(source, `${file} must not reference process`).not.toMatch(/\bprocess\b/);
     }
+  });
+
+  it("strips only full-line comments, leaving a URL literal containing // intact", () => {
+    const { root } = providerSourceFiles();
+    const source = readFileSync(join(root, "linear.ts"), "utf8");
+
+    const stripped = stripComments(source);
+
+    expect(stripped).toContain("https://api.linear.app/graphql");
   });
 });
 
@@ -127,7 +195,28 @@ describe("providerFor", () => {
 // --- github: strict shape re-derivation -------------------------------------
 
 describe("github provider: strict-shape refusals", () => {
-  const hostileIds = ["-R evil/repo", "--jq .token", "a b#1", "owner/repo#1x"];
+  const hostileIds = [
+    // Structurally mismatched — no amount of charset tuning matters, these
+    // never look like owner/repo#n at all.
+    "-R evil/repo",
+    "--jq .token",
+    "a b#1",
+    "owner/repo#1x",
+    // Skeleton-CONFORMING — each of these has the owner/repo#n shape (a
+    // '/', a '#', trailing digits) and is refused only because a
+    // character inside a segment falls outside the allowed charset. These
+    // are what actually prove the charset restriction is doing work, not
+    // just the overall anchored shape.
+    "-R evil/repo#1",
+    "a b/c#1",
+    "own;er/repo#1",
+    "owner/re$(id)po#1",
+    // '.'/'..' segments: charset-legal on their own, refused separately by
+    // isDotSegment.
+    "-foo/bar#1",
+    "../..#1",
+    "own/..#1",
+  ];
 
   it.each(hostileIds)("refuses %s as bad-shape with zero gh spawns", async (externalId) => {
     const ref = buildRef({ provider: "github", externalId });
@@ -136,6 +225,37 @@ describe("github provider: strict-shape refusals", () => {
 
     expect(result).toEqual({ resolved: false, reason: "bad-shape" });
     expect(runGhHook.calls).toEqual([]);
+  });
+});
+
+describe("github provider: externalId length precheck", () => {
+  it("refuses an externalId over MAX_EXTERNAL_ID_LENGTH as bad-shape before any spawn", async () => {
+    // Otherwise pattern-legal (a valid owner, a valid repo, digits) — only
+    // its length is the problem, so this fails only if the length precheck
+    // itself is missing, not because the shape check would also catch it.
+    const longId = `${"a".repeat(MAX_EXTERNAL_ID_LENGTH)}/repo#1`;
+    const ref = buildRef({ provider: "github", externalId: longId });
+
+    const result = await githubProvider.resolve(ref, {});
+
+    expect(result).toEqual({ resolved: false, reason: "bad-shape" });
+    expect(runGhHook.calls).toEqual([]);
+  });
+});
+
+// --- github: exact request shape --------------------------------------------
+
+describe("github provider: exact request shape", () => {
+  it("calls gh with exactly one argv element, repos/{owner}/{repo}/issues/{n}", async () => {
+    const ref = buildRef({ provider: "github", externalId: "acme/app#128" });
+    runGhHook.impl = () => ({
+      ok: true,
+      stdout: JSON.stringify({ state: "open", title: "x", draft: false, pull_request: null }),
+    });
+
+    await githubProvider.resolve(ref, {});
+
+    expect(runGhHook.calls).toEqual([["api", "repos/acme/app/issues/128"]]);
   });
 });
 
@@ -201,6 +321,19 @@ describe("github provider: status derivation", () => {
     const result = await githubProvider.resolve(ref, {});
 
     expect(result).toEqual({ resolved: true, status: "open", title: "Ready for review" });
+  });
+
+  it("does not derive merged when merged_at is an empty string", async () => {
+    stubIssue({
+      state: "open",
+      title: "Not actually merged",
+      draft: false,
+      pull_request: { merged_at: "" },
+    });
+
+    const result = await githubProvider.resolve(ref, {});
+
+    expect(result).toEqual({ resolved: true, status: "open", title: "Not actually merged" });
   });
 
   it("caps a title over MAX_CACHED_TITLE_LENGTH to exactly the constant", async () => {
@@ -276,8 +409,34 @@ describe("github provider: runGh failure reasons map 1:1", () => {
 // --- linear: strict shape re-derivation -------------------------------------
 
 describe("linear provider: strict-shape refusals", () => {
-  it("refuses a malformed external id as bad-shape with zero fetch calls", async () => {
-    const ref = buildRef({ provider: "linear", externalId: `TEAM${BEL}-123` });
+  const hostileIds = [
+    `TEAM${BEL}-123`,
+    // Skeleton-CONFORMING: each still looks close to LETTERS-DIGITS, and is
+    // refused only because a character falls outside the allowed charset —
+    // exactly the characters that matter for GraphQL string-literal
+    // injection (a quote or a backslash breaking out of the embedded
+    // string, braces reshaping the query itself).
+    `ABC${DQUOTE}-1`,
+    `AB${BACKSLASH}C-1`,
+    `ABC-1${DQUOTE}) { x } #-1`,
+  ];
+
+  it.each(hostileIds)("refuses %s as bad-shape with zero fetch calls", async (externalId) => {
+    const ref = buildRef({ provider: "linear", externalId });
+
+    const result = await linearProvider.resolve(ref, { LINEAR_API_KEY: LINEAR_KEY_SENTINEL });
+
+    expect(result).toEqual({ resolved: false, reason: "bad-shape" });
+    expect(fetchCalls).toEqual([]);
+  });
+});
+
+describe("linear provider: externalId length precheck", () => {
+  it("refuses an externalId over MAX_EXTERNAL_ID_LENGTH as bad-shape before any fetch", async () => {
+    // Otherwise pattern-legal (letters, a hyphen, digits) — only its length
+    // is the problem.
+    const longId = `${"A".repeat(MAX_EXTERNAL_ID_LENGTH)}-1`;
+    const ref = buildRef({ provider: "linear", externalId: longId });
 
     const result = await linearProvider.resolve(ref, { LINEAR_API_KEY: LINEAR_KEY_SENTINEL });
 
@@ -299,16 +458,18 @@ describe("linear provider: no-key short circuit", () => {
   });
 });
 
-// --- linear: raw-key auth header --------------------------------------------
+// --- linear: exact request shape, raw-key auth ------------------------------
 
-describe("linear provider: raw-key auth", () => {
-  it("sends the raw key with no Bearer prefix", async () => {
+describe("linear provider: exact request shape", () => {
+  it("POSTs to the literal endpoint, raw key, expected query, and a real AbortSignal", async () => {
     const ref = buildRef({ provider: "linear", externalId: "ABC-1" });
     fetchImpl = () =>
       Promise.resolve(
         fakeResponse(
           200,
-          JSON.stringify({ data: { issue: { title: "x", state: { type: "started" } } } }),
+          textStream(
+            JSON.stringify({ data: { issue: { title: "x", state: { type: "started" } } } }),
+          ),
         ),
       );
 
@@ -317,9 +478,21 @@ describe("linear provider: raw-key auth", () => {
     expect(fetchCalls).toHaveLength(1);
     const call = fetchCalls[0];
     expect(call).toBeDefined();
+
+    // The literal endpoint, never re-derived from the module under test —
+    // an independent expected value, so a url swap in the source fails
+    // this assertion rather than silently agreeing with itself.
+    expect(call?.url).toBe("https://api.linear.app/graphql");
+    expect(call?.init?.method).toBe("POST");
+    expect(call?.init?.signal).toBeInstanceOf(AbortSignal);
+
     const headers = call?.init?.headers as Record<string, string>;
     expect(headers.Authorization).toBe(LINEAR_KEY_SENTINEL);
     expect(headers.Authorization?.startsWith("Bearer")).toBe(false);
+
+    const parsedBody = JSON.parse(call?.init?.body as string) as { query: string };
+    expect(parsedBody.query).toContain('issue(id: "ABC-1")');
+    expect(parsedBody.query).toContain("state { type }");
   });
 });
 
@@ -332,14 +505,16 @@ describe("linear provider: status source", () => {
       Promise.resolve(
         fakeResponse(
           200,
-          JSON.stringify({
-            data: {
-              issue: {
-                title: "x",
-                state: { type: "started", name: "In Progress (custom label)" },
+          textStream(
+            JSON.stringify({
+              data: {
+                issue: {
+                  title: "x",
+                  state: { type: "started", name: "In Progress (custom label)" },
+                },
               },
-            },
-          }),
+            }),
+          ),
         ),
       );
 
@@ -354,7 +529,9 @@ describe("linear provider: status source", () => {
       Promise.resolve(
         fakeResponse(
           200,
-          JSON.stringify({ data: { issue: { title: "x", state: { type: "In Progress" } } } }),
+          textStream(
+            JSON.stringify({ data: { issue: { title: "x", state: { type: "In Progress" } } } }),
+          ),
         ),
       );
 
@@ -371,11 +548,43 @@ describe("linear provider: dispatch table", () => {
   const env = { LINEAR_API_KEY: LINEAR_KEY_SENTINEL };
 
   it("401 dispatches to bad-key", async () => {
-    fetchImpl = () => Promise.resolve(fakeResponse(401, JSON.stringify({})));
+    fetchImpl = () => Promise.resolve(fakeResponse(401, textStream("{}")));
 
     const result = await linearProvider.resolve(ref, env);
 
     expect(result).toEqual({ resolved: false, reason: "bad-key" });
+  });
+
+  it("400 dispatches to bad-key (the Bearer-prefixed-key mistake)", async () => {
+    fetchImpl = () => Promise.resolve(fakeResponse(400, textStream("{}")));
+
+    const result = await linearProvider.resolve(ref, env);
+
+    expect(result).toEqual({ resolved: false, reason: "bad-key" });
+  });
+
+  it("429 dispatches to network", async () => {
+    fetchImpl = () => Promise.resolve(fakeResponse(429, textStream("{}")));
+
+    const result = await linearProvider.resolve(ref, env);
+
+    expect(result).toEqual({ resolved: false, reason: "network" });
+  });
+
+  it("503 dispatches to network", async () => {
+    fetchImpl = () => Promise.resolve(fakeResponse(503, textStream("{}")));
+
+    const result = await linearProvider.resolve(ref, env);
+
+    expect(result).toEqual({ resolved: false, reason: "network" });
+  });
+
+  it("a generic non-ok status dispatches to malformed-response", async () => {
+    fetchImpl = () => Promise.resolve(fakeResponse(403, textStream("{}")));
+
+    const result = await linearProvider.resolve(ref, env);
+
+    expect(result).toEqual({ resolved: false, reason: "malformed-response" });
   });
 
   it("200 with errors and null data dispatches to not-found", async () => {
@@ -383,25 +592,13 @@ describe("linear provider: dispatch table", () => {
       Promise.resolve(
         fakeResponse(
           200,
-          JSON.stringify({ data: null, errors: [{ message: "Entity not found" }] }),
+          textStream(JSON.stringify({ data: null, errors: [{ message: "Entity not found" }] })),
         ),
       );
 
     const result = await linearProvider.resolve(ref, env);
 
     expect(result).toEqual({ resolved: false, reason: "not-found" });
-  });
-
-  it("an aborting fetch dispatches to timeout", async () => {
-    fetchImpl = () => {
-      const timeoutError = new Error("The operation timed out");
-      timeoutError.name = "TimeoutError";
-      return Promise.reject(timeoutError);
-    };
-
-    const result = await linearProvider.resolve(ref, env);
-
-    expect(result).toEqual({ resolved: false, reason: "timeout" });
   });
 
   it("a plain network throw dispatches to network", async () => {
@@ -413,12 +610,57 @@ describe("linear provider: dispatch table", () => {
   });
 
   it("unparseable JSON dispatches to malformed-response", async () => {
-    fetchImpl = () => Promise.resolve(fakeResponse(200, "not json"));
+    fetchImpl = () => Promise.resolve(fakeResponse(200, textStream("not json")));
 
     const result = await linearProvider.resolve(ref, env);
 
     expect(result).toEqual({ resolved: false, reason: "malformed-response" });
   });
+
+  it("a body over LINEAR_MAX_BODY_BYTES dispatches to malformed-response", async () => {
+    fetchImpl = () =>
+      Promise.resolve(fakeResponse(200, oversizedStream(LINEAR_MAX_BODY_BYTES + 1)));
+
+    const result = await linearProvider.resolve(ref, env);
+
+    expect(result).toEqual({ resolved: false, reason: "malformed-response" });
+  });
+
+  // Real time, not faked: AbortSignal.timeout's internal timer is not
+  // guaranteed to be driven by vitest's fake-timer patching of the global
+  // setTimeout, so this proves the actual wiring end to end — the mock
+  // fetch waits on the real signal firing, exactly as real undici would.
+  // A signal-deletion mutation makes this fail fast (no signal reaches the
+  // mock at all) rather than after the wait.
+  it(
+    "a fetch that stalls past AbortSignal.timeout reaches the timeout branch",
+    async () => {
+      fetchImpl = (_url, init) =>
+        new Promise((_resolve, reject) => {
+          const signal = init?.signal;
+          if (signal === undefined || signal === null) {
+            reject(new Error("expected an AbortSignal on init.signal"));
+            return;
+          }
+          if (signal.aborted) {
+            const err = new Error("The operation was aborted due to timeout");
+            err.name = "TimeoutError";
+            reject(err);
+            return;
+          }
+          signal.addEventListener("abort", () => {
+            const err = new Error("The operation was aborted due to timeout");
+            err.name = "TimeoutError";
+            reject(err);
+          });
+        });
+
+      const result = await linearProvider.resolve(ref, env);
+
+      expect(result).toEqual({ resolved: false, reason: "timeout" });
+    },
+    LINEAR_TIMEOUT_MS + 5000,
+  );
 });
 
 // --- linear: title bounding, matching github's ------------------------------
@@ -433,9 +675,11 @@ describe("linear provider: title bounding", () => {
       Promise.resolve(
         fakeResponse(
           200,
-          JSON.stringify({
-            data: { issue: { title: longTitle, state: { type: "backlog" } } },
-          }),
+          textStream(
+            JSON.stringify({
+              data: { issue: { title: longTitle, state: { type: "backlog" } } },
+            }),
+          ),
         ),
       );
 
@@ -452,9 +696,11 @@ describe("linear provider: title bounding", () => {
       Promise.resolve(
         fakeResponse(
           200,
-          JSON.stringify({
-            data: { issue: { title: `bad${BEL}title`, state: { type: "backlog" } } },
-          }),
+          textStream(
+            JSON.stringify({
+              data: { issue: { title: `bad${BEL}title`, state: { type: "backlog" } } },
+            }),
+          ),
         ),
       );
 
@@ -473,12 +719,14 @@ describe("key hygiene", () => {
 
     const scenarios: Array<() => Promise<ProviderResult>> = [
       () => {
-        fetchImpl = () => Promise.resolve(fakeResponse(401, "{}"));
+        fetchImpl = () => Promise.resolve(fakeResponse(401, textStream("{}")));
         return linearProvider.resolve(ref, env);
       },
       () => {
         fetchImpl = () =>
-          Promise.resolve(fakeResponse(200, JSON.stringify({ data: null, errors: [] })));
+          Promise.resolve(
+            fakeResponse(200, textStream(JSON.stringify({ data: null, errors: [] }))),
+          );
         return linearProvider.resolve(ref, env);
       },
       () => {
@@ -486,7 +734,7 @@ describe("key hygiene", () => {
         return linearProvider.resolve(ref, env);
       },
       () => {
-        fetchImpl = () => Promise.resolve(fakeResponse(200, "not json"));
+        fetchImpl = () => Promise.resolve(fakeResponse(200, textStream("not json")));
         return linearProvider.resolve(ref, env);
       },
     ];
