@@ -158,11 +158,6 @@ export function isolatedNoGhEnv(): { readonly env: NodeJS.ProcessEnv; cleanup():
   return { env, cleanup: bin.cleanup };
 }
 
-/**
- * A PATH env whose `gh` is a stub answering every invocation with
- * `responseBody` — shared by refresh.test.ts and f8-feature.test.ts, the
- * same consolidation writeGitWrapper got one commit earlier.
- */
 export /**
  * `isolatedNoGhEnv`, plus a `gh` on that same isolated `PATH` that always
  * answers `responseBody` verbatim, whatever it is asked — a fake CLI, not a
@@ -181,6 +176,9 @@ export /**
  * never by `PATH`), and the script body writes the response with nothing
  * but Node's own `process.stdout`, so no external command is on the
  * critical path at all.
+ *
+ * Shared by refresh.test.ts and f8-feature.test.ts — the same consolidation
+ * `writeGitWrapper` got one commit earlier.
  */
 function stubbedGhEnv(responseBody: string): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
   const bin = createNonRepoDir();
