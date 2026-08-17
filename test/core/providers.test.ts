@@ -705,9 +705,7 @@ describe("linear provider: title bounding", () => {
       Promise.resolve(
         fakeResponse(
           200,
-          textStream(
-            JSON.stringify({ data: { issue: { title, state: { type: "backlog" } } } }),
-          ),
+          textStream(JSON.stringify({ data: { issue: { title, state: { type: "backlog" } } } })),
         ),
       );
 
