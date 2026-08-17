@@ -21,48 +21,12 @@ import {
   createGitRepo,
   createNonRepoDir,
   isolatedNoGhEnv,
+  stubbedGhEnv,
   writeGitWrapper,
 } from "../helpers/fixture.js";
 
 /** Absolute path to better-sqlite3's own entry point — resolved from this file, then embedded verbatim into a generated script that lives outside the project tree and cannot resolve the bare specifier itself. */
 const BETTER_SQLITE3_PATH = createRequire(import.meta.url).resolve("better-sqlite3");
-
-/**
- * `isolatedNoGhEnv`, plus a `gh` on that same isolated `PATH` that always
- * answers `responseBody` verbatim, whatever it is asked — a fake CLI, not a
- * mock of `runGh`: this suite runs `refresh` through the real, in-process
- * CLI end to end, so the double has to be a real, spawnable executable, the
- * same technique `with-store.test.ts`'s `countingGit` uses for `git`.
- *
- * **A Node script, not a shell one.** A first version shelled out to `cat`/
- * `dirname` to read the response back from a sibling file — both external
- * commands, resolved via the child's own `PATH` at run time, which is
- * exactly the narrow, `gh`-excluding `PATH` this environment hands it. That
- * `PATH` has no `cat`/`dirname` on it either, so the script itself failed
- * to run and `refresh` read the empty/garbled result as `malformed-response`
- * — a real failure this exact suite hit once. The shebang points at
- * `process.execPath` (an absolute path, resolved by the kernel directly,
- * never by `PATH`), and the script body writes the response with nothing
- * but Node's own `process.stdout`, so no external command is on the
- * critical path at all.
- */
-function stubbedGhEnv(responseBody: string): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
-  const bin = createNonRepoDir();
-  writeGitWrapper(bin.dir);
-
-  const ghScript = join(bin.dir, "gh");
-  writeFileSync(
-    ghScript,
-    `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(responseBody)});\n`,
-    "utf8",
-  );
-  chmodSync(ghScript, 0o755);
-
-  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
-  delete env.LINEAR_API_KEY;
-
-  return { env, cleanup: bin.cleanup };
-}
 
 /**
  * `stubbedGhEnv`, except the `gh` double first deletes the ref's own

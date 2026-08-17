@@ -11,14 +11,12 @@
  * one store.
  */
 
-import { chmodSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import type { RefreshResult } from "../../src/core/contract.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
-import { createGitRepo, createNonRepoDir, writeGitWrapper } from "../helpers/fixture.js";
+import { createGitRepo, stubbedGhEnv } from "../helpers/fixture.js";
 
 /**
  * A `gh api repos/{owner}/{repo}/issues/{n}` body for a merged PR — the same
@@ -31,35 +29,6 @@ const MERGED_BODY = JSON.stringify({
   draft: false,
   pull_request: { merged_at: "2026-01-01T00:00:00Z" },
 });
-
-/**
- * A `gh` on an isolated PATH that always answers `responseBody`, with no
- * `LINEAR_API_KEY` — the identical technique `refresh.test.ts`'s own
- * `stubbedGhEnv` uses, including the reason it is a Node script rather than
- * a shell one: the narrow PATH this hands the child has no `cat`/`dirname`
- * either, so a script that shelled out to read its own response back from a
- * sibling file would fail to run at all. Kept local rather than imported:
- * only the genuinely shared primitive (`writeGitWrapper`) lives in
- * `fixture.ts` — a story-shaped double like this one stays with the story
- * that needs it, the same way `refresh.test.ts`'s own copy does.
- */
-function stubbedGhEnv(responseBody: string): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
-  const bin = createNonRepoDir();
-  writeGitWrapper(bin.dir);
-
-  const ghScript = join(bin.dir, "gh");
-  writeFileSync(
-    ghScript,
-    `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(responseBody)});\n`,
-    "utf8",
-  );
-  chmodSync(ghScript, 0o755);
-
-  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
-  delete env.LINEAR_API_KEY;
-
-  return { env, cleanup: bin.cleanup };
-}
 
 let repo: GitFixture;
 const cleanups: Array<() => void> = [];

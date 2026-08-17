@@ -426,7 +426,7 @@ const TITLE_WIDTH = 44;
  * grows a longer entry; deriving it makes that a compile-time-adjacent fact
  * instead of something only a render catches.
  */
-const EVENT_TYPE_WIDTH = EVENT_TYPES.reduce((widest, type) => Math.max(widest, textWidth(type)), 0);
+const EVENT_TYPE_WIDTH = columnWidth(EVENT_TYPES, (type) => type);
 
 /**
  * How much room `search`'s snippet line gets before it is cut.

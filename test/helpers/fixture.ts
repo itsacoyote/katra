@@ -157,3 +157,45 @@ export function isolatedNoGhEnv(): { readonly env: NodeJS.ProcessEnv; cleanup():
 
   return { env, cleanup: bin.cleanup };
 }
+
+/**
+ * A PATH env whose `gh` is a stub answering every invocation with
+ * `responseBody` — shared by refresh.test.ts and f8-feature.test.ts, the
+ * same consolidation writeGitWrapper got one commit earlier.
+ */
+export /**
+ * `isolatedNoGhEnv`, plus a `gh` on that same isolated `PATH` that always
+ * answers `responseBody` verbatim, whatever it is asked — a fake CLI, not a
+ * mock of `runGh`: this suite runs `refresh` through the real, in-process
+ * CLI end to end, so the double has to be a real, spawnable executable, the
+ * same technique `with-store.test.ts`'s `countingGit` uses for `git`.
+ *
+ * **A Node script, not a shell one.** A first version shelled out to `cat`/
+ * `dirname` to read the response back from a sibling file — both external
+ * commands, resolved via the child's own `PATH` at run time, which is
+ * exactly the narrow, `gh`-excluding `PATH` this environment hands it. That
+ * `PATH` has no `cat`/`dirname` on it either, so the script itself failed
+ * to run and `refresh` read the empty/garbled result as `malformed-response`
+ * — a real failure this exact suite hit once. The shebang points at
+ * `process.execPath` (an absolute path, resolved by the kernel directly,
+ * never by `PATH`), and the script body writes the response with nothing
+ * but Node's own `process.stdout`, so no external command is on the
+ * critical path at all.
+ */
+function stubbedGhEnv(responseBody: string): { readonly env: NodeJS.ProcessEnv; cleanup(): void } {
+  const bin = createNonRepoDir();
+  writeGitWrapper(bin.dir);
+
+  const ghScript = join(bin.dir, "gh");
+  writeFileSync(
+    ghScript,
+    `#!${process.execPath}\nprocess.stdout.write(${JSON.stringify(responseBody)});\n`,
+    "utf8",
+  );
+  chmodSync(ghScript, 0o755);
+
+  const env: NodeJS.ProcessEnv = { ...process.env, PATH: bin.dir };
+  delete env.LINEAR_API_KEY;
+
+  return { env, cleanup: bin.cleanup };
+}
