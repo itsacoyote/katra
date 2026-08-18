@@ -14,9 +14,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { createProgram, wantsJson } from "../../src/cli/program.js";
 import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
+import { findGh, findGit } from "../../src/core/git.js";
 import { runCli } from "../helpers/cli.js";
 import type { GitFixture } from "../helpers/fixture.js";
-import { createGitRepo, git } from "../helpers/fixture.js";
+import { createGitRepo, git, isolatedNoGhEnv } from "../helpers/fixture.js";
 
 /** The database file, for tests that need to break it on purpose. */
 function storeDbPath(dir: string): string {
@@ -48,6 +49,7 @@ const EXPECTED_COMMANDS = [
   "search",
   "recent",
   "stale",
+  "refresh",
 ] as const;
 
 let repo: GitFixture;
@@ -62,7 +64,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all twenty-three commands on the program", () => {
+  it("registers all twenty-four commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -71,7 +73,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(23);
+    expect(registered).toHaveLength(24);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -127,7 +129,14 @@ describe("--json across every command", () => {
       })}\n`,
     );
 
-    const invocations: Array<readonly string[]> = [
+    const isolated = isolatedNoGhEnv();
+
+    // Reshaped from Array<readonly string[]>: refresh's entry carries an
+    // isolated env; every other entry carries the ambient process.env
+    // explicitly, so `env` is never optional here and the call site below is
+    // a plain `env: entry.env` pass-through (runCli's own default) with no
+    // conditional spread.
+    const bareInvocations: ReadonlyArray<readonly string[]> = [
       ["init"],
       ["add", "another task"],
       ["show", blocker],
@@ -155,17 +164,51 @@ describe("--json across every command", () => {
       ["stale"],
     ];
 
-    const seen = new Set<string>();
-    for (const args of invocations) {
-      const result = await runCli([...args, "--json"], { cwd: repo.dir });
-      seen.add(args[0] as string);
+    const invocations: ReadonlyArray<{
+      readonly args: readonly string[];
+      readonly env: NodeJS.ProcessEnv;
+    }> = [
+      ...bareInvocations.map((args) => ({ args, env: process.env })),
+      { args: ["refresh"], env: isolated.env },
+    ];
 
-      expect(() => JSON.parse(result.stdout), `${args.join(" ")} emitted non-JSON`).not.toThrow();
-      expect(result.stderr, `${args.join(" ")} wrote to stderr under --json`).toBe("");
+    try {
+      const seen = new Set<string>();
+      for (const entry of invocations) {
+        const result = await runCli([...entry.args, "--json"], { cwd: repo.dir, env: entry.env });
+        seen.add(entry.args[0] as string);
+
+        expect(
+          () => JSON.parse(result.stdout),
+          `${entry.args.join(" ")} emitted non-JSON`,
+        ).not.toThrow();
+        expect(result.stderr, `${entry.args.join(" ")} wrote to stderr under --json`).toBe("");
+      }
+
+      expect([...seen].sort()).toEqual([...EXPECTED_COMMANDS].sort());
+    } finally {
+      isolated.cleanup();
     }
-
-    expect([...seen].sort()).toEqual([...EXPECTED_COMMANDS].sort());
   });
+
+  // POSIX-gated like every stub-executable test (git.test.ts precedent): the
+  // isolated env's git wrapper is a shebang script Windows cannot execute.
+  it.runIf(process.platform !== "win32")(
+    "the refresh sweep entry's env excludes gh and LINEAR_API_KEY",
+    () => {
+      const isolated = isolatedNoGhEnv();
+      try {
+        expect(findGh(isolated.env)).toBeUndefined();
+        expect(isolated.env.LINEAR_API_KEY).toBeUndefined();
+        // Not vacuous: the same construction really does resolve a working
+        // git, which is what proves PATH was narrowed deliberately rather
+        // than simply broken.
+        expect(findGit(isolated.env)).toBeDefined();
+      } finally {
+        isolated.cleanup();
+      }
+    },
+  );
 });
 
 describe("exit codes", () => {

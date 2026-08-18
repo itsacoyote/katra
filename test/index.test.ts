@@ -104,6 +104,11 @@ describe("the public barrel", () => {
       // above it — declared for the CLI command T5 does not itself add, but
       // published now so T6 needs no barrel change to use it.
       katra.RefResult,
+      // F8 T5: what `refresh` prints. RefreshSection/RefreshTotals/
+      // RefreshUpdatedRef/RefreshUnchangedRef/RefreshUnresolvedRef do not get
+      // their own entries — they ride on RefreshResult the same way
+      // ReportSection/MigrationItemRef ride on MigrationReport without one.
+      katra.RefreshResult,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -112,8 +117,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 24;
-    expect(count).toBe(24);
+    const count: PublishedDocuments["length"] = 25;
+    expect(count).toBe(25);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {

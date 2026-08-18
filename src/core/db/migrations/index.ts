@@ -12,6 +12,7 @@ import { migration0002 } from "./0002-events-and-notes.js";
 import { migration0003 } from "./0003-claims-and-presence.js";
 import { migration0004 } from "./0004-search-index.js";
 import { migration0005 } from "./0005-refs.js";
+import { migration0006 } from "./0006-refresh.js";
 
 export const MIGRATIONS: readonly Migration[] = [
   migration0001,
@@ -19,6 +20,7 @@ export const MIGRATIONS: readonly Migration[] = [
   migration0003,
   migration0004,
   migration0005,
+  migration0006,
 ];
 
 export { buildInitDdl, DEFAULT_SCHEMA_SETS, type SchemaSets } from "./0001-init.js";
@@ -45,3 +47,8 @@ export {
   DEFAULT_REFS_SETS,
   type RefsSets,
 } from "./0005-refs.js";
+export {
+  buildRefreshDdl,
+  DEFAULT_REFRESH_SETS,
+  type RefreshSets,
+} from "./0006-refresh.js";

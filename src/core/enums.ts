@@ -8,7 +8,12 @@
  * precisely how the two would drift.
  *
  * These are enforced in the database, not just in TypeScript, because types do
- * not survive to runtime and this store is written by concurrent processes.
+ * not survive to runtime and this store is written by concurrent processes —
+ * with one exception. {@link REFRESH_REASONS} is never written to a column
+ * and carries no `CHECK`: it is a closed vocabulary for what the `refresh`
+ * command (F8) reports on stdout/`--json` when a provider degrades, not a
+ * value this store ever persists, so there is no `CHECK` for it to drift from
+ * in the first place.
  */
 
 /** Hierarchy. A `task`'s parent is an `epic`; two levels is the whole tree. */
@@ -78,17 +83,16 @@ export const UNTRIAGED_LANES = ["Defined", "Researching"] as const satisfies rea
 /**
  * What an event records.
  *
- * Eleven now that `ref-linked` and `ref-unlinked` land here — F7's external
- * refs (migration 0005). `ref-status-changed` still waits on the provider
- * cycles (.21+): declaring a value nothing can write would put it in a
- * `CHECK` constraint under forward-only migrations, which makes the mistake
- * expensive to take back.
+ * Twelve now that `ref-status-changed` lands here — F8's provider refresh
+ * cycle (migration 0006), writable at last by the `refresh` command (T5) once
+ * an external ref's status actually moves. `ref-linked` and `ref-unlinked`
+ * arrived first, with F7's external refs (migration 0005).
  *
- * Three of the eleven are not in `docs/katra-spec.md` §5's own list at all:
+ * Four of the twelve are not in `docs/katra-spec.md` §5's own list at all:
  * `deleted` (ADR-008 — `delete` appends its own last event), `cancelled`
- * (ADR-003 — a terminal lane distinct from `closed`), and `ref-unlinked`
- * (F7 requirement 5 — a deliberate addition with no counterpart in the
- * spec's original curated set).
+ * (ADR-003 — a terminal lane distinct from `closed`), `ref-unlinked` (F7
+ * requirement 5), and `ref-status-changed` (F8 requirement 4) — each a
+ * deliberate addition with no counterpart in the spec's original curated set.
  *
  * The order is the rough order a task's life produces them, not alphabetical —
  * it is what a reader of the CHECK constraint sees.
@@ -105,6 +109,7 @@ export const EVENT_TYPES = [
   "deleted",
   "ref-linked",
   "ref-unlinked",
+  "ref-status-changed",
 ] as const;
 export type EventType = (typeof EVENT_TYPES)[number];
 
@@ -131,6 +136,84 @@ export type Priority = (typeof PRIORITIES)[number];
 export const PRIORITY_MIN = 0 satisfies Priority;
 export const PRIORITY_MAX = 4 satisfies Priority;
 export const PRIORITY_DEFAULT = 2 satisfies Priority;
+
+/**
+ * Why a `refresh` (F8) could not fill a ref's cached fields.
+ *
+ * Declared here rather than beside the provider code that produces them
+ * (`src/core/providers/`) so the GitHub provider, the Linear provider and the
+ * `refresh` command itself (T2/T3/T5) all import the one canonical set,
+ * instead of three files independently inventing overlapping literal unions.
+ *
+ * Unlike every other set in this module, nothing here is `CHECK`-enforced —
+ * see this file's own module doc. A provider degrades to one of these
+ * literals rather than ever surfacing a raw `Error#message` (epic risk note
+ * 14): the tokens are the whole vocabulary `refresh` reports on stdout and in
+ * `--json`, closed the same way every other set here is closed, just not by
+ * the database.
+ */
+export const REFRESH_REASONS = [
+  // github (T2 runGh): `gh` is not on PATH at all — findGh's own miss — or is
+  // on PATH but cannot actually be run (an unexecutable file, a permission
+  // error, a same-named directory: runGh's GH_UNRUNNABLE_CODES). Either way
+  // `gh` never started, so there is nothing to distinguish from the caller's
+  // side.
+  "gh-not-available",
+  // github (T2 runGh): gh exit 4, probed unambiguous — no credentials
+  // present to even try. Distinct from bad-credentials below, which DID
+  // send credentials and had them rejected.
+  "gh-unauthenticated",
+  // github (T2 runGh, exit 1 + 404-shaped stdout) or linear (T3, 200 with
+  // errors and null data): the EXTERNAL entity itself does not exist.
+  // Distinct from gone below, which is the katra-side ref vanishing.
+  "not-found",
+  // github (T2 runGh, exit 1 + an HTTP 401 "Bad credentials" body — read
+  // from the JSON on stdout, never gh's own stderr summary line):
+  // credentials were sent and GitHub rejected them. Distinct from
+  // gh-unauthenticated above, which never had credentials to reject.
+  "bad-credentials",
+  // github (T2 runGh, exit 1 + "error connecting" stderr) or linear (T3,
+  // fetch threw): a transport failure, not a rejection by either API.
+  "network",
+  // github (T2 runGh, execFileSync's own timeout firing — SIGKILL reaches
+  // the direct child but is not guaranteed to reach a grandchild it left
+  // holding stdout open, so this fires on the wall clock alone, not on
+  // proof the process tree actually died) or linear (T3, AbortSignal.timeout
+  // firing): the call ran long enough to be aborted.
+  "timeout",
+  // linear (T3): env.LINEAR_API_KEY absent — refused before any network
+  // call, not a rejection by Linear.
+  "no-key",
+  // linear (T3): Linear returned HTTP 401 for the raw key it was sent, or
+  // HTTP 400 for the same key sent Bearer-prefixed by mistake (probed
+  // real: Linear's GraphQL endpoint treats a "Bearer <key>" Authorization
+  // header as a malformed request, not a credential it evaluates and
+  // rejects — but the underlying mistake is the same wrong key
+  // presentation, so both statuses dispatch here) — github's
+  // credential-rejection equivalent is bad-credentials above, not this
+  // token; the two providers never share a reason for the same shape of
+  // failure.
+  "bad-key",
+  // linear (T3): the response body was not parseable JSON. Also github's
+  // (T2 runGh) own defensive catch-all — an exceeded maxBuffer (ENOBUFS) or
+  // an exit-1 body that matched none of the probed shapes above — the same
+  // "a response came back and this could not read it" bucket, not a guess
+  // at which of the other reasons it most resembles.
+  "malformed-response",
+  // github or linear (T3): the stored external_id does not match the
+  // provider's own strict re-derivation pattern — refused before any spawn
+  // or fetch, never a network-observed failure.
+  "bad-shape",
+  // refresh (T5): the ref's provider is not one of the two registered
+  // providers (the escape hatch, e.g. "jira") — refused without any
+  // network.
+  "no-provider",
+  // refresh (T5): the katra-side ref or task row vanished between being
+  // gathered and its per-ref write (the TOCTOU re-check inside writeTx).
+  // The katra side, not the external one — see not-found above for that.
+  "gone",
+] as const;
+export type RefreshReason = (typeof REFRESH_REASONS)[number];
 
 /** True when `value` is one of `LEVELS`. */
 export function isLevel(value: unknown): value is Level {

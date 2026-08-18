@@ -18,10 +18,11 @@ import type {
   SearchResult,
   StaleResult,
 } from "../core/contract.js";
+import { EVENT_TYPES } from "../core/enums.js";
 import type { LoggedEvent } from "../core/events/types.js";
 import type { Note } from "../core/notes/types.js";
 import type { Task, TaskDetail, TaskView } from "../core/tasks/types.js";
-import { capText, textWidth } from "../core/text.js";
+import { CONTROL_CHARS_SOURCE, capText, textWidth } from "../core/text.js";
 
 function field(label: string, value: string): string {
   return `  ${label.padEnd(12)}${value}`;
@@ -80,11 +81,15 @@ function claimedField(claim: ClaimInfo, now: string): string {
 }
 
 /**
- * One reference, rendered `provider: qualified-id`, plus the url when there is
- * one (F7 spec §3 — an unresolved ref renders as a plain link with whatever is
- * cached). Shared by {@link formatTaskDetail} and {@link formatBrief}'s `refs`
- * blocks and by {@link formatRefResult}'s own line — one rendering, three
- * call sites.
+ * One reference, rendered `provider: qualified-id`, plus whatever F8's
+ * `refresh` has cached (status, title, a relative sync age) and the url —
+ * each shown only when present, so a never-refreshed ref renders **exactly**
+ * as it did before F8 (F7's own pin: a ref with every cached field `null`
+ * must byte-for-byte match the pre-F8 render). Shared by
+ * {@link formatTaskDetail} and {@link formatBrief}'s `refs` blocks and by
+ * {@link formatRefResult}'s own line — one rendering, three call sites, `now`
+ * threaded into each as the last positional parameter (F7 A5: appended after
+ * existing parameters, never inserted before them).
  *
  * `provider`/`externalId`/`url` are all attacker-influenced (F7 risk note
  * 23 — stored via the `--provider/--id/--url` escape hatch with only the
@@ -92,20 +97,42 @@ function claimedField(claim: ClaimInfo, now: string): string {
  * and zero-width codepoints ride through by design, which is what `text()`
  * is for here), so
  * every one goes through {@link text} here exactly like a task's own title or
- * description does. `--json` carries them verbatim per house policy.
+ * description does. `cachedStatus`/`cachedTitle` are provider-sourced —
+ * GitHub/Linear response text, sanitized and length-capped once already at
+ * the write seam (`refs/repo.ts`'s `sanitizeCachedTitle`) but never trusted
+ * a second time less at render — so they go through {@link text} too, the
+ * same "sanitize at every hop, not just the one that currently matters"
+ * discipline every other field on this line already follows. `--json`
+ * carries all of it verbatim per house policy.
  *
- * The url is also **width-clamped** (validate round 2, finding LOW-2), the
- * same treatment `search`'s snippet gets and titles get at a narrower
- * {@link TITLE_WIDTH}: `refs.url`'s own bound is 2048 characters (migration
- * 0005's `CHECK`), and an unclamped one of those turns a `show`/`brief`
- * block into a single unbroken line that pushes everything below it off
- * screen — the identical failure shape {@link SNIPPET_WIDTH}'s own docs
- * describe for a pathological FTS5 excerpt. `--json` still carries `url`
- * verbatim, uncapped, same as every other field here.
+ * The url and the cached title are both **width-clamped** at
+ * {@link SNIPPET_WIDTH} (validate round 2, finding LOW-2, for the url; the
+ * cached title deliberately reuses the same wider bound rather than
+ * {@link TITLE_WIDTH} — it is fetched content riding the same line as the
+ * url, not a katra task title squeezed between an id and a lane): an
+ * unclamped one of those turns a `show`/`brief` block into a single unbroken
+ * line that pushes everything below it off screen — the identical failure
+ * shape {@link SNIPPET_WIDTH}'s own docs describe for a pathological FTS5
+ * excerpt. `--json` still carries `url`/`cachedTitle` verbatim, uncapped,
+ * same as every other field here.
+ *
+ * The synced age reuses `claimLiveness`'s own tool, `timeAgoOrNull`, not the
+ * throwing `timeAgo`: `synced_at` is read back out of `refs`, a row this
+ * renderer does not fully trust any more than `presence` — a malformed
+ * stored timestamp renders with no age shown rather than turning a `show`
+ * into an exit 1 (the named regression `claimLiveness`'s own docs describe
+ * for the identical shape). No age is fabricated when `syncedAt` is `null`
+ * (never refreshed) — that case renders with no synced age at all, same as
+ * `cachedStatus`/`cachedTitle` render nothing when they are `null`.
  */
-function formatRefLine(ref: Ref): string {
+function formatRefLine(ref: Ref, now: string): string {
   const qualified = `${text(ref.provider)}: ${text(ref.externalId)}`;
-  return ref.url === null ? qualified : `${qualified}  ${clamp(text(ref.url), SNIPPET_WIDTH)}`;
+  const status = ref.cachedStatus === null ? "" : `  ${text(ref.cachedStatus)}`;
+  const title = ref.cachedTitle === null ? "" : `  ${clamp(text(ref.cachedTitle), SNIPPET_WIDTH)}`;
+  const url = ref.url === null ? "" : `  ${clamp(text(ref.url), SNIPPET_WIDTH)}`;
+  const age = ref.syncedAt === null ? null : timeAgoOrNull(ref.syncedAt, now);
+  const synced = age === null ? "" : `  · synced ${age}`;
+  return `${qualified}${status}${title}${url}${synced}`;
 }
 
 /**
@@ -123,9 +150,14 @@ function formatRefLine(ref: Ref): string {
  * "already linked": a caller reading the text output, same as one reading
  * `--json`, must not mistake a real mutation of the shared `refs` row for
  * the no-op `"already-linked"` otherwise reads as.
+ *
+ * `now` defaults to the real instant, same as every other top-level formatter
+ * in this file — `ref add`/`remove` can re-touch a ref that already carries a
+ * cache from an earlier `refresh`, so its line needs a live synced age exactly
+ * as much as `show`/`brief`'s do.
  */
-export function formatRefResult(result: RefResult): string {
-  const line = formatRefLine(result.ref);
+export function formatRefResult(result: RefResult, now: string = nowIso()): string {
+  const line = formatRefLine(result.ref, now);
   switch (result.action) {
     case "linked":
       return `${result.taskId}  linked  ${line}`;
@@ -210,7 +242,7 @@ export function formatTaskDetail(
   // Follows the `links` block's own precedent — one line per entry, blank
   // label after the first (F7 T6).
   for (const [index, ref] of refs.entries()) {
-    lines.push(field(index === 0 ? "refs" : "", formatRefLine(ref)));
+    lines.push(field(index === 0 ? "refs" : "", formatRefLine(ref, now)));
   }
   if (task.tags.length > 0) lines.push(field("tags", text(task.tags.join(", "))));
 
@@ -303,12 +335,30 @@ export function oneLine(value: string): string {
  * cursor, but any non-terminal consumer of this output — an editor, a web
  * view, an agent's renderer — breaks the line on them, so two readers would
  * disagree about how many rows a table has.
+ *
+ * Derived from `core/text.ts`'s {@link CONTROL_CHARS_SOURCE} — the shared
+ * vocabulary of what a control character *is* — rather than a second
+ * hand-written character class: this file and `core/refs/parse.ts` each
+ * carried their own copy of the identical set before that export existed,
+ * and a third would have been the same drift risk again. `+`/`g` stay local
+ * to this declaration, exactly the design {@link CONTROL_CHARS_SOURCE}'s own
+ * docs describe: the source is unflagged, unquantified regex-class text, and
+ * each consumer picks the flags/quantifier its own use needs — `oneLine`'s
+ * `replaceAll` needs both, the exported `CONTROL_CHARS_PATTERN` itself
+ * (a `.test()`-only, `parse.ts`-shaped use) needs neither.
  */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
-const CONTROLS = /[\u0000-\u001F\u007F-\u009F\u2028\u2029]+/g;
+const CONTROLS = new RegExp(`[${CONTROL_CHARS_SOURCE}]+`, "g");
 
 /**
  * The same set minus newline and tab, for text rendered across several lines.
+ *
+ * **Deliberately not derived from {@link CONTROL_CHARS_SOURCE}.** This is a
+ * different, narrower character class — tab and newline survive here so a
+ * multi-line body keeps its own layout — not a flags/quantifier variant of
+ * the shared set the way `CONTROLS` above is. Hand-written for that reason:
+ * there is no "subtract two characters from a source string" export to
+ * derive it from without `core/text.ts` growing a second vocabulary just for
+ * this one caller.
  */
 // biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
 const CONTROLS_KEEPING_LAYOUT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\u2029]+/g;
@@ -359,6 +409,26 @@ function describeEvent(event: LoggedEvent): string {
 const TITLE_WIDTH = 44;
 
 /**
+ * The event-type column's fixed width in `formatBrief`'s activity block and
+ * `formatBoard`'s recent block — the two single-row-at-a-time event renders
+ * that pad every row to one shared width regardless of which types actually
+ * appear in this particular render. `formatEventLog` needs no such constant:
+ * it sizes its own type column per render via {@link columnWidth} over the
+ * exact events it is showing, so it can never fall behind a type it does not
+ * print.
+ *
+ * Derived from {@link EVENT_TYPES} (T1's `enums.ts`) rather than a literal —
+ * F8 added `ref-status-changed`, at 18 characters the widest type today and
+ * four past the `14` this used to be hardcoded to, which let a row holding
+ * one push its own subsequent columns four characters further right than
+ * every other row's. A literal bump to `18` would fix today's overflow and
+ * silently reopen the identical misalignment the next time `EVENT_TYPES`
+ * grows a longer entry; deriving it makes that a compile-time-adjacent fact
+ * instead of something only a render catches.
+ */
+const EVENT_TYPE_WIDTH = columnWidth(EVENT_TYPES, (type) => type);
+
+/**
  * How much room `search`'s snippet line gets before it is cut.
  *
  * Wider than {@link TITLE_WIDTH} on purpose — the snippet owns its own
@@ -371,7 +441,7 @@ const TITLE_WIDTH = 44;
  * is the render-side bound that stops that from reaching a terminal as one
  * unbroken line; `--json` still carries `snippet` verbatim.
  */
-const SNIPPET_WIDTH = 200;
+export const SNIPPET_WIDTH = 200;
 
 /**
  * Cuts a title to `width`, marking the cut with an ellipsis.
@@ -384,7 +454,7 @@ const SNIPPET_WIDTH = 200;
  * The ellipsis costs one of the `width` characters, so a clamped string still
  * occupies exactly `width` columns and {@link columnWidth} agrees with it.
  */
-function clamp(text: string, width: number): string {
+export function clamp(text: string, width: number): string {
   // Only zero is degenerate. An earlier version guarded `width <= 1` on the
   // claim that a one-character result would be too wide — but "…" *is* one
   // character, and returning the first character bare made the bound stop
@@ -634,7 +704,7 @@ export function formatTaskView(view: TaskView, now: string = nowIso()): string {
           ? ""
           : `  ${oneLine(event.entityId)}  ${previewBody(event.entityTitle ?? "", TITLE_WIDTH)}`;
       lines.push(
-        `  ${when}  ${event.type.padEnd(14)}${subject}  ${describeEvent(event)}`.trimEnd(),
+        `  ${when}  ${padTo(event.type, EVENT_TYPE_WIDTH)}${subject}  ${describeEvent(event)}`.trimEnd(),
       );
     }
   }
@@ -715,7 +785,7 @@ export function formatBrief(brief: BriefResult, now: string = nowIso()): string 
   // own docs: scoped to this entity's own `task_refs`, never rolled up from
   // an epic's children.
   for (const [index, ref] of brief.refs.entries()) {
-    lines.push(field(index === 0 ? "refs" : "", formatRefLine(ref)));
+    lines.push(field(index === 0 ? "refs" : "", formatRefLine(ref, now)));
   }
 
   if (brief.level === "epic") {
@@ -788,7 +858,7 @@ export function formatBrief(brief: BriefResult, now: string = nowIso()): string 
           ? ""
           : `  ${oneLine(event.entityId)}  ${previewBody(event.entityTitle ?? "", TITLE_WIDTH)}`;
       lines.push(
-        `  ${when}  ${padTo(event.type, 14)}${subject}  ${describeEvent(event)}`.trimEnd(),
+        `  ${when}  ${padTo(event.type, EVENT_TYPE_WIDTH)}${subject}  ${describeEvent(event)}`.trimEnd(),
       );
     }
     if (brief.activityTruncated) lines.push("  … more; `katra log` for the rest");
@@ -907,7 +977,7 @@ export function formatBoard(board: BoardResult, now: string = nowIso()): string 
       const when = event.createdAt.slice(0, 16).replace("T", " ");
       const title = event.entityTitle === null ? "" : previewBody(event.entityTitle, TITLE_WIDTH);
       lines.push(
-        `  ${when}  ${padTo(event.type, 14)}  ${oneLine(event.entityId)}  ${title}  ${describeEvent(event)}`.trimEnd(),
+        `  ${when}  ${padTo(event.type, EVENT_TYPE_WIDTH)}  ${oneLine(event.entityId)}  ${title}  ${describeEvent(event)}`.trimEnd(),
       );
     }
     // The section owes the same report every other bound in katra owes. It was

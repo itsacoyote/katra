@@ -8,7 +8,7 @@ Instructions for AI coding agents working **on the katra repository**. This is t
 
 A local, git-native, agent-first project manager and coordination layer for AI coding sessions across git worktrees. Read [`docs/katra-spec.md`](docs/katra-spec.md) before doing anything substantial — it is the settled design, including rationale.
 
-**Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, an append-only event stream, typed notes, cross-worktree claims and presence, the two orientation reads, a beads (`bd`) migration converter, full-text search with structured filters, activity-sorted and staleness reads, provider-agnostic external refs with built-in GitHub/Linear URL parsing, and twenty-three commands over them (`init add show list update close cancel reopen delete dep link next log note brief board claim release migrate search recent stale ref`). Everything else in the spec is not: providers/resolution and snapshots. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
+**Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, an append-only event stream, typed notes, cross-worktree claims and presence, the two orientation reads, a beads (`bd`) migration converter, full-text search with structured filters, activity-sorted and staleness reads, provider-agnostic external refs with built-in GitHub/Linear URL parsing, live status resolution through built-in GitHub and Linear providers with `refresh`, and twenty-four commands over them (`init add show list update close cancel reopen delete dep link next log note brief board claim release migrate search recent stale ref refresh`). Everything else in the spec is not: reconcile and snapshots. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
 
 Eight decisions in the spec were superseded or refined during implementation; the ADRs in `docs/decisions/` win where they disagree.
 
@@ -120,7 +120,7 @@ Don't invent values for these — they're fixed sets, deliberately:
 - **Level:** `epic | task`
 - **Kind** (mirrors Conventional Commits): `feat | fix | refactor | perf | docs | test | chore`
 - **Note kinds:** `general | handoff | decision | acceptance`
-- **Event types, as implemented:** `created`, `claimed`, `released`, `status-changed`, `note-added`, `closed`, `cancelled`, `reopened`, `deleted`, `ref-linked`, `ref-unlinked`. Eleven now that F7's external refs land the two ref events; `ref-status-changed` still waits on providers — declaring a value the code cannot write would put it in a `CHECK` constraint under forward-only migrations, which is expensive to take back. `deleted` and `cancelled` are additions the spec's own list does not have (ADR-008 — `delete` appends its own last event; ADR-003 — a terminal lane distinct from `closed`).
+- **Event types, as implemented:** `created`, `claimed`, `released`, `status-changed`, `note-added`, `closed`, `cancelled`, `reopened`, `deleted`, `ref-linked`, `ref-unlinked`, `ref-status-changed`. Twelve now that F8's migration 0006 widens the `CHECK` — `ref-status-changed` is written by `katra refresh` when an external ref's status actually moves. `deleted`, `cancelled` and `ref-unlinked` are additions the spec's own list does not have (ADR-008; ADR-003; F7 requirement 5).
 
 ## Commits
 

@@ -15,7 +15,26 @@
  * spec prose alone, so the numbered comments trace back to that record.
  */
 
-import { textWidth } from "../text.js";
+/**
+ * {@link CONTROL_CHARS_PATTERN}: control and line-separator characters that
+ * must never survive into a value this module hands back -- whether
+ * reconstructed (a decoded path segment feeding {@link ParsedRef}) or stored
+ * verbatim (an explicit `--url`, {@link validateExplicitRef}): the C0
+ * controls (NUL through Unit Separator -- covering NUL, tab, CR, LF, ESC),
+ * DEL, the C1 controls, and the two Unicode line separators LINE SEPARATOR /
+ * PARAGRAPH SEPARATOR -- invisible to a terminal, line breaks to any other
+ * renderer. The same set `cli/format.ts`'s `oneLine` strips at render time
+ * (AGENTS.md); this module refuses them outright instead, since it is the
+ * boundary where they would otherwise start looking like ordinary,
+ * already-validated data.
+ *
+ * Imported from `core/text.ts` (F8 T2/T6's consolidation) rather than
+ * declared here -- `cli/format.ts` and this module each carried an
+ * identical private copy of the same character class before that export
+ * existed; this is the one that now points at it instead of being the
+ * third.
+ */
+import { CONTROL_CHARS_PATTERN, textWidth } from "../text.js";
 import type {
   ExplicitRef,
   ExplicitRefInput,
@@ -28,24 +47,6 @@ import type {
 
 const GITHUB_HOST = "github.com";
 const LINEAR_HOST = "linear.app";
-
-/**
- * Control and line-separator characters that must never survive into a
- * value this module hands back -- whether reconstructed (a decoded path
- * segment feeding {@link ParsedRef}) or stored verbatim (an explicit
- * `--url`, {@link validateExplicitRef}): the C0 controls (NUL through
- * Unit Separator -- covering NUL, tab, CR, LF, ESC), DEL, the C1
- * controls, and the two Unicode line separators LINE SEPARATOR /
- * PARAGRAPH SEPARATOR -- invisible to a terminal, line breaks to any
- * other renderer. The same set `cli/format.ts`'s `oneLine` strips at
- * render time (AGENTS.md); this module refuses them outright instead,
- * since it is the boundary where they would otherwise start looking
- * like ordinary, already-validated data. Every codepoint below is
- * written as an explicit unicode escape, never a raw byte in this file
- * (house rule).
- */
-// biome-ignore lint/suspicious/noControlCharactersInRegex: matching them is the point
-const CONTROL_CHARS_PATTERN = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/;
 
 /**
  * What a decoded GitHub/Linear path segment -- owner, repo, or Linear
@@ -116,6 +117,35 @@ export const MAX_URL_LENGTH = 2048;
 
 /** `refs.provider`'s bound (T1: `CHECK (length(provider) BETWEEN 1 AND 64)`). */
 export const MAX_PROVIDER_LENGTH = 64;
+
+/**
+ * `refs.cached_title`'s bound — unlike {@link MAX_EXTERNAL_ID_LENGTH} /
+ * {@link MAX_URL_LENGTH} / {@link MAX_PROVIDER_LENGTH}, **not** a DDL `CHECK`:
+ * migration 0005's own docstring is explicit that a provider's status/title
+ * vocabulary is not that migration's to define. Enforced instead at the write
+ * seam that fills the column — `refs/repo.ts`'s `applyRefreshWithin` (F8 T4) —
+ * which caps rather than refuses (that function's own docs), so a hostile or
+ * merely verbose tracker response never blows out the store (epic requirement
+ * 8). Declared here, beside the other stored-value bounds this same module
+ * already owns, rather than in `providers/`: the GitHub provider (F8 T3)
+ * imports this constant for its own `capText` call rather than inlining the
+ * number a second time, which is what makes T3 depend on T4 and not the
+ * reverse — `core/refs` never imports `core/providers`.
+ */
+export const MAX_CACHED_TITLE_LENGTH = 500;
+
+/**
+ * `refs.cached_status`'s bound — same reasoning and same enforcement point as
+ * {@link MAX_CACHED_TITLE_LENGTH}: no DDL `CHECK` (migration 0005), capped
+ * silently at `refs/repo.ts`'s `applyRefreshWithin` rather than refused. A
+ * real provider's status vocabulary is a short enum word (`open`, `merged`,
+ * `unstarted`, ...) — this bound is not sized to any one of them, only to
+ * comfortably outlast every provider's vocabulary katra ships or is likely to
+ * add, so it never has to move for a legitimate value while still stopping a
+ * hostile or malformed response from writing an unbounded string into the
+ * column.
+ */
+export const MAX_CACHED_STATUS_LENGTH = 100;
 
 /**
  * What every `parseRefInput` refusal ends with (ADR-014's escape hatch) — one

@@ -4,7 +4,7 @@ CREATE TABLE events (
   -- transaction, so it is a total order that agrees with commit order. Nobody
   -- types it, which is why it is not a kt-style random id.
   id         INTEGER PRIMARY KEY,
-  type       TEXT NOT NULL CHECK (type IN ('created','claimed','released','status-changed','note-added','closed','cancelled','reopened','deleted','ref-linked','ref-unlinked')),
+  type       TEXT NOT NULL CHECK (type IN ('created','claimed','released','status-changed','note-added','closed','cancelled','reopened','deleted','ref-linked','ref-unlinked','ref-status-changed')),
   -- NO foreign key, by decision (ADR-008). The task may be gone; the event is
   -- still true.
   entity_id  TEXT NOT NULL,

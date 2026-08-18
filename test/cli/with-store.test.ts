@@ -10,7 +10,7 @@ import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import type { CliContext } from "../../src/cli/program.js";
-import { withStore } from "../../src/cli/with-store.js";
+import { withStore, withStoreAsync } from "../../src/cli/with-store.js";
 import { actorFromIdentity, createIdentityResolver } from "../../src/core/actor.js";
 import { findGit } from "../../src/core/git.js";
 import { openStore } from "../../src/core/store.js";
@@ -113,4 +113,51 @@ describe("withStore's identity wiring", () => {
       expect(counting.calls()).toHaveLength(3);
     },
   );
+});
+
+describe("withStoreAsync", () => {
+  it("withStoreAsync post-await store access survives", async () => {
+    // The exact trap this function exists to avoid (with-store.ts's own
+    // docs): `try { return { result: fn(store), warnings }; } finally {
+    // store.close(); }` against an async `fn` closes the handle the moment
+    // `fn` returns its promise, not when the promise settles — so anything
+    // `fn` does after its own first `await` runs against an already-closed
+    // connection. A `.prepare()` call on a closed better-sqlite3 handle
+    // throws "The database connection is not open"; this proves it does not.
+    const r = repo();
+    const bootstrap = openStore(r.dir, { createIfMissing: true });
+    bootstrap.store.close();
+
+    const context = testContext(r.dir, process.env);
+
+    const { result } = await withStoreAsync(context, async (store) => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      return store.db.prepare("SELECT 1 AS one").get() as { one: number };
+    });
+
+    expect(result.one).toBe(1);
+  });
+
+  it("threads openStore's warnings through into the async outcome", async () => {
+    // Mirrors add-show.test.ts's CLI-level "surfaces the GIT_COMMON_DIR
+    // warning from show" scenario, but exercises withStoreAsync directly:
+    // `return { result, warnings }` is a line withStoreAsync does not share
+    // with withStore's own (each has its own copy, one sync, one async), so
+    // it earns its own proof rather than resting on withStore's CLI-level
+    // coverage alone.
+    const r = repo();
+    const bootstrap = openStore(r.dir, { createIfMissing: true });
+    bootstrap.store.close();
+
+    const other = repo();
+    const otherBootstrap = openStore(other.dir, { createIfMissing: true });
+    otherBootstrap.store.close();
+
+    const env = { ...process.env, GIT_COMMON_DIR: join(other.dir, ".git") };
+    const context = testContext(r.dir, env);
+
+    const { warnings } = await withStoreAsync(context, async (store) => store.actor());
+
+    expect(warnings.some((warning) => warning.code === "ambient-git-dir")).toBe(true);
+  });
 });

@@ -190,7 +190,7 @@ The agent is usually the one searching, and often from vague input ("that auth t
 
 ## 7. External references (pluggable providers)
 
-> **Narrowed by [ADR-014](decisions/ADR-014-core-parses-known-ref-urls.md):** as shipped (F7), *core* recognizes `github.com` and `linear.app` URLs and bare ids by pure string parsing, so pasting works with zero plugins — `parse(url)` remains on the provider interface for every other host. Storage as specified below is built; providers/resolution are not.
+> **Narrowed by [ADR-014](decisions/ADR-014-core-parses-known-ref-urls.md) and [ADR-015](decisions/ADR-015-built-in-provider-registry.md):** as shipped, *core* recognizes `github.com` and `linear.app` URLs and bare ids by pure string parsing (F7), and the provider interface below is implemented as a compiled-in registry — GitHub via the `gh` CLI and Linear via its API ship inside katra (F8); external plugin discovery is deferred until a third party wants in. Storage, resolution, and `refresh` are built; `reconcile` is not.
 
 katra tracks a **relationship** to an external issue/PR. It is not an integration, a mirror, or a sync target. **GitHub is the first provider, not a dependency.**
 

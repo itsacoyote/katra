@@ -8,6 +8,7 @@ import {
   buildClaimsAndPresenceDdl,
   buildEventsDdl,
   buildInitDdl,
+  buildRefreshDdl,
   buildRefsDdl,
   DEFAULT_EVENT_SETS,
   DEFAULT_SCHEMA_SETS,
@@ -121,7 +122,7 @@ describe("initial schema", () => {
     expect(MIGRATIONS[0]?.name).toBe("init");
     // Ordered, and every version distinct: `migrate` filters and sorts by
     // version, so a duplicate or a gap would silently skip a step.
-    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5]);
+    expect(MIGRATIONS.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6]);
   });
 
   it("matches the committed schema byte for byte", () => {
@@ -500,18 +501,18 @@ describe("migration 0002 — events and notes", () => {
     // the builder to itself could never catch the drift.
     //
     // This fixture was regenerated when 0003 widened EVENT_TYPES with
-    // claimed/released, and regenerated again when 0005 widened it with
-    // ref-linked/ref-unlinked (F7): migration 0002's DEFAULT_EVENT_SETS
-    // imports the array live, so the rendered CHECK moves with it every
-    // time. That is safe here only because the very next migration (0003,
-    // then 0005) always immediately rebuilds `events` — a fresh install
-    // applies both steps inside one transaction, so nobody ever sees the
-    // wider 0002-only CHECK on its own, and both migration paths (fresh
-    // install, v2-store upgrade) converge on the same final constraint.
+    // claimed/released, again when 0005 widened it with ref-linked/
+    // ref-unlinked (F7), and again when 0006 widened it with
+    // ref-status-changed (F8): migration 0002's DEFAULT_EVENT_SETS imports
+    // the array live, so the rendered CHECK moves with it every time. That is
+    // safe here only because the very next migration (0003, then 0005, then
+    // 0006) always immediately rebuilds `events` — a fresh install applies
+    // every pending step inside one transaction, so nobody ever sees the
+    // wider 0002-only CHECK on its own, and every migration path (fresh
+    // install, v2-store upgrade) converges on the same final constraint.
     // Widening EVENT_TYPES again *without* a matching rebuild migration would
     // leave two stores at the same user_version with different CHECKs — the
-    // trap that has now caught this fixture twice, next for whoever adds
-    // ref-status-changed once the provider cycles land.
+    // trap that has now caught this fixture three times.
     const golden = readFileSync(
       fileURLToPath(new URL("../fixtures/schema-v2.sql", import.meta.url)),
       "utf8",
@@ -855,7 +856,10 @@ describe("migration 0003 — claims and presence", () => {
       );
     expect(idsOf()).toEqual([1, 3]);
 
-    migrate(db, MIGRATIONS);
+    // Scoped deliberately: MIGRATIONS now carries steps through 0006, and the
+    // unscoped call would silently carry this store past v3 to measure every
+    // later rebuild's id-preservation instead of 0003's own.
+    migrate(db, MIGRATIONS.slice(0, 3));
 
     expect(idsOf()).toEqual([1, 3]);
     db.close();
@@ -1200,8 +1204,11 @@ describe("migration 0005 — refs", () => {
   function freshV5(): DB {
     const db = new Database(":memory:");
     db.pragma("foreign_keys = ON");
-    // Scoped even though 5 is currently the top: freshV2/V3/V4 each drifted
-    // silently when the next migration landed, and each earned a trap comment.
+    // Scoped deliberately, same freshV2/V3/V4 trap this file already pins
+    // above: MIGRATIONS now carries migration 0006, which rebuilds `events`
+    // again, so the unscoped call would silently build a v6 store here —
+    // every test in this block using freshV5() would be measuring 0006's
+    // rebuild, not 0005's own DDL.
     migrate(db, MIGRATIONS.slice(0, 5));
     return db;
   }
@@ -1275,7 +1282,11 @@ describe("migration 0005 — refs", () => {
     db.prepare("DELETE FROM events WHERE id = 2").run();
 
     expect(readSchemaVersion(db)).toBe(4);
-    expect(migrate(db, MIGRATIONS)).toBe(1);
+    // Scoped deliberately: MIGRATIONS now carries migration 0006, and the
+    // unscoped call would silently carry this store past v5 without this
+    // test saying so — the same freshV5 trap this block's own helper above
+    // now pins.
+    expect(migrate(db, MIGRATIONS.slice(0, 5))).toBe(1);
     expect(readSchemaVersion(db)).toBe(5);
 
     expect(db.prepare("SELECT title FROM tasks WHERE id='kt-aaaaaa'").get()).toEqual({
@@ -1301,7 +1312,8 @@ describe("migration 0005 — refs", () => {
     event(db, { type: "released", prior_actor: "feature/x @ /repo/wt-x" });
     event(db, { type: "released" });
 
-    migrate(db, MIGRATIONS);
+    // Scoped deliberately, same reason as the upgrade test above.
+    migrate(db, MIGRATIONS.slice(0, 5));
 
     const rows = db.prepare("SELECT * FROM events ORDER BY id").all();
     expect(rows.map((row) => rowToEvent(row as never).priorActor)).toEqual([
@@ -1352,15 +1364,20 @@ describe("migration 0005 — refs", () => {
     db.close();
   });
 
-  it("accepts ref-linked and ref-unlinked and still refuses ref-status-changed", () => {
-    // Epic risk note 21: the widen is exactly these two, forward-only —
-    // ref-status-changed stays reserved for the provider cycles.
+  it("accepts ref-linked and ref-unlinked and still refuses an unknown type", () => {
+    // Epic risk note 21: the widen at v5 is exactly these two. Not
+    // ref-status-changed too, even though this describe block's freshV5()
+    // now builds `events` from a live EVENT_TYPES that already includes it —
+    // 0006 is what actually declares it (its own describe block below pins
+    // that), and this test only proves 0005's own widen, so it stays
+    // deliberately silent on that value rather than asserting either
+    // direction for it.
     const db = freshV5();
     rawInsert(db, baseTask());
 
     expect(() => event(db, { type: "ref-linked" })).not.toThrow();
     expect(() => event(db, { type: "ref-unlinked" })).not.toThrow();
-    expect(() => event(db, { type: "ref-status-changed" })).toThrowError(/CHECK constraint failed/);
+    expect(() => event(db, { type: "updated" })).toThrowError(/CHECK constraint failed/);
     db.close();
   });
 
@@ -1440,6 +1457,193 @@ describe("migration 0005 — refs", () => {
     expect(() =>
       db.prepare("INSERT INTO task_refs (task_id, ref_id) VALUES (?, ?)").run("kt-aaaaaa", null),
     ).toThrowError(/NOT NULL constraint failed/);
+    db.close();
+  });
+});
+
+describe("migration 0006 — refresh", () => {
+  /** A store at exactly v5, as an existing installation would have. */
+  function v5Store(): DB {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, MIGRATIONS.slice(0, 5));
+    return db;
+  }
+
+  function freshV6(): DB {
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    // Scoped even though 6 is currently the top: freshV2/V3/V4/V5 each earned
+    // a trap comment the moment the next migration landed and stopped being
+    // able to say that honestly. Scoping this call from the start means the
+    // next migration cannot silently repeat the drift here.
+    migrate(db, MIGRATIONS.slice(0, 6));
+    return db;
+  }
+
+  it("matches the pinned v6 schema fixture", () => {
+    // Same golden-fixture reasoning as v1-v5: this DDL is rendered from
+    // EVENT_TYPES at import time (the events rebuild), so a store created
+    // before an enum changes keeps its old CHECK forever, and comparing the
+    // builder to itself could never catch that drift.
+    const golden = readFileSync(
+      fileURLToPath(new URL("../fixtures/schema-v6.sql", import.meta.url)),
+      "utf8",
+    );
+    expect(MIGRATIONS[5]?.sql).toBe(golden);
+    expect(MIGRATIONS[5]?.version).toBe(6);
+  });
+
+  it("leaves v1 and v4 byte-identical while v2, v3 and v5 converge on the wider CHECK", () => {
+    // v1 never references EVENT_TYPES at all, and v4 (FTS, no Sets — see its
+    // own docstring) has no CHECK to widen either: neither fixture should
+    // move a single byte for an events-only rebuild.
+    for (const [index, name] of [
+      [0, "schema-v1.sql"],
+      [3, "schema-v4.sql"],
+    ] as const) {
+      const golden = readFileSync(
+        fileURLToPath(new URL(`../fixtures/${name}`, import.meta.url)),
+        "utf8",
+      );
+      expect(MIGRATIONS[index]?.sql).toBe(golden);
+    }
+
+    // v2, v3 and v5 DID move — each renders its events CHECK from the live
+    // EVENT_TYPES array, so appending ref-status-changed widened all three
+    // fixtures identically. Safe only because 0006 immediately rebuilds
+    // `events` again: every migration path (fresh install, v5-store upgrade)
+    // still converges on one final constraint, the same property the v2
+    // fixture's own trap comment pins above for 0002/0003/0005.
+    for (const [index, name] of [
+      [1, "schema-v2.sql"],
+      [2, "schema-v3.sql"],
+      [4, "schema-v5.sql"],
+    ] as const) {
+      const golden = readFileSync(
+        fileURLToPath(new URL(`../fixtures/${name}`, import.meta.url)),
+        "utf8",
+      );
+      expect(MIGRATIONS[index]?.sql).toBe(golden);
+    }
+
+    // The convergence claim, asserted against live stores rather than the
+    // fixtures (which render from the same array in the same process and so
+    // could never disagree): a v5 store upgraded through 0006 must hold the
+    // byte-identical events definition a fresh install gets.
+    const upgraded = v5Store();
+    migrate(upgraded, MIGRATIONS.slice(0, 6));
+    const eventsSqlOf = (db: DB): unknown =>
+      db.prepare("SELECT sql FROM sqlite_master WHERE name = 'events'").get();
+    const fresh = freshV6();
+    expect(eventsSqlOf(upgraded)).toEqual(eventsSqlOf(fresh));
+    upgraded.close();
+    fresh.close();
+  });
+
+  it("upgrades a v5 store preserving events with literal ids and every column intact", () => {
+    const db = v5Store();
+    rawInsert(db, baseTask({ title: "survives the refresh rebuild" }));
+    event(db, { entity_id: "kt-aaaaaa", type: "created" });
+    // Every nullable column populated deliberately, not just prior_actor: a
+    // rebuild's INSERT...SELECT that silently drops or swaps epic_id,
+    // from_lane/to_lane, ref, reason or title still passed a version of this
+    // test that only checked id and prior_actor. Asserting the FULL row
+    // against a literal below is what actually pins the 12-column copy list.
+    event(db, {
+      entity_id: "kt-aaaaaa",
+      type: "status-changed",
+      epic_id: "kt-epic01",
+      from_lane: "Defined",
+      to_lane: "In Progress",
+      ref: "nt-aaaaaa",
+      reason: "why it moved",
+      title: "the title at the time",
+      prior_actor: "feature/x @ /repo/wt-x",
+    });
+    event(db, { entity_id: "kt-aaaaaa", type: "closed" });
+    // A gap in the ids is what distinguishes a rebuild that carries literal
+    // ids across from one that silently renumbers the copy from
+    // INSERT...SELECT's own insertion order.
+    db.prepare("DELETE FROM events WHERE id = 1").run();
+
+    expect(readSchemaVersion(db)).toBe(5);
+    expect(migrate(db, MIGRATIONS.slice(0, 6))).toBe(1);
+    expect(readSchemaVersion(db)).toBe(6);
+
+    expect(db.prepare("SELECT title FROM tasks WHERE id='kt-aaaaaa'").get()).toEqual({
+      title: "survives the refresh rebuild",
+    });
+    const rows = db.prepare("SELECT * FROM events ORDER BY id").all();
+    expect(rows.map((row) => (row as { id: number }).id)).toEqual([2, 3]);
+    expect(rows[0]).toEqual({
+      id: 2,
+      type: "status-changed",
+      entity_id: "kt-aaaaaa",
+      epic_id: "kt-epic01",
+      actor: "main @ /repo",
+      from_lane: "Defined",
+      to_lane: "In Progress",
+      ref: "nt-aaaaaa",
+      reason: "why it moved",
+      title: "the title at the time",
+      prior_actor: "feature/x @ /repo/wt-x",
+      created_at: TS,
+    });
+    db.close();
+  });
+
+  it("recreates events_entity and events_epic after the rebuild", () => {
+    // Dropping `events` drops everything built on it. Same assertion pinned
+    // after 0002's, 0003's and 0005's own rebuilds, pinned again here because
+    // the rebuild is a fourth place either index could quietly fail to come
+    // back.
+    const db = freshV6();
+    const indexes = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE '%event%'")
+      .all()
+      .map((row) => (row as { name: string }).name);
+
+    expect(indexes.sort()).toEqual(["events_entity", "events_epic"]);
+
+    for (const [column, index] of [
+      ["entity_id", "events_entity"],
+      ["epic_id", "events_epic"],
+    ] as const) {
+      const plan = db
+        .prepare(`EXPLAIN QUERY PLAN SELECT * FROM events WHERE ${column} = ?`)
+        .all("kt-aaaaaa") as Array<{ detail: string }>;
+      expect(plan.map((row) => row.detail).join(" ")).toContain(index);
+    }
+    db.close();
+  });
+
+  it("builds the event-type constraint from the array, not a literal", () => {
+    // Same reasoning as 0002's, 0003's and 0005's analogous tests: asserting
+    // the DDL contains the rendered enum would pass against a hardcoded
+    // list, since the two render identically. Only a value invented at call
+    // time can distinguish them.
+    const ddl = buildRefreshDdl({ eventTypes: [...EVENT_TYPES, "sentinel-event"] });
+    expect(ddl).toContain("'sentinel-event'");
+
+    const db = new Database(":memory:");
+    db.pragma("foreign_keys = ON");
+    migrate(db, MIGRATIONS.slice(0, 5));
+    db.exec(ddl);
+    rawInsert(db, baseTask());
+    expect(() => event(db, { type: "sentinel-event" })).not.toThrow();
+    db.close();
+  });
+
+  it("accepts ref-status-changed and still refuses an unknown type", () => {
+    // F8 requirement 4: this is the migration that actually declares
+    // ref-status-changed — 0005's own analogous test above stays
+    // deliberately silent on this value for exactly that reason.
+    const db = freshV6();
+    rawInsert(db, baseTask());
+
+    expect(() => event(db, { type: "ref-status-changed" })).not.toThrow();
+    expect(() => event(db, { type: "updated" })).toThrowError(/CHECK constraint failed/);
     db.close();
   });
 });

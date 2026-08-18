@@ -53,6 +53,7 @@ export type {
   RecentResult,
   Ref,
   RefResult,
+  RefreshResult,
   SearchHit,
   SearchResult,
   StaleResult,

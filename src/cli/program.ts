@@ -29,6 +29,7 @@ import { registerNext } from "./commands/next.js";
 import { registerNote } from "./commands/note.js";
 import { registerRecent } from "./commands/recent.js";
 import { registerRef } from "./commands/ref.js";
+import { registerRefresh } from "./commands/refresh.js";
 import { registerRelease } from "./commands/release.js";
 import { registerSearch } from "./commands/search.js";
 import { registerShow } from "./commands/show.js";
@@ -248,6 +249,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerSearch(program, context);
   registerRecent(program, context);
   registerStale(program, context);
+  registerRefresh(program, context);
 
   return program;
 }

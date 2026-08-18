@@ -1,5 +1,6 @@
 /**
- * Cutting stored text to a length, without cutting a character in half.
+ * Cutting stored text to a length without splitting a character, plus the
+ * control-character vocabulary every consumer of untrusted text shares.
  *
  * In `core/` rather than beside the formatters that also use it, because the
  * cap that matters most happens **before** rendering: `brief` bounds a handoff
@@ -8,10 +9,44 @@
  * CLI — the dependency runs one way — so a helper living there would be
  * unreachable from the module that needs it.
  *
- * Nothing here sanitises. Stripping control characters is a rendering concern
- * and stays in `cli/format.ts`, where `--json` deliberately does not go: a
- * value altered on the way out would no longer be what was stored.
+ * {@link CONTROL_CHARS_SOURCE} and {@link CONTROL_CHARS_PATTERN} draw the same
+ * line: this module owns the *vocabulary* of what counts as a control
+ * character, never the *policy* of what to do about one. Stripping is a
+ * rendering concern (`cli/format.ts`'s `oneLine` and its layout-preserving
+ * variant); refusing outright is a validation concern (`core/refs/parse.ts`
+ * today, `core/providers/` from T3/T4 on) — both stay with the consumer that
+ * makes the call, not here. Before this export existed, `parse.ts` and
+ * `format.ts` each carried their own copy of the same character class; new
+ * consumers import this one instead of writing a third.
  */
+
+/**
+ * Regex source text for the control-character class body — C0 (NUL through
+ * Unit Separator), DEL through the C1 controls, and the two Unicode line
+ * separators (LINE SEPARATOR / PARAGRAPH SEPARATOR) — without the enclosing
+ * `[...]`. A consumer wraps it in brackets and picks its own flags, rather
+ * than parsing {@link CONTROL_CHARS_PATTERN}'s source back apart to get a
+ * differently-flagged copy.
+ */
+export const CONTROL_CHARS_SOURCE = "\\u0000-\\u001f\\u007f-\\u009f\\u2028\\u2029";
+
+/**
+ * Matches one control character from {@link CONTROL_CHARS_SOURCE}.
+ *
+ * **Deliberately unflagged.** A `/g`-flagged pattern is stateful across
+ * `.test()` calls — each call resumes from `lastIndex`, so testing the exact
+ * same string twice in a row can answer `true` then `false` even though
+ * nothing about the string changed between the two calls. Every current use
+ * of this export is a yes/no refusal check, where that statefulness would be
+ * a silent, call-order-dependent bug rather than a performance detail. A
+ * consumer that needs `replaceAll` — `cli/format.ts`'s `oneLine` — builds its
+ * own `/g` regex from {@link CONTROL_CHARS_SOURCE} instead of flagging this
+ * one. `cli/format.ts`'s `CONTROLS_KEEPING_LAYOUT` (tab and newline excluded,
+ * for text rendered across several lines) stays a separate, deliberately
+ * different class for that reason — not a derivative of this one, which
+ * matches tab and newline like every other control character.
+ */
+export const CONTROL_CHARS_PATTERN = new RegExp(`[${CONTROL_CHARS_SOURCE}]`);
 
 /**
  * How long a string is, in characters a reader would count.

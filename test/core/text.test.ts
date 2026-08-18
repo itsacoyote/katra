@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { capText, textWidth } from "../../src/core/text.js";
+import {
+  CONTROL_CHARS_PATTERN,
+  CONTROL_CHARS_SOURCE,
+  capText,
+  textWidth,
+} from "../../src/core/text.js";
 
 /** A non-BMP character: two UTF-16 code units, one code point. */
 const EMOJI = "🜃";
@@ -142,5 +147,50 @@ describe("capText rejects a fractional cap", () => {
     // and NaN cases have. Infinity is the one non-integer that means something.
     expect(capText("abc", 2.5)).toEqual({ text: "", truncated: true });
     expect(capText("abc", Number.POSITIVE_INFINITY).truncated).toBe(false);
+  });
+});
+
+describe("CONTROL_CHARS_PATTERN", () => {
+  it("answers true on two successive .test() calls against the same hostile string", () => {
+    // The whole reason this export stays unflagged. A /g-flagged pattern
+    // remembers `lastIndex` across calls, so testing the identical string
+    // twice in a row can silently answer true then false — exactly the trap a
+    // yes/no refusal check (`core/refs/parse.ts`'s use of this class) must
+    // never fall into.
+    const hostile = `owner${String.fromCharCode(0)}repo`;
+
+    expect(CONTROL_CHARS_PATTERN.test(hostile)).toBe(true);
+    expect(CONTROL_CHARS_PATTERN.test(hostile)).toBe(true);
+    expect(CONTROL_CHARS_PATTERN.global).toBe(false);
+  });
+
+  it("matches NUL, ESC, DEL, a C1 control, and both Unicode line separators — tab included", () => {
+    // Sanity on the derivation from CONTROL_CHARS_SOURCE: the class is the
+    // full C0/DEL/C1/line-separator set, tab included. That is deliberately
+    // wider than `cli/format.ts`'s CONTROLS_KEEPING_LAYOUT, which excludes tab
+    // and newline for text rendered across several lines — a different,
+    // separate class this export is not a stand-in for.
+    const NUL = String.fromCharCode(0);
+    const TAB = String.fromCharCode(9);
+    const ESC = String.fromCharCode(27);
+    const DEL = String.fromCharCode(127);
+    const C1_NEL = String.fromCharCode(0x85);
+    const LINE_SEPARATOR = String.fromCharCode(0x2028);
+    const PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
+
+    for (const char of [NUL, TAB, ESC, DEL, C1_NEL, LINE_SEPARATOR, PARAGRAPH_SEPARATOR]) {
+      expect(CONTROL_CHARS_PATTERN.test(char)).toBe(true);
+    }
+    expect(CONTROL_CHARS_PATTERN.test("a")).toBe(false);
+  });
+
+  it("builds a working replaceAll-capable /g regex from CONTROL_CHARS_SOURCE", () => {
+    // The design constraint the module doc states: a consumer needing
+    // replaceAll builds its own /g regex from the source string rather than
+    // flagging the exported pattern.
+    const flagged = new RegExp(`[${CONTROL_CHARS_SOURCE}]`, "g");
+    const hostile = `a${String.fromCharCode(0)}b${String.fromCharCode(27)}c`;
+
+    expect(hostile.replaceAll(flagged, "")).toBe("abc");
   });
 });

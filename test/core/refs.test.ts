@@ -1,35 +1,64 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DatabaseHandle } from "../../src/core/db/connection.js";
 import { readTx } from "../../src/core/db/connection.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
-import { parseRefInput, validateExplicitRef } from "../../src/core/refs/parse.js";
 import {
+  MAX_CACHED_STATUS_LENGTH,
+  MAX_CACHED_TITLE_LENGTH,
+  parseRefInput,
+  validateExplicitRef,
+} from "../../src/core/refs/parse.js";
+import {
+  applyRefresh,
+  applyRefreshWithin,
   gcOrphanRefsWithin,
   linkRef,
   linkRefWithin,
+  listOpenTaskRefs,
+  listOpenTaskRefsFor,
   listRefs,
   unlinkRef,
   unlinkRefWithin,
 } from "../../src/core/refs/repo.js";
 import { openStore } from "../../src/core/store.js";
 import { MAX_CANDIDATES } from "../../src/core/tasks/ids.js";
+import { textWidth } from "../../src/core/text.js";
 import { runConcurrent } from "../helpers/concurrent.js";
-import { seedEpic, seedTask } from "../helpers/seed.js";
+import { seedEpic, seedTask, seedTime } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/** A non-BMP character: two UTF-16 code units, one code point. */
+const EMOJI = "🜃";
 
 /**
  * A pass-through count of `writeTx` calls, for the atomicity-pin tests below
  * — the `board.test.ts`/`readTxSpy` pattern, mirrored for writes. The wrapper
  * delegates to the real implementation, so every other test in this file
  * still runs against genuine transactions.
+ *
+ * `hook`, when a test sets it, runs on the real connection **after
+ * `writeTx`'s `BEGIN IMMEDIATE` has already landed but before the wrapped
+ * callback (`applyRefresh`'s own body) does anything** — a way to inject a
+ * concurrent-writer-shaped mutation that is provably inside the same
+ * transaction the code under test is about to read and write in, without a
+ * second process or connection. `applyRefresh`'s holder fan-out test uses it
+ * to prove the holder `SELECT` runs fresh, at that point in the transaction,
+ * rather than off some earlier, hoisted read.
  */
-const writeTxSpy = vi.hoisted(() => ({ calls: 0 }));
+const writeTxSpy = vi.hoisted(() => ({
+  calls: 0,
+  hook: undefined as ((db: DatabaseHandle) => void) | undefined,
+}));
 vi.mock("../../src/core/db/connection.js", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../src/core/db/connection.js")>();
   const writeTx: typeof original.writeTx = (db, fn) => {
     writeTxSpy.calls += 1;
-    return original.writeTx(db, fn);
+    return original.writeTx(db, (now) => {
+      writeTxSpy.hook?.(db);
+      return fn(now);
+    });
   };
   return { ...original, writeTx };
 });
@@ -40,7 +69,12 @@ let fixture: StoreFixture;
 beforeEach(() => {
   fixture = createStoreFixture({ actor: ACTOR });
 });
-afterEach(() => fixture.cleanup());
+afterEach(() => {
+  // Hook cleared FIRST: if cleanup ever throws, a stale hook must not leak
+  // into the next test's transactions.
+  writeTxSpy.hook = undefined;
+  fixture.cleanup();
+});
 
 /** Every row in `refs`, for direct-DB assertions the spec calls for by name. */
 function refRows(): Array<Record<string, unknown>> {
@@ -704,6 +738,340 @@ describe("gcOrphanRefsWithin", () => {
 
   it("refuses to run outside an open transaction", () => {
     expect(() => gcOrphanRefsWithin(fixture.store, [1])).toThrowError(/open transaction/);
+  });
+});
+
+describe("listOpenTaskRefs", () => {
+  it("excludes terminal-holder-only refs", () => {
+    const done = seedTask(fixture.store, { lane: "Done" });
+    linkRef(fixture.store, done, GITHUB_REF);
+
+    expect(listOpenTaskRefs(fixture.store)).toEqual([]);
+  });
+
+  it("includes epic-held refs (pin)", () => {
+    // Decision, pinned: refresh has no level filter — an epic holding a ref
+    // directly gets refreshed exactly like a task would (repo.ts docs).
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    linkRef(fixture.store, epic, GITHUB_REF);
+
+    const result = listOpenTaskRefs(fixture.store);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.holderIds).toEqual([epic]);
+    expect(result[0]?.ref.externalId).toBe(GITHUB_REF.externalId);
+  });
+
+  it("dedupes shared refs with holders listed", () => {
+    const taskA = seedTask(fixture.store);
+    const taskB = seedTask(fixture.store);
+    linkRef(fixture.store, taskA, GITHUB_REF);
+    linkRef(fixture.store, taskB, GITHUB_REF);
+
+    const result = listOpenTaskRefs(fixture.store);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.ref.externalId).toBe(GITHUB_REF.externalId);
+    expect(result[0]?.holderIds).toEqual([taskA, taskB]);
+  });
+
+  it("scoped variant", () => {
+    const taskA = seedTask(fixture.store);
+    const taskB = seedTask(fixture.store);
+    const done = seedTask(fixture.store, { lane: "Done" });
+    linkRef(fixture.store, taskA, GITHUB_REF);
+    linkRef(fixture.store, taskB, LINEAR_BARE_REF);
+    linkRef(fixture.store, done, GITHUB_REF);
+
+    const result = listOpenTaskRefsFor(fixture.store, [taskA]);
+
+    expect(result).toHaveLength(1);
+    expect(result[0]?.ref.externalId).toBe(GITHUB_REF.externalId);
+    expect(result[0]?.holderIds).toEqual([taskA]);
+
+    // Still lane-filtered: naming a terminal-lane task explicitly returns
+    // nothing for it, exactly as if it held no refs at all.
+    expect(listOpenTaskRefsFor(fixture.store, [done])).toEqual([]);
+
+    // Empty input never reaches the database (a bare SQL `IN ()` is invalid
+    // syntax, not an empty-set match).
+    expect(listOpenTaskRefsFor(fixture.store, [])).toEqual([]);
+  });
+});
+
+describe("applyRefreshWithin / applyRefresh", () => {
+  it("first transition -> caches + changed", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    const result = applyRefresh(fixture.store, refId, { status: "open", title: "Fix bug" });
+
+    expect(result).toEqual({
+      kind: "changed",
+      externalId: GITHUB_REF.externalId,
+      from: null,
+      to: "open",
+    });
+
+    const row = refRows()[0];
+    expect(row?.cached_status).toBe("open");
+    expect(row?.cached_title).toBe("Fix bug");
+    expect(row?.synced_at).not.toBeNull();
+
+    const events = eventsOfType("ref-status-changed");
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      entity_id: task,
+      ref: GITHUB_REF.externalId,
+      reason: "none -> open",
+      actor: ACTOR,
+    });
+  });
+
+  it("a real status transition (open -> merged) updates the cache and events exactly once", () => {
+    // AC2's literal scenario — two DIFFERENT stored-vs-resolved values, not
+    // first-sync (null -> X) and not title-only (X -> X). QA round-1 found
+    // every prior "transition" test was one of those two shapes.
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    applyRefresh(fixture.store, refId, { status: "open", title: "Fix bug" });
+    const result = applyRefresh(fixture.store, refId, { status: "merged", title: "Fix bug" });
+
+    expect(result).toEqual({
+      kind: "changed",
+      externalId: GITHUB_REF.externalId,
+      from: "open",
+      to: "merged",
+    });
+    expect(refRows()[0]?.cached_status).toBe("merged");
+
+    const events = eventsOfType("ref-status-changed");
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      entity_id: task,
+      ref: GITHUB_REF.externalId,
+      reason: "open -> merged",
+      actor: ACTOR,
+    });
+  });
+
+  it("identical second -> unchanged + synced_at bump + NO event", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    applyRefresh(fixture.store, refId, { status: "open", title: "Fix bug" });
+
+    // Backdated directly, so the bump is provable without depending on two
+    // calls landing in different milliseconds of the real clock.
+    const stale = seedTime();
+    fixture.store.db.prepare("UPDATE refs SET synced_at = ? WHERE id = ?").run(stale, refId);
+
+    const result = applyRefresh(fixture.store, refId, { status: "open", title: "Fix bug" });
+
+    expect(result).toEqual({ kind: "unchanged" });
+    const row = refRows()[0];
+    expect(row?.cached_status).toBe("open");
+    expect(row?.cached_title).toBe("Fix bug");
+    expect(Date.parse(row?.synced_at as string)).toBeGreaterThan(Date.parse(stale));
+    expect(eventsOfType("ref-status-changed")).toHaveLength(1);
+  });
+
+  it("a row already carrying the outcome (written outside this module) -> unchanged, zero events", () => {
+    // Simulates a concurrent writer landing between a network round trip and
+    // this call: the row already holds the exact outcome about to be
+    // applied, written directly rather than through this module.
+    // applyRefreshWithin must re-SELECT inside its own transaction and diff
+    // against THAT, never a stale snapshot gathered before any await.
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    fixture.store.db
+      .prepare("UPDATE refs SET cached_status = ?, cached_title = ? WHERE id = ?")
+      .run("merged", "Fix bug", refId);
+
+    const result = applyRefresh(fixture.store, refId, { status: "merged", title: "Fix bug" });
+
+    expect(result).toEqual({ kind: "unchanged" });
+    expect(eventsOfType("ref-status-changed")).toHaveLength(0);
+  });
+
+  it("vanished -> gone, no throw", () => {
+    const result = applyRefresh(fixture.store, 999999, { status: "open", title: null });
+
+    expect(result).toEqual({ kind: "gone" });
+    expect(eventsOfType("ref-status-changed")).toHaveLength(0);
+  });
+
+  it("shared ref two tasks: one transition -> exactly two events, per-holder epic ids", () => {
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    const childA = seedTask(fixture.store, { parentId: epic });
+    const taskB = seedTask(fixture.store);
+    linkRef(fixture.store, childA, GITHUB_REF);
+    linkRef(fixture.store, taskB, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    applyRefresh(fixture.store, refId, { status: "merged", title: "Fix bug" });
+
+    const events = eventsOfType("ref-status-changed");
+    expect(events).toHaveLength(2);
+    const byEntity = new Map(events.map((event) => [event.entity_id, event]));
+    expect(byEntity.get(childA)).toMatchObject({ epic_id: epic });
+    expect(byEntity.get(taskB)).toMatchObject({ epic_id: null });
+  });
+
+  it("fans out to terminal-lane holders too, unlike the scoping read", () => {
+    // Decision, pinned: unlike listOpenTaskRefs's lane filter (which only
+    // decides which refs a refresh run resolves), applyRefresh's own
+    // fan-out is unconditional — every current holder hears about a change,
+    // including one that closed while the ref was mid-flight.
+    const open = seedTask(fixture.store);
+    const done = seedTask(fixture.store, { lane: "Done" });
+    linkRef(fixture.store, open, GITHUB_REF);
+    linkRef(fixture.store, done, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    applyRefresh(fixture.store, refId, { status: "merged", title: "Fix bug" });
+
+    const events = eventsOfType("ref-status-changed");
+    expect(events.map((event) => event.entity_id)).toEqual([open, done]);
+  });
+
+  it("honors a holder linked inside the transaction, skips one unlinked there", () => {
+    // Proves the holder read happens fresh, at write time, inside the same
+    // transaction — not from some earlier, hoisted-out-of-the-tx read. The
+    // hook fires right after writeTx's lock lands and right before
+    // applyRefresh's own body runs, so by the time the fan-out's own SELECT
+    // executes, "kept" is still linked, "toRemove" no longer is, and "late"
+    // just became linked — all inside the one transaction under test.
+    const kept = seedTask(fixture.store);
+    const toRemove = seedTask(fixture.store);
+    const late = seedTask(fixture.store);
+    linkRef(fixture.store, kept, GITHUB_REF);
+    linkRef(fixture.store, toRemove, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    writeTxSpy.hook = (db) => {
+      db.prepare("DELETE FROM task_refs WHERE task_id = ? AND ref_id = ?").run(toRemove, refId);
+      db.prepare("INSERT INTO task_refs (task_id, ref_id) VALUES (?,?)").run(late, refId);
+    };
+
+    applyRefresh(fixture.store, refId, { status: "merged", title: "Fix bug" });
+
+    const events = eventsOfType("ref-status-changed");
+    expect(events.map((event) => event.entity_id)).toEqual([kept, late]);
+  });
+
+  it("one writeTx per ref (spy)", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    writeTxSpy.calls = 0;
+    applyRefresh(fixture.store, refId, { status: "open", title: "Fix bug" });
+
+    expect(writeTxSpy.calls).toBe(1);
+  });
+
+  it("title-only change events", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    applyRefresh(fixture.store, refId, { status: "open", title: "Title A" });
+    const second = applyRefresh(fixture.store, refId, { status: "open", title: "Title B" });
+
+    expect(second).toEqual({
+      kind: "changed",
+      externalId: GITHUB_REF.externalId,
+      from: "open",
+      to: "open",
+    });
+    expect(refRows()[0]?.cached_title).toBe("Title B");
+
+    const events = eventsOfType("ref-status-changed");
+    expect(events).toHaveLength(2);
+    expect(events[1]?.reason).toBe("open -> open");
+  });
+
+  it("OVER-BOUND TITLE IS CAPPED at the seam, stored value exactly MAX_CACHED_TITLE_LENGTH code points (direct call — the backstop discriminates; astral char at the boundary)", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    // The emoji sits exactly on the cut: 499 plain characters ahead of it
+    // put it at code point 500, the last one MAX_CACHED_TITLE_LENGTH keeps —
+    // a naive `.slice()` here would split its surrogate pair.
+    const prefix = "a".repeat(MAX_CACHED_TITLE_LENGTH - 1);
+    const title = `${prefix}${EMOJI}well past the boundary`;
+
+    const result = fixture.store.db.transaction(() =>
+      applyRefreshWithin(fixture.store, refId, { status: "open", title }, { syncedAt: seedTime() }),
+    )();
+
+    expect(result.kind).toBe("changed");
+    const stored = refRows()[0]?.cached_title as string;
+    expect(textWidth(stored)).toBe(MAX_CACHED_TITLE_LENGTH);
+    expect(stored).toBe(`${prefix}${EMOJI}`);
+  });
+
+  it("screens control characters out of cached_title", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    // House rule: no raw control bytes typed literally — every one built via
+    // fromCharCode. NUL, Unit Separator, newline, and the Unicode line
+    // separator, interleaved through otherwise-ordinary text.
+    const NUL = String.fromCharCode(0x00);
+    const UNIT_SEPARATOR = String.fromCharCode(0x1f);
+    const NEWLINE = String.fromCharCode(0x0a);
+    const LINE_SEPARATOR = String.fromCharCode(0x2028);
+    const title = `Fix${NUL}the${UNIT_SEPARATOR}bug${NEWLINE}right${LINE_SEPARATOR}now`;
+
+    applyRefresh(fixture.store, refId, { status: "open", title });
+
+    expect(refRows()[0]?.cached_title).toBe("Fixthebugrightnow");
+  });
+
+  it("over-bound status capped to exactly MAX_CACHED_STATUS_LENGTH code points", () => {
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    const status = "s".repeat(MAX_CACHED_STATUS_LENGTH + 50);
+
+    const result = fixture.store.db.transaction(() =>
+      applyRefreshWithin(fixture.store, refId, { status, title: null }, { syncedAt: seedTime() }),
+    )();
+
+    expect(result.kind).toBe("changed");
+    const stored = refRows()[0]?.cached_status as string;
+    expect(textWidth(stored)).toBe(MAX_CACHED_STATUS_LENGTH);
+    expect(stored).toBe("s".repeat(MAX_CACHED_STATUS_LENGTH));
+  });
+
+  it("unchanged never events (force-event mutation fails)", () => {
+    // A mutation that made the "unchanged" branch append an event anyway
+    // would only be caught by asserting it stays at zero across *repeated*
+    // identical calls, not just the one call after the first real change.
+    const task = seedTask(fixture.store);
+    linkRef(fixture.store, task, GITHUB_REF);
+    const refId = refRows()[0]?.id as number;
+
+    const outcome = { status: "open", title: "Fix bug" };
+    applyRefresh(fixture.store, refId, outcome);
+    expect(eventsOfType("ref-status-changed")).toHaveLength(1);
+
+    applyRefresh(fixture.store, refId, outcome);
+    applyRefresh(fixture.store, refId, outcome);
+    applyRefresh(fixture.store, refId, outcome);
+
+    expect(eventsOfType("ref-status-changed")).toHaveLength(1);
   });
 });
 

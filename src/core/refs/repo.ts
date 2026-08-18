@@ -56,17 +56,31 @@
  * as its own action, and `linkRef` events it exactly like a fresh link (see
  * both functions' docs for the full reasoning and the entity-scoping this
  * implies for a *different* task sharing the same row).
+ *
+ * **F8 T4 adds this module's fourth `Within` seam and its own public
+ * wrapper**: `listOpenTaskRefs`/`listOpenTaskRefsFor` are the read side —
+ * every ref linked to at least one open task, the scope `refresh` (T5)
+ * resolves against a provider — and `applyRefreshWithin`/`applyRefresh` are
+ * the write side, filling `cached_status`/`cached_title`/`synced_at` once a
+ * provider has answered and fanning `ref-status-changed` out to every current
+ * holder when something actually moved. `core/refs` **never imports
+ * `core/providers`**: T3's GitHub provider imports `MAX_CACHED_TITLE_LENGTH`
+ * from this package's `parse.ts` instead (the T3 -> T4 edge), which is what
+ * makes the reverse direction here a cycle rather than a convenience.
  */
 
 import type { RefResult } from "../contract.js";
 import { assertNotReadOnly, writeTx } from "../db/connection.js";
+import { sqlEnum, TERMINAL_LANES } from "../enums.js";
 import { KatraException } from "../errors.js";
 import { appendEvent, epicIdFor } from "../events/repo.js";
 import { narrowNullableText, narrowText } from "../narrow.js";
 import type { OpenStore } from "../store.js";
 import { MAX_CANDIDATES, requireResolved, resolveId } from "../tasks/ids.js";
 import { getTask } from "../tasks/repo.js";
-import type { Ref } from "./types.js";
+import { CONTROL_CHARS_SOURCE, capText } from "../text.js";
+import { MAX_CACHED_STATUS_LENGTH, MAX_CACHED_TITLE_LENGTH } from "./parse.js";
+import type { Ref, RefreshOutcome } from "./types.js";
 
 /**
  * What `linkRef`/`linkRefWithin` accept.
@@ -669,4 +683,391 @@ export function listRefs(store: OpenStore, taskIdInput: string): Ref[] {
  */
 export function listRefsFor(store: OpenStore, taskId: string): Ref[] {
   return linkedRefRows(store, taskId).map(rowToRef);
+}
+
+/**
+ * One `refs` row {@link listOpenTaskRefs}/{@link listOpenTaskRefsFor} found
+ * linked to at least one open task, with every one of *those* open holders —
+ * never a terminal-lane one, and never {@link applyRefresh}'s own later,
+ * fresher holder read (see that function's docs for why the two deliberately
+ * do not share one query: a scoping read taken before a network round trip
+ * and a fan-out read taken at write time cannot promise to agree).
+ *
+ * **Warning for `refresh` (T5): this is a pre-network snapshot, nothing
+ * more.** `listOpenTaskRefs`/`listOpenTaskRefsFor` run once, before any
+ * provider `resolve` call. By the time a resolved outcome reaches
+ * `applyRefresh`'s write, real time has passed — a network round trip,
+ * possibly several, sequenced across every ref in the run (epic risk note
+ * 12: sequential resolution) — and `holderIds` here can already be stale: a
+ * holder can unlink, a new one can link, the ref itself can vanish. Treat
+ * `holderIds` as scope-planning input only (which refs are worth resolving,
+ * roughly who cares about the answer), never as the authoritative set to
+ * write an event against — `applyRefresh`'s own fan-out re-reads fresh,
+ * inside its transaction, for exactly this reason, and a caller that instead
+ * events off this field is reading a snapshot that was never promised to
+ * still be true.
+ */
+export interface OpenRef {
+  readonly refId: number;
+  readonly ref: Ref;
+  readonly holderIds: readonly string[];
+}
+
+/**
+ * Groups the flat ref+holder rows {@link openRefRows} produces into one
+ * {@link OpenRef} per unique `refs.id`, holder ids in the query's own order
+ * (`task_refs`'s rowid — link order, the same convention {@link linkedRefRows}
+ * documents). Relies on `Map`'s own iteration order — insertion order, per
+ * spec — rather than tracking a parallel list of the ids seen: the row scan
+ * below inserts each `refs.id` into `byId` at most once, in the order it
+ * first appears, which is already the order this needs to return in.
+ */
+function groupOpenRefRows(
+  rows: ReadonlyArray<RefRow & { readonly holder_id: unknown }>,
+): OpenRef[] {
+  const byId = new Map<number, { readonly ref: Ref; readonly holderIds: string[] }>();
+
+  for (const row of rows) {
+    const record = rowToRefRecord(row);
+    const holderId = narrowText(row.holder_id, "task_id");
+
+    let entry = byId.get(record.id);
+    if (entry === undefined) {
+      entry = { ref: record.ref, holderIds: [] };
+      byId.set(record.id, entry);
+    }
+    entry.holderIds.push(holderId);
+  }
+
+  return Array.from(byId, ([refId, entry]) => ({
+    refId,
+    ref: entry.ref,
+    holderIds: entry.holderIds,
+  }));
+}
+
+/**
+ * The one query {@link listOpenTaskRefs}/{@link listOpenTaskRefsFor} both
+ * run: refs joined through `task_refs` to `tasks`, filtered to open (non-
+ * {@link TERMINAL_LANES}) holders, optionally further restricted to
+ * `taskIds`. One SQL block and one lane filter, so the "open" invariant both
+ * public functions promise cannot drift between an unscoped and a scoped
+ * copy of the same `WHERE`.
+ *
+ * `taskIds === undefined` means unscoped (every open task); an **empty**
+ * array is the scoped-to-nothing case and returns with no query at all — a
+ * bare SQL `IN ()` is invalid syntax, not an empty-set match.
+ */
+function openRefRows(
+  store: OpenStore,
+  taskIds?: readonly string[],
+): Array<RefRow & { readonly holder_id: unknown }> {
+  if (taskIds !== undefined && taskIds.length === 0) return [];
+
+  const scopeClause =
+    taskIds === undefined ? "" : `AND t.id IN (${taskIds.map(() => "?").join(",")})`;
+
+  return store.db
+    .prepare(
+      `SELECT r.*, tr.task_id AS holder_id
+         FROM refs r
+         JOIN task_refs tr ON tr.ref_id = r.id
+         JOIN tasks t ON t.id = tr.task_id
+        WHERE t.lane NOT IN (${sqlEnum(TERMINAL_LANES)})
+        ${scopeClause}
+        ORDER BY r.id, tr.rowid`,
+    )
+    .all(...(taskIds ?? [])) as Array<RefRow & { readonly holder_id: unknown }>;
+}
+
+/**
+ * Every ref currently linked to at least one **open** task — any lane except
+ * {@link TERMINAL_LANES} — deduped to one entry per `refs.id`. `refresh` (T5)
+ * runs this with no explicit ids: "every ref linked to open tasks" (spec req
+ * 5).
+ *
+ * **No `level` filter — epic-held refs are refreshed too.** `linkRefWithin`
+ * places no restriction on which level can hold a ref (the existing "epic
+ * takes a ref and lists it" test in this suite proves it), and an epic's own
+ * lane is exactly as terminal or non-terminal as a task's. Filtering
+ * `task_refs` by level here would silently stop refreshing every ref an epic
+ * holds the moment this query started existing — nothing about `refresh`'s
+ * job cares which level a holder is, only whether it is still open.
+ */
+export function listOpenTaskRefs(store: OpenStore): OpenRef[] {
+  return groupOpenRefRows(openRefRows(store));
+}
+
+/**
+ * {@link listOpenTaskRefs}, scoped to `taskIds` — `refresh <ids...>`'s own
+ * query (spec req 5: "with ids, just those tasks' refs"). Takes
+ * already-resolved task ids, exactly as {@link listRefsFor} does relative to
+ * {@link listRefs}: resolving a raw CLI argument, and refusing a nonexistent
+ * one with the house `not_found` shape, is `refresh`'s own job — this
+ * function only joins and filters what it is handed.
+ *
+ * Still lane-filtered, same as the unscoped form: a task named explicitly
+ * that is not open contributes no rows, exactly as if it held no refs at
+ * all — the "open task" invariant this function's name promises does not
+ * bend just because a caller named the task directly instead of this
+ * function finding it on its own.
+ *
+ * Empty input returns no rows without ever reaching the database: a bare SQL
+ * `IN ()` is invalid syntax, not an empty-set match.
+ */
+export function listOpenTaskRefsFor(store: OpenStore, taskIds: readonly string[]): OpenRef[] {
+  return groupOpenRefRows(openRefRows(store, taskIds));
+}
+
+/**
+ * The control-character vocabulary {@link applyRefreshWithin}'s write-seam
+ * backstop screens out of `cached_title` — {@link CONTROL_CHARS_SOURCE}
+ * (`text.ts`, imported, never copied), flagged `/g` here rather than left
+ * unflagged like `refs/parse.ts`'s own `CONTROL_CHARS_PATTERN`: this seam
+ * *caps*, it does not refuse (see that function's docs for the iter-2
+ * decision), and `.replaceAll` is what needs the global flag.
+ */
+const CACHED_TITLE_CONTROL_CHARS_PATTERN = new RegExp(`[${CONTROL_CHARS_SOURCE}]`, "g");
+
+/**
+ * `applyRefreshWithin`'s write-seam backstop for `cached_title`: screens out
+ * every control character, then caps to {@link MAX_CACHED_TITLE_LENGTH} code
+ * points with `capText` (never splits a surrogate pair) — never refuses,
+ * never throws, for any input. `null` passes straight through: "no title" is
+ * an ordinary outcome (a provider that has a status but nothing to call the
+ * thing), not a value this exists to sanitize.
+ */
+function sanitizeCachedTitle(title: string | null): string | null {
+  if (title === null) return null;
+  return capText(title.replaceAll(CACHED_TITLE_CONTROL_CHARS_PATTERN, ""), MAX_CACHED_TITLE_LENGTH)
+    .text;
+}
+
+/**
+ * What {@link applyRefreshWithin} (and its public wrapper,
+ * {@link applyRefresh}) hands back. Never a thrown exception for any of the
+ * three cases — a ref that vanished out from under a refresh is exactly as
+ * ordinary an outcome as one whose cached fields did not move (epic risk
+ * note 8: "never a thrown internal that aborts the run").
+ */
+export type ApplyRefreshResult =
+  | { readonly kind: "gone" }
+  | { readonly kind: "unchanged" }
+  | {
+      readonly kind: "changed";
+      /** The qualified external id — `applyRefresh`'s event needs it, this row's own `SELECT` already has it. */
+      readonly externalId: string;
+      /** The status before this write, or `null` when the ref had never synced. */
+      readonly from: string | null;
+      readonly to: string;
+    };
+
+/**
+ * Applies one resolved provider outcome to a ref — the row-mutation core of
+ * `refresh` (T5)'s per-ref write, called once network resolution has already
+ * happened with **no transaction open** (epic risk note 5: `writeTx` is
+ * sync, and a provider's `resolve` is not — the two must never overlap).
+ *
+ * **Must be called inside an open transaction**, same guard as this module's
+ * other three `Within` seams. Writes no event: {@link applyRefresh} does,
+ * after this returns `"changed"`.
+ *
+ * **Re-`SELECT`s the ref inside the transaction** and diffs against *that*
+ * read, never a snapshot taken before `resolve`'s `await` — the TOCTOU
+ * discipline epic risk note 6 requires, since another writer's commit could
+ * land in the gap a network round trip leaves open. Two things fall out of
+ * re-reading fresh rather than trusting what the caller gathered earlier:
+ *
+ * 1. **Vanished — `{kind: "gone"}`, never a throw.** The ref (or its last
+ *    holder, cascading it away) can disappear in that same gap (epic risk
+ *    note 8) — `refresh` reports it and moves on, exactly like any other
+ *    per-ref outcome, not an internal error that aborts every ref after it.
+ * 2. **Already-current — `{kind: "unchanged"}`.** Two concurrent refreshes
+ *    (or a re-run) can both resolve the same outcome; the second to reach
+ *    this write sees its own value already sitting in the row and writes
+ *    nothing but `synced_at` — the idempotence AC 1 and AC 2 both promise.
+ *
+ * **The write-seam backstop (iter-2 decision): caps, never refuses.**
+ * `cached_status`/`cached_title` carry no DDL `CHECK` (migration 0005's own
+ * docstring: a provider's vocabulary is not that migration's to define), so
+ * this function is where a hostile or merely oversized tracker response gets
+ * bounded (epic requirement 8) — never by throwing back at the caller, since
+ * a `refresh` run has no useful way to "refuse" one ref out of many without
+ * aborting the rest. `title` goes through {@link sanitizeCachedTitle}
+ * (screen, then cap — silent, always). `status` gets no such treatment: this
+ * function only **asserts** it is non-empty, an `internal` failure rather
+ * than a typed refusal, because an empty status is a broken caller, not
+ * malformed external data — every real provider (T3) validates its own
+ * status vocabulary before ever calling this, and an empty string reaching
+ * here means something upstream skipped straight past its own `unresolved`
+ * branch. Length is a different story: `status` still goes through the same
+ * silent `capText` as `title`, bounded to {@link MAX_CACHED_STATUS_LENGTH} —
+ * a real provider's status is a short enum word nowhere near that bound, but
+ * this seam caps first and trusts second, the same backstop reasoning as
+ * `title`'s, not a claim that a legitimate value ever needs it.
+ *
+ * **Diffs on `status` *and* `title` together** — a title-only change (the
+ * PR's headline was edited, its state did not move) still counts as
+ * `"changed"` and still writes an event; comparing `status` alone would
+ * silently drop it. On any difference, both columns are written together
+ * with `synced_at`; on none, only `synced_at` bumps — `refresh`'s spec-
+ * intended write amplification on an idempotent run (epic risk note 13:
+ * "note in module docs" — this is that note). **Never touches `tasks`**: a
+ * ref's cache is not task state, and nothing about a status catching up with
+ * reality should move a lane, close a task, or touch `updated_at`.
+ */
+export function applyRefreshWithin(
+  store: OpenStore,
+  refId: number,
+  outcome: RefreshOutcome,
+  ctx: { readonly syncedAt: string },
+): ApplyRefreshResult {
+  if (!store.db.inTransaction) {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "applyRefreshWithin must be called inside an open transaction — a cache " +
+        "write that commits on its own can outlive the change it's part of",
+    });
+  }
+  assertNotReadOnly(store.db, "applyRefreshWithin");
+
+  if (outcome.status === "") {
+    throw new KatraException({
+      code: "internal",
+      message:
+        "applyRefreshWithin: outcome.status must not be empty — a provider with " +
+        "nothing to report belongs in the unresolved branch upstream, never here",
+    });
+  }
+
+  const currentRow = store.db
+    .prepare("SELECT external_id, cached_status, cached_title FROM refs WHERE id = ?")
+    .get(refId) as
+    | {
+        readonly external_id: unknown;
+        readonly cached_status: unknown;
+        readonly cached_title: unknown;
+      }
+    | undefined;
+
+  if (currentRow === undefined) {
+    return { kind: "gone" };
+  }
+
+  const previousStatus = narrowNullableText(currentRow.cached_status, "cached_status");
+  const previousTitle = narrowNullableText(currentRow.cached_title, "cached_title");
+  const nextStatus = capText(outcome.status, MAX_CACHED_STATUS_LENGTH).text;
+  const nextTitle = sanitizeCachedTitle(outcome.title);
+
+  if (nextStatus === previousStatus && nextTitle === previousTitle) {
+    store.db.prepare("UPDATE refs SET synced_at = ? WHERE id = ?").run(ctx.syncedAt, refId);
+    return { kind: "unchanged" };
+  }
+
+  store.db
+    .prepare("UPDATE refs SET cached_status = ?, cached_title = ?, synced_at = ? WHERE id = ?")
+    .run(nextStatus, nextTitle, ctx.syncedAt, refId);
+
+  return {
+    kind: "changed",
+    externalId: narrowText(currentRow.external_id, "external_id"),
+    from: previousStatus,
+    to: nextStatus,
+  };
+}
+
+/**
+ * Applies one resolved provider outcome and records the transition —
+ * `refresh` (T5)'s public entry point, called once per unique `refs.id`
+ * after resolving it through a provider (epic risk note 9: resolve once,
+ * dedupe by `refs.id`, halving API cost against a ref shared by several
+ * tasks).
+ *
+ * One `writeTx` per ref, not one per holder — the named test this pins.
+ * `applyRefreshWithin` does the row-mutation core; this wrapper adds the
+ * event on top, fanned out to **every current holder of the ref, re-read
+ * fresh inside this same transaction** — never the holder list a caller
+ * gathered before the network round trip (`listOpenTaskRefs`'s own docs
+ * explain why that list and this read do not promise to agree): a holder can
+ * unlink, or a new one can link, in the gap a provider's `resolve` leaves
+ * open, and only a read taken at write time can speak for what is true right
+ * now. A ref shared by two tasks and one status transition therefore appends
+ * exactly two events, one per holder, each carrying that holder's own
+ * `epicIdFor` — never one event shared between them.
+ *
+ * **Not lane-filtered — unlike `listOpenTaskRefs`.** The fan-out reads every
+ * row `task_refs` has for this ref, holder lane and all: a task that closed
+ * while its PR was still mid-flight gets its own `ref-status-changed` event
+ * too, recording that the ref it once linked moved, exactly as its own
+ * history should (epic risk note 9: "fan out ... to EVERY current holder
+ * task", no terminal-lane carve-out). `listOpenTaskRefs`'s lane filter only
+ * decides which refs a `refresh` run resolves in the first place — once a
+ * ref's outcome is being written, every current holder hears about it,
+ * whatever lane it sits in.
+ *
+ * The event's `reason` is the status transition, rendered `"OLD -> NEW"` in
+ * this one place — `"OLD"` reads `"none"` when the ref had never synced
+ * before (`applyRefreshWithin`'s `from: null`), since there is no prior
+ * status to name. A title-only change (status unchanged) still renders as
+ * `"OLD -> OLD"` — worth T6's rendering layer treating distinctly from a
+ * real transition when it gets there; nothing here changes because of it.
+ * `ref` carries the qualified external id, matching `ref-linked`/
+ * `ref-unlinked`'s own convention; `fromLane`/`toLane` stay `NULL` — a ref's
+ * status is not a lane, and this event never touches one.
+ *
+ * `actor` is resolved once, before the transaction — the same reason
+ * `linkRef`/`unlinkRef` do: resolving it spawns git subprocesses, and doing
+ * that under `BEGIN IMMEDIATE` would hold the write lock across them.
+ */
+export function applyRefresh(
+  store: OpenStore,
+  refId: number,
+  outcome: RefreshOutcome,
+): ApplyRefreshResult {
+  const actor = store.actor();
+
+  return writeTx(store.db, (now) => {
+    const result = applyRefreshWithin(store, refId, outcome, { syncedAt: now });
+
+    if (result.kind !== "changed") return result;
+
+    // Ordered by task_refs' own rowid (link order) — the same convention
+    // linkedRefRows/openRefRows use — so the event fan-out below is
+    // deterministic rather than whatever order an unordered scan happens to
+    // produce.
+    const holderRows = store.db
+      .prepare("SELECT task_id FROM task_refs WHERE ref_id = ? ORDER BY rowid")
+      .all(refId) as Array<{
+      readonly task_id: unknown;
+    }>;
+
+    const reason = `${result.from ?? "none"} -> ${result.to}`;
+
+    for (const holderRow of holderRows) {
+      const holderId = narrowText(holderRow.task_id, "task_id");
+      const task = getTask(store, holderId);
+      if (task === undefined) {
+        throw new KatraException({
+          code: "internal",
+          message: `task ${holderId} disappeared between holding ref ${refId} and being read`,
+        });
+      }
+
+      appendEvent(
+        store,
+        {
+          type: "ref-status-changed",
+          entityId: holderId,
+          epicId: epicIdFor(task),
+          actor,
+          ref: result.externalId,
+          reason,
+        },
+        now,
+      );
+    }
+
+    return result;
+  });
 }
