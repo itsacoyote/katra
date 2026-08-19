@@ -33,6 +33,11 @@ describe("KatraException", () => {
         value: "Bogus",
       }),
       new KatraException({ code: "conflict", message: "held", reason: "epic has 3 children" }),
+      new KatraException({
+        code: "claimed_elsewhere",
+        message: "kt-abc123 is claimed by /repo/wt-other",
+        holder: "/repo/wt-other",
+      }),
       new KatraException({ code: "usage", message: "unknown option --nope" }),
     ];
 
@@ -48,6 +53,8 @@ describe("KatraException", () => {
           return `${e.detail.field}=${String(e.detail.value)}`;
         case "conflict":
           return e.detail.reason;
+        case "claimed_elsewhere":
+          return e.detail.holder;
         case "usage":
         case "internal":
           return e.detail.message;
@@ -63,8 +70,25 @@ describe("KatraException", () => {
       "kt-a->kt-b->kt-a",
       "lane=Bogus",
       "epic has 3 children",
+      "/repo/wt-other",
       "unknown option --nope",
     ]);
+  });
+
+  it("carries the structured holder on a claimed_elsewhere detail", () => {
+    // F9 T1: the house rule is a structured payload, not a string a caller
+    // has to re-parse — `reconcile --json`'s skip report reads `holder`
+    // directly off this field.
+    const err = new KatraException({
+      code: "claimed_elsewhere",
+      message: "kt-abc123 is claimed by /repo/wt-other — refusing to change it from here",
+      holder: "/repo/wt-other",
+    });
+
+    expect(err.detail.code).toBe("claimed_elsewhere");
+    if (err.detail.code !== "claimed_elsewhere") throw new Error("unreachable");
+    expect(err.detail.holder).toBe("/repo/wt-other");
+    expect(err.message).toMatch(/wt-other/);
   });
 
   it("is catchable as an Error and reports its own name", () => {
@@ -110,6 +134,9 @@ describe("the exit-code mapping", () => {
       // formed — only the current shape of the graph refuses it.
       cycle: EXIT.conflict,
       conflict: EXIT.conflict,
+      // Same conflict exit, same reasoning: the task and the request are
+      // both fine, only another worktree's live claim refuses the move.
+      claimed_elsewhere: EXIT.conflict,
       usage: EXIT.usage,
     });
   });

@@ -47,6 +47,10 @@ const EXIT_FOR_ERROR = {
   // succeeds — which is what separates 3 from 1.
   cycle: EXIT.conflict,
   conflict: EXIT.conflict,
+  // Same conflict exit as the code above, same reasoning (ADR-005's
+  // user-vs-conflict line): the task exists, the request is well-formed, and
+  // only another worktree's live claim on it refuses the move.
+  claimed_elsewhere: EXIT.conflict,
   usage: EXIT.usage,
 } satisfies Record<KatraErrorCode, number>;
 
@@ -180,6 +184,13 @@ function formatErrorHint(detail: KatraErrorDetail): string {
     case "not_found":
     case "validation":
     case "conflict":
+    // The holder already names itself in `detail.message`'s prose (the
+    // throw site builds it that way) — rendered through the existing
+    // `oneLine(detail.message)` line above this switch, same as every other
+    // code. No extra hint content: `holder` exists on the detail for
+    // `--json` consumers to read as data, not for this text-only sink to
+    // repeat.
+    case "claimed_elsewhere":
     case "usage":
     case "internal":
       return "";
