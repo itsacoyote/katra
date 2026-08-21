@@ -13,7 +13,7 @@
  * from whoever was about to start it.
  */
 
-import { claimFor, settleClaim } from "../claims/repo.js";
+import { claimFor, describeLiveness, settleClaim } from "../claims/repo.js";
 import type { LifecycleResult } from "../contract.js";
 import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import type { EventType, Lane } from "../enums.js";
@@ -50,6 +50,21 @@ export interface LifecycleOverrides {
    * `released` event) with this actor instead of resolving `store.actor()`.
    * `store.actor()` is a live git spawn; when this is given, it is never
    * called at all — not merely overridden after the fact.
+   *
+   * **Does not imply claim safety.** `actor` alone changes *who gets
+   * blamed*, not *what is allowed to happen*: given on its own, without
+   * `refuseIfClaimedElsewhere`, it still force-settles a claim held by
+   * another worktree exactly as an ordinary non-holder `close`/`cancel`
+   * does today — `settleClaim` runs unconditionally whenever a transition
+   * closes. On that settled `released` event, `priorActor` names the
+   * worktree actually displaced; `actor` names whatever this override says,
+   * which — for `reconcile` — never held the claim in the first place. The
+   * two fields answer different questions and must not be conflated. F9's
+   * `reconcile` sets **both** `actor` and `refuseIfClaimedElsewhere`
+   * together (epic requirement 6: a foreign claim is skipped, never
+   * overridden); a future caller that wants `actor` alone, without the
+   * claim guard, has to justify that choice in its own docs — this
+   * interface does not grant it by default.
    */
   readonly actor?: string;
   /**
@@ -226,6 +241,18 @@ function transition(
   plan: (task: Task) => Move,
   overrides?: LifecycleOverrides,
 ): LifecycleResult {
+  // Before even resolving the id, let alone the write lock: an empty string
+  // is never a real actor, and the only way to reach this branch is a caller
+  // that meant to omit the override (`undefined`) and passed `""` instead —
+  // refused as `internal`, a broken caller rather than a typed refusal a
+  // user could trigger.
+  if (overrides?.actor === "") {
+    throw new KatraException({
+      code: "internal",
+      message: "LifecycleOverrides.actor must not be empty — omit it to use the store's own actor",
+    });
+  }
+
   const id = requireId(store, idInput);
   // Before the transaction: resolving identity spawns git subprocesses, and
   // doing that under `BEGIN IMMEDIATE` holds the write lock across them. Both
@@ -251,7 +278,12 @@ function transition(
       if (claim !== null && claim.holder !== worktree) {
         throw new KatraException({
           code: "claimed_elsewhere",
-          message: `${id} is claimed by ${claim.holder} — refusing to change it from here`,
+          // Same house shape `claimTask`'s own conflict refusal uses
+          // (`claims/repo.ts`): actor + liveness, via the shared
+          // `describeLiveness`. `detail.holder` stays the worktree path —
+          // the structured field a caller reads as data — while the
+          // message names the human-legible actor instead.
+          message: `${id} is held by ${claim.actor}, ${describeLiveness(claim, now)} — refusing to change it from here`,
           holder: claim.holder,
         });
       }

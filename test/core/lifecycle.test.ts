@@ -41,10 +41,34 @@ vi.mock("../../src/core/events/repo.js", async (importOriginal) => {
   return { ...original, appendEvent };
 });
 
+/**
+ * Records whether `store.db.inTransaction` was true at the moment
+ * `claimFor` was called — the observable difference between
+ * `refuseIfClaimedElsewhere`'s guard running inside `writeTx` (as it must)
+ * and a hoisted copy running before the transaction opens. Same wrap-the-
+ * real-thing shape as `appendEventHook` above.
+ *
+ * Only ever sees `lifecycle.ts`'s own `claimFor(store, id)` call, not
+ * `settleClaim`'s internal one (`claims/repo.ts`'s own module-local
+ * reference to its own `claimFor` never crosses this mock's module
+ * boundary) — which is exactly what makes the default-path assertion
+ * ("no claim query" below) meaningful rather than trivially false.
+ */
+const claimForHook = vi.hoisted(() => ({ calls: [] as boolean[] }));
+vi.mock("../../src/core/claims/repo.js", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../../src/core/claims/repo.js")>();
+  const claimFor: typeof original.claimFor = (store, taskId) => {
+    claimForHook.calls.push(store.db.inTransaction);
+    return original.claimFor(store, taskId);
+  };
+  return { ...original, claimFor };
+});
+
 let fixture: StoreFixture;
 beforeEach(() => {
   fixture = createStoreFixture();
   appendEventHook.throwOnType = null;
+  claimForHook.calls = [];
 });
 afterEach(() => fixture.cleanup());
 
@@ -515,7 +539,19 @@ describe("claim settlement", () => {
     expect(closed?.actor).toBe("main @ /repo/fixture");
   });
 
-  it("closeTask with an actor override stamps the closed event actor verbatim and still settles the claim", () => {
+  it("takes no claim query on the default path", () => {
+    // F9 T1 acceptance criterion, pinned directly against the hook rather
+    // than inferred from timing: an ordinary close with no overrides must
+    // never reach `claimFor` via lifecycle.ts's own guard at all — the read
+    // `refuseIfClaimedElsewhere` adds is opt-in, not a tax on every close.
+    const id = seedTask(fixture.store);
+
+    closeTask(fixture.store, id);
+
+    expect(claimForHook.calls).toEqual([]);
+  });
+
+  it("closeTask with an actor override stamps both the closed and released events with the same actor", () => {
     const id = seedTask(fixture.store);
     claimTask(fixture.store, id);
 
@@ -525,28 +561,63 @@ describe("claim settlement", () => {
     expect(claimFor(fixture.store, id)).toBeNull();
     const events = listEvents(fixture.store, { entityId: id }).events;
     const closed = events.find((e) => e.type === "closed");
-    expect(closed?.actor).toBe("reconcile");
-  });
-
-  it("closeTask with an actor override stamps the released event of a settled self-claim with the same actor", () => {
-    const id = seedTask(fixture.store);
-    claimTask(fixture.store, id);
-
-    closeTask(fixture.store, id, undefined, { actor: "reconcile" });
-
-    const events = listEvents(fixture.store, { entityId: id }).events;
     const released = events.find((e) => e.type === "released");
+    expect(closed?.actor).toBe("reconcile");
     expect(released?.actor).toBe("reconcile");
   });
 
-  it("cancelTask with an actor override stamps the cancelled event actor", () => {
+  it("an actor override alone does not imply claim safety — a foreign claim is still settled", () => {
+    // LifecycleOverrides.actor's own docs: actor changes who gets blamed,
+    // not what is allowed to happen. Without refuseIfClaimedElsewhere, a
+    // foreign claim still settles exactly as a manual non-holder close
+    // would — priorActor names who was actually displaced, while actor
+    // names "reconcile", which never held anything.
     const id = seedTask(fixture.store);
+    seedClaim(fixture.store, {
+      taskId: id,
+      holder: "/repo/wt-ghost",
+      actor: "feature/ghost @ /repo/wt-ghost",
+    });
 
-    cancelTask(fixture.store, id, "dropped", { actor: "reconcile" });
+    closeTask(fixture.store, id, undefined, { actor: "reconcile" });
 
+    expect(claimFor(fixture.store, id)).toBeNull();
     const events = listEvents(fixture.store, { entityId: id }).events;
+    expect(events.map((e) => e.type)).toEqual(["closed", "released"]);
+    const closed = events.find((e) => e.type === "closed");
+    const released = events.find((e) => e.type === "released");
+    expect(closed?.actor).toBe("reconcile");
+    expect(released?.actor).toBe("reconcile");
+    expect(released?.priorActor).toBe("feature/ghost @ /repo/wt-ghost");
+  });
+
+  it("cancelTask with an actor override stamps the cancelled event actor, and readiness reporting still fires", () => {
+    const blocker = seedTask(fixture.store);
+    const blocked = seedTask(fixture.store, { title: "was waiting" });
+    addDependency(fixture.store, blocked, blocker);
+
+    const { unblocked } = cancelTask(fixture.store, blocker, "dropped", { actor: "reconcile" });
+
+    const events = listEvents(fixture.store, { entityId: blocker }).events;
     const cancelled = events.find((e) => e.type === "cancelled");
     expect(cancelled?.actor).toBe("reconcile");
+    expect(unblocked.map((task) => task.title)).toEqual(["was waiting"]);
+  });
+
+  it("refuses an empty actor override before any write", () => {
+    const id = seedTask(fixture.store);
+
+    try {
+      closeTask(fixture.store, id, undefined, { actor: "" });
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("internal");
+      expect(error.message).toMatch(/must not be empty/);
+    }
+
+    expect(getTask(fixture.store, id)?.lane).not.toBe("Done");
+    expect(listEvents(fixture.store, { entityId: id }).events).toEqual([]);
   });
 
   it("closeTask with refuseIfClaimedElsewhere refuses a task claimed by another worktree and writes nothing", () => {
@@ -560,7 +631,16 @@ describe("claim settlement", () => {
       if (!isKatraException(error)) throw error;
       expect(error.detail.code).toBe("claimed_elsewhere");
       if (error.detail.code !== "claimed_elsewhere") throw error;
+      // detail.holder stays the worktree path — the structured field a
+      // caller (reconcile --json's skip report) reads as data.
       expect(error.detail.holder).toBe("/repo/wt-ghost");
+      // The message names the actor and liveness instead, the same house
+      // shape claimTask's own conflict refusal uses (describeLiveness).
+      // seedClaim's default actor is SEED_ACTOR ("main @ /repo/seed") and
+      // leaves no presence row behind it, so liveness reads "never seen".
+      expect(error.message).toContain("is held by main @ /repo/seed,");
+      expect(error.message).toMatch(/never seen \(claimed .+ ago\)/);
+      expect(error.message).toContain("refusing to change it from here");
     }
 
     // Nothing written: not the lane, not an event, and the foreign claim
@@ -580,6 +660,31 @@ describe("claim settlement", () => {
 
     expect(task.lane).toBe("Done");
     expect(claimFor(fixture.store, id)).toBeNull();
+  });
+
+  it("closeTask with refuseIfClaimedElsewhere proceeds when the task has no claim at all", () => {
+    // The claim === null short-circuit branch: refuseIfClaimedElsewhere
+    // only ever refuses a *foreign* claim, never the absence of one.
+    const id = seedTask(fixture.store);
+
+    const { task } = closeTask(fixture.store, id, undefined, { refuseIfClaimedElsewhere: true });
+
+    expect(task.lane).toBe("Done");
+    expect(claimFor(fixture.store, id)).toBeNull();
+  });
+
+  it("runs the claim guard inside the write transaction, not before it", () => {
+    const id = seedTask(fixture.store);
+    seedClaim(fixture.store, { taskId: id, holder: "/repo/wt-ghost" });
+
+    expect(() =>
+      closeTask(fixture.store, id, undefined, { refuseIfClaimedElsewhere: true }),
+    ).toThrowError(/is held by/);
+
+    // Exactly one call reaches lifecycle.ts's own claimFor import here — the
+    // foreign-claim throw happens before settleClaim, whose own internal
+    // claimFor call this hook never sees regardless (module docs above).
+    expect(claimForHook.calls).toEqual([true]);
   });
 
   it("lands the lifecycle and released events atomically or not at all", () => {

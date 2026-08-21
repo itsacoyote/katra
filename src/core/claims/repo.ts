@@ -148,8 +148,13 @@ export function claimFor(store: OpenStore, taskId: string): ClaimInfo | null {
  * A presence row that exists but fails to parse ({@link timeAgoOrNull})
  * folds into the same `never seen` arm: an unreadable observation is not a
  * usable one either.
+ *
+ * Exported for `tasks/lifecycle.ts`'s `refuseIfClaimedElsewhere` guard (F9
+ * T1): its `claimed_elsewhere` refusal names the holder's actor and
+ * liveness the identical way `claimTask`'s own `conflict` refusal does, one
+ * function rather than a second, drifting copy of the same phrasing.
  */
-function describeLiveness(claim: ClaimInfo, now: string): string {
+export function describeLiveness(claim: ClaimInfo, now: string): string {
   const lastSeenAge = claim.lastSeen === null ? null : timeAgoOrNull(claim.lastSeen, now);
   if (lastSeenAge !== null) return `last seen ${lastSeenAge}`;
 
