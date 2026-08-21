@@ -77,7 +77,7 @@ import type { OpenStore } from "../../core/store.js";
 import { requireId } from "../../core/tasks/ids.js";
 import { cancelTask, closeTask } from "../../core/tasks/lifecycle.js";
 import { getTask } from "../../core/tasks/repo.js";
-import { formatRefLine, oneLine } from "../format.js";
+import { clamp, formatRefLine, oneLine, SNIPPET_WIDTH } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
@@ -95,14 +95,37 @@ function refReasonClause(ref: Ref): string {
   return `${ref.cachedStatus ?? ""} — ${ref.provider}:${ref.externalId}`;
 }
 
+/** How many triggering refs' own clauses {@link buildReason} names before summarizing the rest. */
+const REASON_CLAUSE_LIMIT = 3;
+
 /**
  * The reason recorded on the lane-change event — every triggering ref's own
- * clause, joined with `", "` (pinned wording, epic requirement 7). Built
- * from raw fields: `events.reason` is always raw (this module's own doc),
- * sanitized only where it is rendered, never where it is written.
+ * clause, joined with `", "` (pinned wording, epic requirement 7), capped at
+ * the first {@link REASON_CLAUSE_LIMIT} clauses (in the refs' own linked
+ * order) with a trailing `"+M more"` clause beyond that — e.g. `"merged —
+ * github:a#1, merged — github:b#2, merged — github:c#3, +297 more"`.
+ *
+ * **The load-bearing half of the fix for an unbounded stored string**
+ * (security scan, validate round 2): a task with hundreds of linked refs
+ * built a reason of thousands of characters with no bound at all — `oneLine`
+ * at render time neutralizes control characters in it but does nothing about
+ * its raw *length*, which then leaks into every reader of the stored row
+ * (`show`, `log`, `board`) as one very long line. Capping here, at
+ * construction, is what actually bounds what gets written; the render-side
+ * `clamp` on the preview's own reason line (`formatReconcileResult`, below)
+ * is defense in depth for the *rendered* width, not a substitute for this —
+ * `--json` and the applied event both carry this capped form too, since
+ * both read the identical stored/returned string.
+ *
+ * Built from raw fields, same as `refReasonClause`: `events.reason` is
+ * always raw (this module's own doc), sanitized only where it is rendered.
  */
 function buildReason(triggeringRefs: readonly Ref[]): string {
-  return triggeringRefs.map(refReasonClause).join(", ");
+  const shown = triggeringRefs.slice(0, REASON_CLAUSE_LIMIT);
+  const rest = triggeringRefs.length - shown.length;
+  const clauses = shown.map(refReasonClause);
+  if (rest > 0) clauses.push(`+${String(rest)} more`);
+  return clauses.join(", ");
 }
 
 /**
@@ -347,8 +370,12 @@ function formatReconcileResult(result: ReconcileResult, now: string): string {
       // Every interpolated ref field in `reason` (provider/externalId) goes
       // through `oneLine` here, at the render site — the raw, stored value
       // this previews is never assumed safe just because it will also be
-      // written (`refresh.ts:264-267`'s discipline, copied).
-      `    reason: ${oneLine(item.reason)}`,
+      // written (`refresh.ts:264-267`'s discipline, copied). `clamp` at
+      // SNIPPET_WIDTH too, matching formatRefLine and refresh.ts's own
+      // sections — buildReason's own cap already bounds this in the
+      // ordinary case, but the render clamp is what actually holds the line
+      // width, defense in depth rather than trusting one bound alone.
+      `    reason: ${clamp(oneLine(item.reason), SNIPPET_WIDTH)}`,
       ...item.triggeringRefs.map((ref) => `    ${formatRefLine(ref, now)}`),
     ]),
   );

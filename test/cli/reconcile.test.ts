@@ -372,6 +372,35 @@ describe("katra reconcile", () => {
     );
   });
 
+  it("a reason with more than 3 triggering refs caps at 3 clauses plus a count", async () => {
+    const task = await add(["a task"]);
+    const externalIds = ["acme/widgets#1", "acme/widgets#2", "acme/widgets#3", "acme/widgets#4"];
+    for (const externalId of externalIds) {
+      await runCli(["ref", "add", task, "--provider", "github", "--id", externalId], {
+        cwd: repo.dir,
+      });
+      setCachedStatus(dbPath(), "github", externalId, "merged");
+    }
+
+    const result = await runCli(["reconcile", "--apply", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode, result.stderr).toBe(EXIT.ok);
+    const doc = result.json() as ReconcileResult;
+    expect(doc.advance.items[0]?.reason).toBe(
+      "merged — github:acme/widgets#1, merged — github:acme/widgets#2, " +
+        "merged — github:acme/widgets#3, +1 more",
+    );
+
+    // The stored event carries the identical capped string — the cap is at
+    // construction, not just at this preview/apply render.
+    const log = await runCli(["log", task, "--json"], { cwd: repo.dir });
+    const events = (
+      log.json() as { events: ReadonlyArray<{ type: string; reason: string | null }> }
+    ).events;
+    const closedReason = events.find((event) => event.type === "closed")?.reason;
+    expect(closedReason?.endsWith(", +1 more")).toBe(true);
+  });
+
   it("a multi-ref advance neutralizes every hostile id in the joined reason and stores both raw", async () => {
     // Built by codepoint, not typed as literals: RLO and ALM are ordinary
     // printable codepoints that reorder text without being visible, the same
