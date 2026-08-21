@@ -145,6 +145,35 @@ export function buildRefreshSection<T>(
 }
 
 /**
+ * Appends one rendered section block to `blocks` — `label (count)` followed
+ * by `lines`, and a truncation marker when `section.truncated` — or appends
+ * nothing when the section is empty. Command-neutral: `section` is typed
+ * against {@link RefreshSection}, never a command's own item shape, and
+ * `lines` is already fully rendered by the caller, so this function never
+ * touches `section.items` itself.
+ *
+ * **Shared with `reconcile.ts` (F9 T4), deliberately** — the same treatment
+ * {@link buildRefreshSection} already gets, for the identical reason: both
+ * commands render a `RefreshSection<T>` into a `label (count)` block with an
+ * optional truncation marker, and there is no reason for that one piece of
+ * formatting to be able to drift between the two independently. `blocks` is
+ * an explicit parameter rather than a closure over one command's own local
+ * array, which is what makes a second caller safe without either command
+ * reaching into the other's state.
+ */
+export function pushSection<T>(
+  blocks: string[],
+  label: string,
+  section: RefreshSection<T>,
+  lines: readonly string[],
+): void {
+  if (section.count === 0) return;
+  const rows = [`${label} (${String(section.count)})`, ...lines];
+  if (section.truncated) rows.push("  … truncated");
+  blocks.push(rows.join("\n"));
+}
+
+/**
  * Every `RefreshReason` (T1, `core/enums.ts`) rendered as a sentence, for
  * text output only — `--json` always carries the raw token. `satisfies
  * Record<RefreshReason, string>` is what makes T1 adding a thirteenth reason
@@ -291,18 +320,8 @@ function formatRefreshResult(result: RefreshResult): string {
       `${String(totals.unchanged)} unchanged, ${String(totals.unresolved)} unresolved`,
   );
 
-  const push = (
-    label: string,
-    section: RefreshSection<unknown>,
-    lines: readonly string[],
-  ): void => {
-    if (section.count === 0) return;
-    const rows = [`${label} (${String(section.count)})`, ...lines];
-    if (section.truncated) rows.push("  … truncated");
-    blocks.push(rows.join("\n"));
-  };
-
-  push(
+  pushSection(
+    blocks,
     "updated",
     result.updated,
     result.updated.items.map(
@@ -311,14 +330,16 @@ function formatRefreshResult(result: RefreshResult): string {
         `${oneLine(item.from ?? "none")} -> ${oneLine(item.to)}`,
     ),
   );
-  push(
+  pushSection(
+    blocks,
     "unchanged",
     result.unchanged,
     result.unchanged.items.map(
       (item) => `  ${oneLine(item.provider)}: ${clamp(oneLine(item.externalId), SNIPPET_WIDTH)}`,
     ),
   );
-  push(
+  pushSection(
+    blocks,
     "unresolved",
     result.unresolved,
     result.unresolved.items.map(

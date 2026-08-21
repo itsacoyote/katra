@@ -79,7 +79,7 @@ import { formatRefLine, oneLine } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
-import { buildRefreshSection } from "./refresh.js";
+import { buildRefreshSection, pushSection } from "./refresh.js";
 
 /**
  * The status-and-source clause for one triggering ref: `"<status> —
@@ -103,7 +103,17 @@ function buildReason(triggeringRefs: readonly Ref[]): string {
   return triggeringRefs.map(refReasonClause).join(", ");
 }
 
-/** Applies one `advance` verdict's target through the identical lifecycle seam a manual close/cancel uses. */
+/**
+ * Applies one `advance` verdict's target through the identical lifecycle seam
+ * a manual close/cancel uses.
+ *
+ * An exhaustive `switch`, not `target === "Done" ? closeTask : cancelTask` —
+ * an `else`/ternary fallback reads "anything that isn't Done is Cancelled",
+ * which is exactly the wrong default for a `target` that ultimately traces
+ * back to attacker-influenced ref data (`engine.ts`'s own `refTarget` guards
+ * the *value* at the source; this guards what the CLI *does* with it, so an
+ * unrecognized target can never fall through to a real, destructive write).
+ */
 function applyAdvance(
   store: OpenStore,
   taskId: string,
@@ -111,10 +121,17 @@ function applyAdvance(
   reason: string,
 ): void {
   const overrides = { actor: "reconcile", refuseIfClaimedElsewhere: true } as const;
-  if (target === "Done") {
-    closeTask(store, taskId, reason, overrides);
-  } else {
-    cancelTask(store, taskId, reason, overrides);
+  switch (target) {
+    case "Done":
+      closeTask(store, taskId, reason, overrides);
+      return;
+    case "Cancelled":
+      cancelTask(store, taskId, reason, overrides);
+      return;
+    default: {
+      const exhaustive: never = target;
+      throw new Error(`unreachable reconcile target: ${JSON.stringify(exhaustive)}`);
+    }
   }
 }
 
@@ -237,12 +254,16 @@ function handleVerdict(
 // ---------------------------------------------------------------------------
 
 /**
- * Every {@link ReconcileVerdictKind} rendered as a section label — the
- * `REASON_SENTENCES` precedent (`refresh.ts:138-151`): `satisfies
- * Record<ReconcileVerdictKind, string>` makes a sixth verdict kind without a
- * label here a compile error, rather than a silently unrendered section.
+ * Every {@link ReconcileVerdictKind} rendered as a section label.
+ *
+ * `satisfies Record<ReconcileVerdictKind, string>` pins label exhaustiveness
+ * only — a sixth verdict kind added without an entry here is a compile
+ * error, rather than a silently unrendered section. Not the same job as
+ * `refresh.ts`'s `REASON_SENTENCES`: that map translates a token into a
+ * prose sentence, where most of the labels below are just the kind itself
+ * restated as a section heading.
  */
-const VERDICT_SENTENCES = {
+const VERDICT_LABELS = {
   advance: "advance",
   "blocked-by-ref": "blocked",
   conflict: "conflict",
@@ -261,19 +282,9 @@ function formatReconcileResult(result: ReconcileResult, now: string): string {
       `${String(totals.skipClaimed)} skip-claimed, ${String(totals.noOp)} no-op`,
   );
 
-  const push = (
-    label: string,
-    section: { readonly count: number; readonly truncated: boolean },
-    lines: readonly string[],
-  ): void => {
-    if (section.count === 0) return;
-    const rows = [`${label} (${String(section.count)})`, ...lines];
-    if (section.truncated) rows.push("  … truncated");
-    blocks.push(rows.join("\n"));
-  };
-
-  push(
-    VERDICT_SENTENCES.advance,
+  pushSection(
+    blocks,
+    VERDICT_LABELS.advance,
     result.advance,
     result.advance.items.flatMap((item) => [
       `  ${item.taskId}  ${oneLine(item.title)}  -> ${item.target}`,
@@ -285,16 +296,18 @@ function formatReconcileResult(result: ReconcileResult, now: string): string {
       ...item.triggeringRefs.map((ref) => `    ${formatRefLine(ref, now)}`),
     ]),
   );
-  push(
-    VERDICT_SENTENCES["blocked-by-ref"],
+  pushSection(
+    blocks,
+    VERDICT_LABELS["blocked-by-ref"],
     result.blockedByRef,
     result.blockedByRef.items.flatMap((item) => [
       `  ${item.taskId}  ${oneLine(item.title)}`,
       ...item.blockingRefs.map((ref) => `    ${formatRefLine(ref, now)}`),
     ]),
   );
-  push(
-    VERDICT_SENTENCES.conflict,
+  pushSection(
+    blocks,
+    VERDICT_LABELS.conflict,
     result.conflict,
     result.conflict.items.flatMap((item) => [
       `  ${item.taskId}  ${oneLine(item.title)}`,
@@ -304,15 +317,17 @@ function formatReconcileResult(result: ReconcileResult, now: string): string {
       ]),
     ]),
   );
-  push(
-    VERDICT_SENTENCES["skip-claimed"],
+  pushSection(
+    blocks,
+    VERDICT_LABELS["skip-claimed"],
     result.skipClaimed,
     result.skipClaimed.items.map(
       (item) => `  ${item.taskId}  ${oneLine(item.title)}  claimed by ${oneLine(item.holder)}`,
     ),
   );
-  push(
-    VERDICT_SENTENCES["no-op"],
+  pushSection(
+    blocks,
+    VERDICT_LABELS["no-op"],
     result.noOp,
     result.noOp.items.map((item) => `  ${item.taskId}  ${oneLine(item.title)}`),
   );
