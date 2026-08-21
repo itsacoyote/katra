@@ -6,7 +6,7 @@
  * counterpart that turns real tasks/refs/claims into the engine's own input.
  */
 
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -319,33 +319,50 @@ describe("structural: no store import", () => {
   }
 
   /**
-   * The pure files only — `types.ts`, `policy.ts`, `engine.ts` — never
-   * globbed. `repo.ts` (F9 T3) is the deliberate store-touching exception:
+   * The pure files — `types.ts`, `policy.ts`, `engine.ts` — never globbed,
+   * hand-triaged instead: a hardcoded list, not a glob minus one name, so a
+   * *fifth* file added later has to be triaged into one bucket or the other
+   * by whoever adds it, rather than silently inheriting "pure" by virtue of
+   * not being named `repo.ts`.
+   */
+  const PURE_FILES = ["types.ts", "policy.ts", "engine.ts"];
+
+  /**
+   * `repo.ts` (F9 T3) — the deliberate store-touching exception:
    * `gatherCandidates` legitimately imports `OpenStore` and the refs/tasks
    * repos to read real rows, the identical split `refs/parse.ts` (pure) vs
-   * `refs/repo.ts` (store-touching) already draws, and a glob over the whole
-   * `reconcile/` directory would flag that legitimate import as a violation
-   * of a rule it was never meant to follow. A hardcoded list, not a glob
-   * minus one name, so a *fifth* file added later must be triaged into one
-   * bucket or the other by whoever adds it, rather than silently inheriting
-   * "pure" by virtue of not being named `repo.ts`.
+   * `refs/repo.ts` (store-touching) already draws for F7's ref grammar.
    */
-  function reconcileSourceFiles(): { readonly root: string; readonly files: readonly string[] } {
-    const root = fileURLToPath(new URL("../../src/core/reconcile", import.meta.url));
-    const files = ["types.ts", "policy.ts", "engine.ts"];
-    return { root, files };
+  const STORE_TOUCHING_FILES = ["repo.ts"];
+
+  function reconcileRoot(): string {
+    return fileURLToPath(new URL("../../src/core/reconcile", import.meta.url));
   }
 
+  it("triages every file under reconcile/ into pure or store-touching, none left out", () => {
+    // The cross-check the two hardcoded lists above need: a hardcoded list is
+    // only as good as its own completeness, and nothing enforced that PURE_FILES
+    // plus STORE_TOUCHING_FILES actually covers every real file on disk. A
+    // sixth file added under reconcile/ without being added to either list
+    // fails here, loudly, rather than silently missing the scan below.
+    const onDisk = readdirSync(reconcileRoot(), { withFileTypes: true })
+      .filter(
+        (entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"),
+      )
+      .map((entry) => entry.name);
+
+    expect([...PURE_FILES, ...STORE_TOUCHING_FILES].sort()).toEqual([...onDisk].sort());
+  });
+
   it("the engine imports no store module (structural)", () => {
-    const { root, files } = reconcileSourceFiles();
-    expect(files.length).toBe(3);
+    const root = reconcileRoot();
 
     // The npm package name directly, the `OpenStore` type doing the same job
     // `process` does in the providers.test.ts precedent, and the relative
     // import specifier every store-touching module in this codebase uses
     // (`refs/repo.ts`'s own `from "../store.js"`).
     const storeImport = /\bbetter-sqlite3\b|\bOpenStore\b|\bstore\.js\b/;
-    for (const file of files) {
+    for (const file of PURE_FILES) {
       const source = stripComments(readFileSync(join(root, file), "utf8"));
       expect(source, `${file} must not import a store module`).not.toMatch(storeImport);
     }

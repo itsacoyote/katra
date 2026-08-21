@@ -19,6 +19,7 @@ import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import { nowIso } from "../../src/core/clock.js";
 import { findGit } from "../../src/core/git.js";
 
 export interface GitFixture {
@@ -226,7 +227,7 @@ export function setCachedStatus(
   provider: string,
   externalId: string,
   status: string,
-  syncedAt: string = new Date().toISOString(),
+  syncedAt: string = nowIso(),
 ): void {
   const db = new Database(dbPath);
   try {
