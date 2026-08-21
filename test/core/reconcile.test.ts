@@ -29,8 +29,6 @@ function candidate(overrides: Partial<Candidate> & Pick<Candidate, "refs">): Can
   return {
     id: `kt-${String(candidateCounter).padStart(6, "0")}`,
     title: "a task",
-    lane: "In Review",
-    level: "task",
     claimHolder: null,
     ...overrides,
   };

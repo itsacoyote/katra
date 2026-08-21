@@ -17,7 +17,7 @@
  * shape would be exactly the kind of copy that drifts from the original.
  */
 
-import type { Lane, Level, ReconcileVerdictKind, TerminalLane } from "../enums.js";
+import type { ReconcileVerdictKind, TerminalLane } from "../enums.js";
 import type { Ref } from "../refs/types.js";
 
 /**
@@ -26,12 +26,16 @@ import type { Ref } from "../refs/types.js";
  * requirement 4). The engine itself enforces neither constraint; it trusts
  * the gatherer's scope and would treat an epic or a terminal task exactly
  * like any other `Candidate` if handed one.
+ *
+ * `lane`/`level` are deliberately absent: the gatherer's own query already
+ * filters on both (non-terminal via `listOpenTaskRefs`'s open-holder scope,
+ * non-epic via its own `WHERE t.level != 'epic'`), and nothing downstream —
+ * the engine, the CLI's rendering — ever reads either field back. Write-only
+ * data serves no one; the SELECT that used to populate them is gone with them.
  */
 export interface Candidate {
   readonly id: string;
   readonly title: string;
-  readonly lane: Lane;
-  readonly level: Level;
   /**
    * The claiming worktree, or `null`. Set **only** when the claim belongs to
    * a worktree other than the one invoking `reconcile` — the caller resolves

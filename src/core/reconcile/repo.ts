@@ -10,7 +10,7 @@
  * pure files for exactly this reason — this file is meant to fail it.
  */
 
-import { narrowLane, narrowLevel, narrowNullableText, narrowText } from "../narrow.js";
+import { narrowNullableText, narrowText } from "../narrow.js";
 import { listOpenTaskRefs, listOpenTaskRefsFor } from "../refs/repo.js";
 import type { Ref } from "../refs/types.js";
 import type { OpenStore } from "../store.js";
@@ -21,8 +21,6 @@ import type { Candidate } from "./types.js";
 interface TaskMetaRow {
   readonly id: unknown;
   readonly title: unknown;
-  readonly lane: unknown;
-  readonly level: unknown;
   readonly claim_holder: unknown;
 }
 
@@ -92,8 +90,7 @@ export function gatherCandidates(store: OpenStore, taskIds?: readonly string[]):
   const worktree = store.identity().worktree;
   const rows = store.db
     .prepare(
-      `SELECT t.id AS id, t.title AS title, t.lane AS lane, t.level AS level,
-              c.holder AS claim_holder
+      `SELECT t.id AS id, t.title AS title, c.holder AS claim_holder
          FROM tasks t
          ${CLAIMS_JOIN}
         WHERE t.level != 'epic'
@@ -114,8 +111,6 @@ export function gatherCandidates(store: OpenStore, taskIds?: readonly string[]):
     candidates.push({
       id: taskId,
       title: narrowText(meta.title, "title"),
-      lane: narrowLane(meta.lane),
-      level: narrowLevel(meta.level),
       claimHolder: rawHolder === null || rawHolder === worktree ? null : rawHolder,
       refs: refsByTask.get(taskId) ?? [],
     });
