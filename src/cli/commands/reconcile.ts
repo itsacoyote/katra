@@ -1,0 +1,343 @@
+/**
+ * `katra reconcile` — advances tasks from cached external ref status under
+ * the built-in policy (spec §7 requirement 9). Preview by default; `--apply`
+ * commits.
+ *
+ * **Sync `withStore`, not `withStoreAsync`.** `refresh` (F8 T5) is the one,
+ * documented exception that needs the async form — a provider's `resolve` is
+ * a real network call. `reconcile` reads only what `refresh` already cached
+ * and writes through the ordinary synchronous lifecycle machinery, so it
+ * stays on the same synchronous path every other command in this file tree
+ * uses (`with-store.ts`'s own module doc).
+ *
+ * **Orchestration:** gather (`reconcile/repo.ts`'s `gatherCandidates` — no
+ * explicit ids means every eligible task; explicit ids are resolved with
+ * `requireId` first, the identical house `not_found` refusal every other
+ * command taking task ids uses, never re-implemented here), plan
+ * (`reconcile/engine.ts`'s `planReconcile` against the compiled-in
+ * `DEFAULT_POLICY`), then — only under `--apply` — commit each `advance`
+ * verdict.
+ *
+ * **SECURITY-SENSITIVE (epic label):** this command renders ref fields no
+ * earlier command rendered from this exact seam, and it is the first to
+ * *construct* a new stored string (a lane-change event's `reason`) from
+ * them. Every interpolated ref field in the human renderer — provider,
+ * externalId, cachedTitle, a skip's claim-holder path — goes through
+ * `oneLine`/`clamp` at the render site (`refresh.ts:264-267`'s own comment
+ * is the discipline copied here); `formatRefLine` (now exported from
+ * `format.ts`, plan-review HIGH-3) does the identical sanitizing internally
+ * for every ref line it renders. The *stored* reason is the deliberate
+ * exception: built from raw fields, exactly like every other `events.reason`
+ * in katra — the write never sanitizes, the read does (`describeEvent`'s own
+ * `oneLine`, already proven), and `ReconcileAdvanceItem.reason`
+ * (`contract.ts`) documents the same split.
+ *
+ * **Apply, one task per `writeTx`.** Each `advance` verdict calls
+ * `closeTask` (target `Done`) or `cancelTask` (target `Cancelled`) with T1's
+ * `{ actor: "reconcile", refuseIfClaimedElsewhere: true }` overrides —
+ * `reconcile` cannot produce a state a manual `close`/`cancel` could not,
+ * because it calls the identical function. Two exceptions are caught per
+ * task, never left to abort the whole run (F8's per-ref non-aborting
+ * precedent): a `claimed_elsewhere` refusal (another worktree claimed the
+ * task in the gap between gathering and this write) and an already-terminal
+ * `conflict` refusal (some other process finished it first). The first is
+ * reported in `skipClaimed` — the identical section and item shape a
+ * `Verdict`'s own `skip-claimed` arm produces (plan-review MEDIUM-2): a
+ * caller reading the result never has to know which of the two paths found
+ * it. The second is reported in `noOp`: a task already terminal needs
+ * nothing further from `reconcile`, whatever moved it there.
+ *
+ * **Exit 0 whenever every task resolved or degraded cleanly** (ADR-006) —
+ * an all-blocked, all-conflicted, or all-skipped run is not a failure, the
+ * same posture `refresh` and `next` already take. Only a genuinely malformed
+ * invocation (a nonexistent explicit id) is a usage-shaped refusal, and that
+ * comes from `requireId` the same way it does everywhere else.
+ */
+
+import type { Command } from "commander";
+import { nowIso } from "../../core/clock.js";
+import type {
+  ReconcileAdvanceItem,
+  ReconcileBlockedItem,
+  ReconcileConflictItem,
+  ReconcileNoOpItem,
+  ReconcileResult,
+  ReconcileSkipClaimedItem,
+  ReconcileTotals,
+} from "../../core/contract.js";
+import type { ReconcileVerdictKind, TerminalLane } from "../../core/enums.js";
+import { isKatraException } from "../../core/errors.js";
+import { planReconcile } from "../../core/reconcile/engine.js";
+import { DEFAULT_POLICY } from "../../core/reconcile/policy.js";
+import { gatherCandidates } from "../../core/reconcile/repo.js";
+import type { Candidate, Verdict } from "../../core/reconcile/types.js";
+import type { Ref } from "../../core/refs/types.js";
+import type { OpenStore } from "../../core/store.js";
+import { requireId } from "../../core/tasks/ids.js";
+import { cancelTask, closeTask } from "../../core/tasks/lifecycle.js";
+import { formatRefLine, oneLine } from "../format.js";
+import { emit } from "../output.js";
+import type { CliContext } from "../program.js";
+import { withStore } from "../with-store.js";
+import { buildRefreshSection } from "./refresh.js";
+
+/**
+ * The status-and-source clause for one triggering ref: `"<status> —
+ * <provider>:<externalId>"` — e.g. `"merged — github:owner/repo#12"`. `.cachedStatus`
+ * is never `null` here: a triggering ref is one `planReconcile` already
+ * matched against the policy table, which requires a non-null status by
+ * construction (`engine.ts`'s own `refTarget`) — the `?? ""` fallback is
+ * defensive only, never reachable from real data.
+ */
+function refReasonClause(ref: Ref): string {
+  return `${ref.cachedStatus ?? ""} — ${ref.provider}:${ref.externalId}`;
+}
+
+/**
+ * The reason recorded on the lane-change event — every triggering ref's own
+ * clause, joined with `", "` (pinned wording, epic requirement 7). Built
+ * from raw fields: `events.reason` is always raw (this module's own doc),
+ * sanitized only where it is rendered, never where it is written.
+ */
+function buildReason(triggeringRefs: readonly Ref[]): string {
+  return triggeringRefs.map(refReasonClause).join(", ");
+}
+
+/** Applies one `advance` verdict's target through the identical lifecycle seam a manual close/cancel uses. */
+function applyAdvance(
+  store: OpenStore,
+  taskId: string,
+  target: TerminalLane,
+  reason: string,
+): void {
+  const overrides = { actor: "reconcile", refuseIfClaimedElsewhere: true } as const;
+  if (target === "Done") {
+    closeTask(store, taskId, reason, overrides);
+  } else {
+    cancelTask(store, taskId, reason, overrides);
+  }
+}
+
+interface Buckets {
+  readonly advance: ReconcileAdvanceItem[];
+  readonly blockedByRef: ReconcileBlockedItem[];
+  readonly conflict: ReconcileConflictItem[];
+  readonly skipClaimed: ReconcileSkipClaimedItem[];
+  readonly noOp: ReconcileNoOpItem[];
+}
+
+/**
+ * Plans and — under `applyChanges` — commits every candidate's verdict,
+ * bucketed by kind. See this module's own doc for the full apply/race
+ * discipline.
+ */
+function runReconcile(
+  store: OpenStore,
+  taskIds: readonly string[] | undefined,
+  applyChanges: boolean,
+): ReconcileResult {
+  const candidates = gatherCandidates(store, taskIds);
+  const verdicts = planReconcile(candidates, DEFAULT_POLICY);
+
+  const buckets: Buckets = {
+    advance: [],
+    blockedByRef: [],
+    conflict: [],
+    skipClaimed: [],
+    noOp: [],
+  };
+
+  for (const { candidate, verdict } of verdicts) {
+    handleVerdict(store, candidate, verdict, applyChanges, buckets);
+  }
+
+  const totals: ReconcileTotals = {
+    tasks: verdicts.length,
+    advance: buckets.advance.length,
+    blockedByRef: buckets.blockedByRef.length,
+    conflict: buckets.conflict.length,
+    skipClaimed: buckets.skipClaimed.length,
+    noOp: buckets.noOp.length,
+  };
+
+  return {
+    applied: applyChanges,
+    totals,
+    advance: buildRefreshSection(buckets.advance),
+    blockedByRef: buildRefreshSection(buckets.blockedByRef),
+    conflict: buildRefreshSection(buckets.conflict),
+    skipClaimed: buildRefreshSection(buckets.skipClaimed),
+    noOp: buildRefreshSection(buckets.noOp),
+  };
+}
+
+function handleVerdict(
+  store: OpenStore,
+  candidate: Candidate,
+  verdict: Verdict,
+  applyChanges: boolean,
+  buckets: Buckets,
+): void {
+  const taskId = candidate.id;
+  const title = candidate.title;
+
+  switch (verdict.kind) {
+    case "conflict":
+      buckets.conflict.push({ taskId, title, targets: verdict.targets });
+      return;
+    case "blocked-by-ref":
+      buckets.blockedByRef.push({ taskId, title, blockingRefs: verdict.blockingRefs });
+      return;
+    case "skip-claimed":
+      buckets.skipClaimed.push({ taskId, title, holder: verdict.holder });
+      return;
+    case "no-op":
+      buckets.noOp.push({ taskId, title });
+      return;
+    case "advance": {
+      const reason = buildReason(verdict.triggeringRefs);
+      const item: ReconcileAdvanceItem = {
+        taskId,
+        title,
+        target: verdict.target,
+        triggeringRefs: verdict.triggeringRefs,
+        reason,
+      };
+      if (!applyChanges) {
+        buckets.advance.push(item);
+        return;
+      }
+      try {
+        applyAdvance(store, taskId, verdict.target, reason);
+        buckets.advance.push(item);
+      } catch (error) {
+        if (isKatraException(error) && error.detail.code === "claimed_elsewhere") {
+          buckets.skipClaimed.push({ taskId, title, holder: error.detail.holder });
+        } else if (isKatraException(error) && error.detail.code === "conflict") {
+          // Already terminal by the time this write's transaction opened —
+          // some other process (another `reconcile`, a manual close/cancel)
+          // finished it first. Nothing left for this run to do.
+          buckets.noOp.push({ taskId, title });
+        } else {
+          throw error;
+        }
+      }
+      return;
+    }
+    default: {
+      const exhaustive: never = verdict;
+      throw new Error(`unreachable verdict kind: ${JSON.stringify(exhaustive)}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Human rendering — one block per non-empty section, refresh.ts's own
+// sections-accumulator style.
+// ---------------------------------------------------------------------------
+
+/**
+ * Every {@link ReconcileVerdictKind} rendered as a section label — the
+ * `REASON_SENTENCES` precedent (`refresh.ts:138-151`): `satisfies
+ * Record<ReconcileVerdictKind, string>` makes a sixth verdict kind without a
+ * label here a compile error, rather than a silently unrendered section.
+ */
+const VERDICT_SENTENCES = {
+  advance: "advance",
+  "blocked-by-ref": "blocked",
+  conflict: "conflict",
+  "skip-claimed": "skip-claimed",
+  "no-op": "no-op",
+} satisfies Record<ReconcileVerdictKind, string>;
+
+function formatReconcileResult(result: ReconcileResult, now: string): string {
+  const blocks: string[] = [];
+  const { totals } = result;
+  const advanceVerb = result.applied ? "advanced" : "would advance";
+
+  blocks.push(
+    `${String(totals.tasks)} task(s) checked — ${String(totals.advance)} ${advanceVerb}, ` +
+      `${String(totals.blockedByRef)} blocked, ${String(totals.conflict)} conflicting, ` +
+      `${String(totals.skipClaimed)} skip-claimed, ${String(totals.noOp)} no-op`,
+  );
+
+  const push = (
+    label: string,
+    section: { readonly count: number; readonly truncated: boolean },
+    lines: readonly string[],
+  ): void => {
+    if (section.count === 0) return;
+    const rows = [`${label} (${String(section.count)})`, ...lines];
+    if (section.truncated) rows.push("  … truncated");
+    blocks.push(rows.join("\n"));
+  };
+
+  push(
+    VERDICT_SENTENCES.advance,
+    result.advance,
+    result.advance.items.flatMap((item) => [
+      `  ${item.taskId}  ${oneLine(item.title)}  -> ${item.target}`,
+      // Every interpolated ref field in `reason` (provider/externalId) goes
+      // through `oneLine` here, at the render site — the raw, stored value
+      // this previews is never assumed safe just because it will also be
+      // written (`refresh.ts:264-267`'s discipline, copied).
+      `    reason: ${oneLine(item.reason)}`,
+      ...item.triggeringRefs.map((ref) => `    ${formatRefLine(ref, now)}`),
+    ]),
+  );
+  push(
+    VERDICT_SENTENCES["blocked-by-ref"],
+    result.blockedByRef,
+    result.blockedByRef.items.flatMap((item) => [
+      `  ${item.taskId}  ${oneLine(item.title)}`,
+      ...item.blockingRefs.map((ref) => `    ${formatRefLine(ref, now)}`),
+    ]),
+  );
+  push(
+    VERDICT_SENTENCES.conflict,
+    result.conflict,
+    result.conflict.items.flatMap((item) => [
+      `  ${item.taskId}  ${oneLine(item.title)}`,
+      ...item.targets.flatMap((target) => [
+        `    -> ${target.target}`,
+        ...target.refs.map((ref) => `      ${formatRefLine(ref, now)}`),
+      ]),
+    ]),
+  );
+  push(
+    VERDICT_SENTENCES["skip-claimed"],
+    result.skipClaimed,
+    result.skipClaimed.items.map(
+      (item) => `  ${item.taskId}  ${oneLine(item.title)}  claimed by ${oneLine(item.holder)}`,
+    ),
+  );
+  push(
+    VERDICT_SENTENCES["no-op"],
+    result.noOp,
+    result.noOp.items.map((item) => `  ${item.taskId}  ${oneLine(item.title)}`),
+  );
+
+  return blocks.join("\n\n");
+}
+
+export function registerReconcile(program: Command, context: CliContext): void {
+  program
+    .command("reconcile")
+    .argument(
+      "[ids...]",
+      "task ids to reconcile, full or partial; omit to check every eligible task",
+    )
+    .description("advance tasks from cached external ref status under the built-in policy")
+    .option("--apply", "commit the advances; omit to preview only")
+    .option("--json", "emit structured output")
+    .action((ids: string[], options: { apply?: boolean; json?: boolean }) => {
+      const { result, warnings } = withStore(context, (store) => {
+        const resolvedIds = ids.length === 0 ? undefined : ids.map((id) => requireId(store, id));
+        return runReconcile(store, resolvedIds, options.apply === true);
+      });
+
+      emit(result, { json: options.json === true, warnings, streams: context.streams }, (value) =>
+        formatReconcileResult(value, nowIso()),
+      );
+    });
+}
