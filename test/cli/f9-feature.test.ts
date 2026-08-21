@@ -111,10 +111,15 @@ describe("F9 epic acceptance criteria", () => {
     const eventCountAfterFirst = events.length;
 
     // Immediately re-running is quiet: the task is terminal now, so it is not
-    // even a candidate any more — zero tasks checked, not a re-decided no-op.
+    // a candidate any more — but it was named explicitly, so it is still
+    // accounted for, reported under no-op rather than silently vanishing
+    // (validate round-1 LOW-1).
     const second = await runCli(["reconcile", task, "--apply", "--json"], { cwd: repo.dir });
     expect(second.exitCode, second.stderr).toBe(EXIT.ok);
-    expect((second.json() as ReconcileResult).totals.tasks).toBe(0);
+    const secondDoc = second.json() as ReconcileResult;
+    expect(secondDoc.totals.tasks).toBe(1);
+    expect(secondDoc.noOp.items).toEqual([expect.objectContaining({ taskId: task })]);
+    expect(secondDoc.advance.count).toBe(0);
 
     const logAfter = await runCli(["log", task, "--json"], { cwd: repo.dir });
     expect((logAfter.json() as { events: unknown[] }).events).toHaveLength(eventCountAfterFirst);
@@ -236,12 +241,25 @@ describe("F9 epic acceptance criteria", () => {
     });
     setCachedStatus(dbPath(), "github", "acme/widgets#8", "merged");
     const applyText = (await runCli(["reconcile", applyTask, "--apply"], { cwd: repo.dir })).stdout;
+    expect(applyText).toContain(applyTask);
+    expect(applyText).toContain("Done");
+
+    // A dedicated third task for the apply-json half: reusing previewTask
+    // (already previewed above) would let `applied: true` alone stand in for
+    // proof that a genuine advance happened, which it does not — an empty
+    // advance.items with applied:true would pass that assertion too.
+    const applyJsonTask = await add(["apply json task"]);
+    await runCli(["ref", "add", applyJsonTask, "https://github.com/acme/widgets/pull/9"], {
+      cwd: repo.dir,
+    });
+    setCachedStatus(dbPath(), "github", "acme/widgets#9", "merged");
     const applyJson = (
-      await runCli(["reconcile", previewTask, "--apply", "--json"], { cwd: repo.dir })
+      await runCli(["reconcile", applyJsonTask, "--apply", "--json"], { cwd: repo.dir })
     ).json() as ReconcileResult;
 
     expect(applyJson.applied).toBe(true);
-    expect(applyText).toContain(applyTask);
-    expect(applyText).toContain("Done");
+    expect(applyJson.advance.items).toEqual([
+      expect.objectContaining({ taskId: applyJsonTask, target: "Done" }),
+    ]);
   });
 });
