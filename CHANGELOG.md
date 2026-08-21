@@ -1,5 +1,11 @@
 # @itsacoyote/katra
 
+## 0.4.0
+
+### Minor Changes
+
+- [#23](https://github.com/itsacoyote/katra/pull/23) [`faead9a`](https://github.com/itsacoyote/katra/commit/faead9a4412eda1543cd63e4c52a8ca3d3fe16d7) Thanks [@itsacoyote](https://github.com/itsacoyote)! - Add `katra reconcile` — the policy-driven bridge from cached external ref status to task state. Previews by default; `--apply` commits. Reads only what `refresh` already cached (no network, no implicit runs): GitHub `merged` and Linear `completed` map to Done, Linear `canceled` maps to Cancelled, and a task with more than one linked ref advances only when every ref agrees — a partial merge is reported blocked, refs mapping to different targets are reported as a conflict, and neither is ever auto-applied. A task claimed by another worktree is skipped and reported, even under `--apply`; applying goes through the same `closeTask`/`cancelTask` machinery a manual close/cancel uses, stamped `actor: "reconcile"` with a reason naming the triggering ref(s), so reconcile can never produce a state a manual command could not. Re-running `--apply` on an already-advanced task is a quiet no-op. Every rendered ref field is sanitized at the render site, including against prototype-chain collisions in the policy lookup itself (an attacker-influenced provider/status pair can no longer resolve to an `Object.prototype` member).
+
 ## 0.3.0
 
 ### Minor Changes
