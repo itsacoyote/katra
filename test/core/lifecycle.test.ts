@@ -497,6 +497,91 @@ describe("claim settlement", () => {
     ]);
   });
 
+  it("closeTask without overrides still stamps the store-derived actor", () => {
+    // Default-path pin (F9 T1 acceptance criterion): omitting overrides
+    // entirely must behave exactly as it did before this feature — no new
+    // test file modification proves that; this new test does, against the
+    // one thing overrides can now replace.
+    const id = seedTask(fixture.store);
+
+    closeTask(fixture.store, id);
+
+    const events = listEvents(fixture.store, { entityId: id }).events;
+    const closed = events.find((e) => e.type === "closed");
+    // The fixture's own FIXED_IDENTITY (test/helpers/store.ts): worktree
+    // "/repo/fixture", branch "main" — an independent literal, not a second
+    // call to store.actor() that could agree with a broken implementation
+    // for the wrong reason.
+    expect(closed?.actor).toBe("main @ /repo/fixture");
+  });
+
+  it("closeTask with an actor override stamps the closed event actor verbatim and still settles the claim", () => {
+    const id = seedTask(fixture.store);
+    claimTask(fixture.store, id);
+
+    const { task } = closeTask(fixture.store, id, undefined, { actor: "reconcile" });
+
+    expect(task.lane).toBe("Done");
+    expect(claimFor(fixture.store, id)).toBeNull();
+    const events = listEvents(fixture.store, { entityId: id }).events;
+    const closed = events.find((e) => e.type === "closed");
+    expect(closed?.actor).toBe("reconcile");
+  });
+
+  it("closeTask with an actor override stamps the released event of a settled self-claim with the same actor", () => {
+    const id = seedTask(fixture.store);
+    claimTask(fixture.store, id);
+
+    closeTask(fixture.store, id, undefined, { actor: "reconcile" });
+
+    const events = listEvents(fixture.store, { entityId: id }).events;
+    const released = events.find((e) => e.type === "released");
+    expect(released?.actor).toBe("reconcile");
+  });
+
+  it("cancelTask with an actor override stamps the cancelled event actor", () => {
+    const id = seedTask(fixture.store);
+
+    cancelTask(fixture.store, id, "dropped", { actor: "reconcile" });
+
+    const events = listEvents(fixture.store, { entityId: id }).events;
+    const cancelled = events.find((e) => e.type === "cancelled");
+    expect(cancelled?.actor).toBe("reconcile");
+  });
+
+  it("closeTask with refuseIfClaimedElsewhere refuses a task claimed by another worktree and writes nothing", () => {
+    const id = seedTask(fixture.store);
+    seedClaim(fixture.store, { taskId: id, holder: "/repo/wt-ghost" });
+
+    try {
+      closeTask(fixture.store, id, undefined, { refuseIfClaimedElsewhere: true });
+      expect.unreachable("should have thrown");
+    } catch (error) {
+      if (!isKatraException(error)) throw error;
+      expect(error.detail.code).toBe("claimed_elsewhere");
+      if (error.detail.code !== "claimed_elsewhere") throw error;
+      expect(error.detail.holder).toBe("/repo/wt-ghost");
+    }
+
+    // Nothing written: not the lane, not an event, and the foreign claim
+    // itself is untouched.
+    expect(getTask(fixture.store, id)?.lane).not.toBe("Done");
+    expect(claimFor(fixture.store, id)?.holder).toBe("/repo/wt-ghost");
+    expect(listEvents(fixture.store, { entityId: id }).events).toEqual([]);
+  });
+
+  it("closeTask with refuseIfClaimedElsewhere proceeds when the claim is held by the invoking worktree", () => {
+    const id = seedTask(fixture.store);
+    // claimTask claims under fixture.store's own identity (FIXED_IDENTITY,
+    // "/repo/fixture") — the invoking worktree holding its own claim.
+    claimTask(fixture.store, id);
+
+    const { task } = closeTask(fixture.store, id, undefined, { refuseIfClaimedElsewhere: true });
+
+    expect(task.lane).toBe("Done");
+    expect(claimFor(fixture.store, id)).toBeNull();
+  });
+
   it("lands the lifecycle and released events atomically or not at all", () => {
     // Fails only the second write — the lifecycle event — after `settleClaim`
     // has already issued the claim's delete and its own `released` insert.
