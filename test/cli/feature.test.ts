@@ -50,6 +50,7 @@ const EXPECTED_COMMANDS = [
   "recent",
   "stale",
   "refresh",
+  "reconcile",
 ] as const;
 
 let repo: GitFixture;
@@ -64,7 +65,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all twenty-four commands on the program", () => {
+  it("registers all twenty-five commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -73,7 +74,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(24);
+    expect(registered).toHaveLength(25);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -147,6 +148,7 @@ describe("--json across every command", () => {
       ["dep", dependent, "--blocked-by", blocker],
       ["link", linked, doomed],
       ["ref", "add", blocker, "https://github.com/acme/widgets/pull/7"],
+      ["reconcile"],
       ["close", blocker],
       ["reopen", blocker],
       ["cancel", blocker, "--reason", "dropped"],
