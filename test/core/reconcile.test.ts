@@ -1,17 +1,26 @@
 /**
  * The pure reconcile policy engine (F9 T2): `planReconcile`'s pinned
  * precedence, `DEFAULT_POLICY`'s mapping, and the structural "no store
- * import" discipline `core/providers/types.ts` set the precedent for.
+ * import" discipline `core/providers/types.ts` set the precedent for. Plus
+ * `gatherCandidates` (F9 T3, `reconcile/repo.ts`) — the store-touching
+ * counterpart that turns real tasks/refs/claims into the engine's own input.
  */
 
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
 import { planReconcile } from "../../src/core/reconcile/engine.js";
 import { DEFAULT_POLICY } from "../../src/core/reconcile/policy.js";
+import { gatherCandidates } from "../../src/core/reconcile/repo.js";
 import type { Candidate, PolicyTable } from "../../src/core/reconcile/types.js";
+import { linkRef } from "../../src/core/refs/repo.js";
+import { setCachedStatus } from "../helpers/fixture.js";
 import { buildRef } from "../helpers/refs.js";
+import { seedClaim, seedEpic, seedTask } from "../helpers/seed.js";
+import type { StoreFixture } from "../helpers/store.js";
+import { createStoreFixture } from "../helpers/store.js";
 
 let candidateCounter = 0;
 
@@ -197,6 +206,101 @@ describe("planReconcile: policy", () => {
   });
 });
 
+describe("gatherCandidates", () => {
+  let fixture: StoreFixture;
+  beforeEach(() => {
+    fixture = createStoreFixture();
+  });
+  afterEach(() => fixture.cleanup());
+
+  /** The store fixture's own SQLite file — `setCachedStatus`'s `dbPath`. */
+  function dbPath(): string {
+    return join(fixture.repo.dir, ".git", STORE_DIR_NAME, DB_FILE_NAME);
+  }
+
+  it("gatherCandidates excludes terminal tasks and tasks with zero refs", () => {
+    const open = seedTask(fixture.store, { title: "open, with a ref" });
+    linkRef(fixture.store, open, { provider: "github", externalId: "acme/app#1", url: null });
+
+    const done = seedTask(fixture.store, { title: "done, with a ref", lane: "Done" });
+    linkRef(fixture.store, done, { provider: "github", externalId: "acme/app#2", url: null });
+
+    seedTask(fixture.store, { title: "open, no refs" });
+
+    const candidates = gatherCandidates(fixture.store);
+
+    expect(candidates.map((c) => c.id)).toEqual([open]);
+  });
+
+  it("gatherCandidates excludes an epic holding its own ref", () => {
+    const epic = seedEpic(fixture.store, { title: "an epic" });
+    linkRef(fixture.store, epic, { provider: "github", externalId: "acme/app#1", url: null });
+
+    const task = seedTask(fixture.store, { title: "a child task", parentId: epic });
+    linkRef(fixture.store, task, { provider: "github", externalId: "acme/app#2", url: null });
+
+    const candidates = gatherCandidates(fixture.store);
+
+    expect(candidates.map((c) => c.id)).toEqual([task]);
+  });
+
+  it("gatherCandidates scoped to ids returns only those candidates", () => {
+    const taskA = seedTask(fixture.store, { title: "task a" });
+    linkRef(fixture.store, taskA, { provider: "github", externalId: "acme/app#1", url: null });
+
+    const taskB = seedTask(fixture.store, { title: "task b" });
+    linkRef(fixture.store, taskB, { provider: "github", externalId: "acme/app#2", url: null });
+
+    const candidates = gatherCandidates(fixture.store, [taskA]);
+
+    expect(candidates.map((c) => c.id)).toEqual([taskA]);
+  });
+
+  it("candidates carry the claim holder and every ref's cached status, cached title, and synced age", () => {
+    const task = seedTask(fixture.store, { title: "a task" });
+    linkRef(fixture.store, task, {
+      provider: "github",
+      externalId: "acme/app#1",
+      url: "https://github.com/acme/app/pull/1",
+    });
+    seedClaim(fixture.store, { taskId: task, holder: "/repo/other-worktree" });
+    setCachedStatus(dbPath(), "github", "acme/app#1", "merged", "2026-01-01T00:00:00.000Z");
+    fixture.store.db
+      .prepare("UPDATE refs SET cached_title = ? WHERE provider = ? AND external_id = ?")
+      .run("Fix the bug", "github", "acme/app#1");
+
+    const [result] = gatherCandidates(fixture.store);
+
+    expect(result?.claimHolder).toBe("/repo/other-worktree");
+    expect(result?.refs).toEqual([
+      {
+        provider: "github",
+        externalId: "acme/app#1",
+        url: "https://github.com/acme/app/pull/1",
+        cachedStatus: "merged",
+        cachedTitle: "Fix the bug",
+        syncedAt: "2026-01-01T00:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("a claim held by the invoking worktree renders as no claim, not someone else's", () => {
+    // Not one of the bead's named tests, but load-bearing: T2's engine
+    // contract (types.ts's own Candidate.claimHolder docs) says a non-null
+    // value here always means someone else's claim — epic requirement 6
+    // ("a claim held by the invoking worktree does not block") only holds
+    // end to end if this repo resolves "is this mine" before a Candidate is
+    // ever built, which is exactly what this pins.
+    const task = seedTask(fixture.store, { title: "a task" });
+    linkRef(fixture.store, task, { provider: "github", externalId: "acme/app#1", url: null });
+    seedClaim(fixture.store, { taskId: task, holder: fixture.store.identity().worktree });
+
+    const [result] = gatherCandidates(fixture.store);
+
+    expect(result?.claimHolder).toBeNull();
+  });
+});
+
 describe("structural: no store import", () => {
   /**
    * Strips block comments entirely, and strips a `//` line comment only
@@ -214,22 +318,27 @@ describe("structural: no store import", () => {
       .join("\n");
   }
 
+  /**
+   * The pure files only — `types.ts`, `policy.ts`, `engine.ts` — never
+   * globbed. `repo.ts` (F9 T3) is the deliberate store-touching exception:
+   * `gatherCandidates` legitimately imports `OpenStore` and the refs/tasks
+   * repos to read real rows, the identical split `refs/parse.ts` (pure) vs
+   * `refs/repo.ts` (store-touching) already draws, and a glob over the whole
+   * `reconcile/` directory would flag that legitimate import as a violation
+   * of a rule it was never meant to follow. A hardcoded list, not a glob
+   * minus one name, so a *fifth* file added later must be triaged into one
+   * bucket or the other by whoever adds it, rather than silently inheriting
+   * "pure" by virtue of not being named `repo.ts`.
+   */
   function reconcileSourceFiles(): { readonly root: string; readonly files: readonly string[] } {
     const root = fileURLToPath(new URL("../../src/core/reconcile", import.meta.url));
-    const files = readdirSync(root, { withFileTypes: true })
-      .filter(
-        (entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"),
-      )
-      .map((entry) => entry.name);
+    const files = ["types.ts", "policy.ts", "engine.ts"];
     return { root, files };
   }
 
   it("the engine imports no store module (structural)", () => {
     const { root, files } = reconcileSourceFiles();
-    // Globbed, not a hardcoded list — a new file under reconcile/ (repo.ts,
-    // F9 T3, will live here too, but as a store-touching module a future
-    // scan should exclude, not this one) is covered automatically for now.
-    expect(files.length).toBeGreaterThanOrEqual(3);
+    expect(files.length).toBe(3);
 
     // The npm package name directly, the `OpenStore` type doing the same job
     // `process` does in the providers.test.ts precedent, and the relative
