@@ -114,16 +114,63 @@ import { withStoreAsync } from "../with-store.js";
  * is a fixed ceiling on the *report*, not on how many refs actually get
  * resolved and written — every ref gathered in step 1 is still resolved and
  * written in full, whatever this bounds.
+ *
+ * **Also `reconcile`'s own bound (F9 T4), deliberately.** `reconcile.ts`
+ * imports this constant directly rather than declaring its own — the same
+ * "a bound reports itself" shape, the same order of magnitude of rows, and
+ * no reason for the two commands' report caps to be able to drift apart
+ * independently. Cross-command reuse, not a coincidence of both needing
+ * *some* number: if the two ever need different bounds, that is the moment
+ * to split them, not before.
  */
 export const MAX_REFRESH_SECTION_ITEMS = 50;
 
-/** Bounds `items` to {@link MAX_REFRESH_SECTION_ITEMS}, reporting whether the cap cut anything — pure, and exported so its boundary (a limit of 0 emptying a category) is unit-testable without a store. */
+/**
+ * Bounds `items` to {@link MAX_REFRESH_SECTION_ITEMS}, reporting whether the
+ * cap cut anything — pure, and exported so its boundary (a limit of 0
+ * emptying a category) is unit-testable without a store.
+ *
+ * **Shared with `reconcile.ts` (F9 T4), deliberately** — see
+ * {@link MAX_REFRESH_SECTION_ITEMS}'s own docs for why the two commands'
+ * report-bounding stays one function rather than two. The generic `<T>`
+ * already made this safe to reuse for a differently-shaped item before a
+ * second caller existed to prove it.
+ */
 export function buildRefreshSection<T>(
   items: readonly T[],
   limit: number = MAX_REFRESH_SECTION_ITEMS,
 ): RefreshSection<T> {
   const capped = items.slice(0, limit);
   return { count: items.length, items: capped, truncated: capped.length < items.length };
+}
+
+/**
+ * Appends one rendered section block to `blocks` — `label (count)` followed
+ * by `lines`, and a truncation marker when `section.truncated` — or appends
+ * nothing when the section is empty. Command-neutral: `section` is typed
+ * against {@link RefreshSection}, never a command's own item shape, and
+ * `lines` is already fully rendered by the caller, so this function never
+ * touches `section.items` itself.
+ *
+ * **Shared with `reconcile.ts` (F9 T4), deliberately** — the same treatment
+ * {@link buildRefreshSection} already gets, for the identical reason: both
+ * commands render a `RefreshSection<T>` into a `label (count)` block with an
+ * optional truncation marker, and there is no reason for that one piece of
+ * formatting to be able to drift between the two independently. `blocks` is
+ * an explicit parameter rather than a closure over one command's own local
+ * array, which is what makes a second caller safe without either command
+ * reaching into the other's state.
+ */
+export function pushSection<T>(
+  blocks: string[],
+  label: string,
+  section: RefreshSection<T>,
+  lines: readonly string[],
+): void {
+  if (section.count === 0) return;
+  const rows = [`${label} (${String(section.count)})`, ...lines];
+  if (section.truncated) rows.push("  … truncated");
+  blocks.push(rows.join("\n"));
 }
 
 /**
@@ -273,18 +320,8 @@ function formatRefreshResult(result: RefreshResult): string {
       `${String(totals.unchanged)} unchanged, ${String(totals.unresolved)} unresolved`,
   );
 
-  const push = (
-    label: string,
-    section: RefreshSection<unknown>,
-    lines: readonly string[],
-  ): void => {
-    if (section.count === 0) return;
-    const rows = [`${label} (${String(section.count)})`, ...lines];
-    if (section.truncated) rows.push("  … truncated");
-    blocks.push(rows.join("\n"));
-  };
-
-  push(
+  pushSection(
+    blocks,
     "updated",
     result.updated,
     result.updated.items.map(
@@ -293,14 +330,16 @@ function formatRefreshResult(result: RefreshResult): string {
         `${oneLine(item.from ?? "none")} -> ${oneLine(item.to)}`,
     ),
   );
-  push(
+  pushSection(
+    blocks,
     "unchanged",
     result.unchanged,
     result.unchanged.items.map(
       (item) => `  ${oneLine(item.provider)}: ${clamp(oneLine(item.externalId), SNIPPET_WIDTH)}`,
     ),
   );
-  push(
+  pushSection(
+    blocks,
     "unresolved",
     result.unresolved,
     result.unresolved.items.map(

@@ -51,6 +51,7 @@ export type {
   NextResult,
   NoteList,
   RecentResult,
+  ReconcileResult,
   Ref,
   RefResult,
   RefreshResult,

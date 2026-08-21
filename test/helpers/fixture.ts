@@ -18,6 +18,8 @@ import { execFileSync } from "node:child_process";
 import { chmodSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import Database from "better-sqlite3";
+import { nowIso } from "../../src/core/clock.js";
 import { findGit } from "../../src/core/git.js";
 
 export interface GitFixture {
@@ -196,4 +198,50 @@ function stubbedGhEnv(responseBody: string): { readonly env: NodeJS.ProcessEnv; 
   delete env.LINEAR_API_KEY;
 
   return { env, cleanup: bin.cleanup };
+}
+
+/**
+ * Writes a ref's `cached_status`/`synced_at` directly (F9 T3, reuse-lens
+ * gap) — a fixture for reconcile's ALL-rule/conflict scenarios, which need
+ * several refs already sitting at chosen statuses before the test even
+ * starts. Routing every combination through a stubbed provider refresh round
+ * trip ({@link stubbedGhEnv}) would mean one fake `gh` script per status per
+ * test; this writes the row `refresh` would have written, after a real
+ * `ref add` has already created it.
+ *
+ * Takes `dbPath`, not a store handle or a `repoDir`: a fresh, short-lived
+ * `better-sqlite3` connection, opened and closed around one `UPDATE`, so a
+ * test already holding its own open store handle on the same file (WAL mode
+ * tolerates the second connection) never has to route this write through
+ * whatever API surface that handle exposes. `cached_title` is untouched —
+ * only `status` and the sync timestamp are this helper's job; a test that
+ * also needs a title writes it with its own direct SQL, the same way this
+ * suite already seeds other untrusted-shaped stored fields.
+ *
+ * Throws if `provider`/`externalId` do not match an existing row: a silent
+ * no-op `UPDATE` would leave a test's fixture data wrong with no signal
+ * until an assertion fails somewhere far from the actual mistake.
+ */
+export function setCachedStatus(
+  dbPath: string,
+  provider: string,
+  externalId: string,
+  status: string,
+  syncedAt: string = nowIso(),
+): void {
+  const db = new Database(dbPath);
+  try {
+    const result = db
+      .prepare(
+        "UPDATE refs SET cached_status = ?, synced_at = ? WHERE provider = ? AND external_id = ?",
+      )
+      .run(status, syncedAt, provider, externalId);
+    if (result.changes !== 1) {
+      throw new Error(
+        `setCachedStatus: no ref matched provider ${JSON.stringify(provider)} externalId ${JSON.stringify(externalId)}`,
+      );
+    }
+  } finally {
+    db.close();
+  }
 }

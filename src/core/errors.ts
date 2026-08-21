@@ -18,6 +18,7 @@ export const KATRA_ERROR_CODES = [
   "validation",
   "cycle",
   "conflict",
+  "claimed_elsewhere",
   "usage",
 ] as const;
 
@@ -57,6 +58,15 @@ export type KatraErrorDetail =
   | { readonly code: "cycle"; readonly message: string; readonly path: readonly string[] }
   /** The action is legal but the current state refuses it; `reason` says why. */
   | { readonly code: "conflict"; readonly message: string; readonly reason: string }
+  /**
+   * The task is legal to act on, but another worktree currently holds its
+   * claim (F9's `reconcile`, `tasks/lifecycle.ts`'s `refuseIfClaimedElsewhere`
+   * override) — never silently overridden, and never conflated with the
+   * ordinary `conflict` code: `holder` is carried **structured**, not folded
+   * into the message, because a caller (`reconcile --json`'s skip report)
+   * needs it as data, not something to re-parse out of prose.
+   */
+  | { readonly code: "claimed_elsewhere"; readonly message: string; readonly holder: string }
   /** The invocation itself was malformed. */
   | { readonly code: "usage"; readonly message: string }
   /**

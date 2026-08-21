@@ -21,7 +21,7 @@ import {
 import { PROVIDERS, providerFor } from "../../src/core/providers/registry.js";
 import type { ProviderResult } from "../../src/core/providers/types.js";
 import { MAX_CACHED_TITLE_LENGTH, MAX_EXTERNAL_ID_LENGTH } from "../../src/core/refs/parse.js";
-import type { Ref } from "../../src/core/refs/types.js";
+import { buildRef } from "../helpers/refs.js";
 
 /** A raw BEL control byte, built via `fromCharCode` — house rule: no raw control bytes as literals in a committed file. */
 const BEL = String.fromCharCode(7);
@@ -32,16 +32,6 @@ const BACKSLASH = String.fromCharCode(92);
 
 /** A fake key, obviously not a real one — house rule: tests use sentinel strings only, never a real credential. */
 const LINEAR_KEY_SENTINEL = "lin_test_sentinel_not_a_real_key_000000";
-
-function buildRef(overrides: Partial<Ref> & Pick<Ref, "provider" | "externalId">): Ref {
-  return {
-    url: null,
-    cachedStatus: null,
-    cachedTitle: null,
-    syncedAt: null,
-    ...overrides,
-  };
-}
 
 // --- runGh mock (github.ts's only external call) ---------------------------
 

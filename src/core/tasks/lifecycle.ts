@@ -13,7 +13,7 @@
  * from whoever was about to start it.
  */
 
-import { settleClaim } from "../claims/repo.js";
+import { claimFor, describeLiveness, settleClaim } from "../claims/repo.js";
 import type { LifecycleResult } from "../contract.js";
 import { assertNotReadOnly, writeTx } from "../db/connection.js";
 import type { EventType, Lane } from "../enums.js";
@@ -30,6 +30,56 @@ export type { LifecycleResult };
 
 /** The lane `reopen` returns a task to unless told otherwise. */
 export const REOPEN_DEFAULT_LANE: Lane = "Defined";
+
+/**
+ * Widens `transition`/`closeTask`/`cancelTask` for a caller that is not an
+ * ordinary interactive command — F9's `reconcile`, the first and so far only
+ * one. Both fields are optional and, omitted, leave every default-path
+ * behavior byte-identical to before this existed (F9 T1 acceptance
+ * criterion): no existing test needed to change, and the `refuseIfClaimedElsewhere`
+ * read below never runs unless a caller explicitly asks for it.
+ *
+ * **Not accepted by `reopenTask`.** Reviving a blocker is never something
+ * `reconcile`'s forward-only policy engine does (ADR-016), and reopen has no
+ * claim to settle in the first place — widening it would be surface with no
+ * caller.
+ */
+export interface LifecycleOverrides {
+  /**
+   * Stamps the lifecycle event (and, on a settled self-claim, the
+   * `released` event) with this actor instead of resolving `store.actor()`.
+   * `store.actor()` is a live git spawn; when this is given, it is never
+   * called at all — not merely overridden after the fact.
+   *
+   * **Does not imply claim safety.** `actor` alone changes *who gets
+   * blamed*, not *what is allowed to happen*: given on its own, without
+   * `refuseIfClaimedElsewhere`, it still force-settles a claim held by
+   * another worktree exactly as an ordinary non-holder `close`/`cancel`
+   * does today — `settleClaim` runs unconditionally whenever a transition
+   * closes. On that settled `released` event, `priorActor` names the
+   * worktree actually displaced; `actor` names whatever this override says,
+   * which — for `reconcile` — never held the claim in the first place. The
+   * two fields answer different questions and must not be conflated. F9's
+   * `reconcile` sets **both** `actor` and `refuseIfClaimedElsewhere`
+   * together (epic requirement 6: a foreign claim is skipped, never
+   * overridden); a future caller that wants `actor` alone, without the
+   * claim guard, has to justify that choice in its own docs — this
+   * interface does not grant it by default.
+   */
+  readonly actor?: string;
+  /**
+   * When `true`, refuses the transition — inside the same transaction that
+   * would otherwise write it — if the task is currently claimed by a
+   * worktree other than the one this store resolves to. Checked with
+   * `claimFor` inside `writeTx`, never before it: guarding outside the
+   * transaction leaves the identical check-then-write window `transition`'s
+   * own docs already warn about for the terminal-lane guard, just for a
+   * claim instead of a lane. No claim, or a claim held by this store's own
+   * worktree, proceeds normally — a self-held claim still settles on close
+   * exactly as it does today.
+   */
+  readonly refuseIfClaimedElsewhere?: boolean;
+}
 
 function loadOrThrow(store: OpenStore, id: string, idInput: string): Task {
   const task = getTask(store, id);
@@ -174,12 +224,35 @@ export function applyMoveWithin(
  * identity under the write lock or split one logical change across two
  * transactions — exactly the atomicity spec req 5 forbids. `settleClaim`
  * exists precisely to be the shared core without either hazard.
+ *
+ * **`overrides` (F9 T1) widens this seam rather than forking it** — the
+ * reconcile policy engine (F9) cannot produce a state a manual `close`/
+ * `cancel` could not, because it is calling the identical function. Omitted,
+ * every default-path caller (every command that existed before F9) sees
+ * byte-identical behavior: `overrides?.actor ?? store.actor()` only skips the
+ * git spawn when an override is actually given, and the
+ * `refuseIfClaimedElsewhere` guard below is reached only when that flag is
+ * `true`, so the ordinary path pays no extra query for a feature it never
+ * asked for.
  */
 function transition(
   store: OpenStore,
   idInput: string,
   plan: (task: Task) => Move,
+  overrides?: LifecycleOverrides,
 ): LifecycleResult {
+  // Before even resolving the id, let alone the write lock: an empty string
+  // is never a real actor, and the only way to reach this branch is a caller
+  // that meant to omit the override (`undefined`) and passed `""` instead —
+  // refused as `internal`, a broken caller rather than a typed refusal a
+  // user could trigger.
+  if (overrides?.actor === "") {
+    throw new KatraException({
+      code: "internal",
+      message: "LifecycleOverrides.actor must not be empty — omit it to use the store's own actor",
+    });
+  }
+
   const id = requireId(store, idInput);
   // Before the transaction: resolving identity spawns git subprocesses, and
   // doing that under `BEGIN IMMEDIATE` holds the write lock across them. Both
@@ -189,11 +262,33 @@ function transition(
   // runs: every store pays that spawn once at open time, so reading it again
   // here costs nothing, whether or not this store's `actor` was supplied
   // independently of `identity`.
-  const actor = store.actor();
+  const actor = overrides?.actor ?? store.actor();
   const worktree = store.identity().worktree;
 
   return writeTx(store.db, (now) => {
     const task = loadOrThrow(store, id, idInput);
+
+    // Inside the transaction, before any write — the same
+    // loaded-and-guarded-inside-the-tx discipline this function's own docs
+    // state for the terminal-lane guard below, applied to a claim instead of
+    // a lane. Gated behind the flag: an ordinary close/cancel with no
+    // overrides never reaches `claimFor` here at all.
+    if (overrides?.refuseIfClaimedElsewhere === true) {
+      const claim = claimFor(store, id);
+      if (claim !== null && claim.holder !== worktree) {
+        throw new KatraException({
+          code: "claimed_elsewhere",
+          // Same house shape `claimTask`'s own conflict refusal uses
+          // (`claims/repo.ts`): actor + liveness, via the shared
+          // `describeLiveness`. `detail.holder` stays the worktree path —
+          // the structured field a caller reads as data — while the
+          // message names the human-legible actor instead.
+          message: `${id} is held by ${claim.actor}, ${describeLiveness(claim, now)} — refusing to change it from here`,
+          holder: claim.holder,
+        });
+      }
+    }
+
     const move = plan(task);
 
     const { result, unblocked, reblocked } = reportReadinessChange(store, id, () => {
@@ -242,12 +337,22 @@ function refuseIfTerminal(task: Task, verb: string): void {
   }
 }
 
-/** Marks work finished. */
-export function closeTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
-  return transition(store, idInput, (task) => {
-    refuseIfTerminal(task, "close");
-    return { lane: "Done", markClosed: true, reason: reason ?? null, event: "closed" };
-  });
+/** Marks work finished. See {@link LifecycleOverrides} for the optional `overrides` parameter (F9's `reconcile`; omitted, behavior is unchanged). */
+export function closeTask(
+  store: OpenStore,
+  idInput: string,
+  reason?: string,
+  overrides?: LifecycleOverrides,
+): LifecycleResult {
+  return transition(
+    store,
+    idInput,
+    (task) => {
+      refuseIfTerminal(task, "close");
+      return { lane: "Done", markClosed: true, reason: reason ?? null, event: "closed" };
+    },
+    overrides,
+  );
 }
 
 /**
@@ -256,12 +361,25 @@ export function closeTask(store: OpenStore, idInput: string, reason?: string): L
  * The reason is optional but is the point of the lane: without it the record
  * says only that something was dropped, not why — and "why" is what stops the
  * same approach being proposed again.
+ *
+ * See {@link LifecycleOverrides} for the optional `overrides` parameter
+ * (F9's `reconcile`; omitted, behavior is unchanged).
  */
-export function cancelTask(store: OpenStore, idInput: string, reason?: string): LifecycleResult {
-  return transition(store, idInput, (task) => {
-    refuseIfTerminal(task, "cancel");
-    return { lane: "Cancelled", markClosed: true, reason: reason ?? null, event: "cancelled" };
-  });
+export function cancelTask(
+  store: OpenStore,
+  idInput: string,
+  reason?: string,
+  overrides?: LifecycleOverrides,
+): LifecycleResult {
+  return transition(
+    store,
+    idInput,
+    (task) => {
+      refuseIfTerminal(task, "cancel");
+      return { lane: "Cancelled", markClosed: true, reason: reason ?? null, event: "cancelled" };
+    },
+    overrides,
+  );
 }
 
 /**

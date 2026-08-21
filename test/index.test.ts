@@ -109,6 +109,12 @@ describe("the public barrel", () => {
       // their own entries — they ride on RefreshResult the same way
       // ReportSection/MigrationItemRef ride on MigrationReport without one.
       katra.RefreshResult,
+      // F9 T4: what `reconcile` prints. ReconcileTotals/ReconcileAdvanceItem/
+      // ReconcileBlockedItem/ReconcileConflictTarget/ReconcileConflictItem/
+      // ReconcileSkipClaimedItem/ReconcileNoOpItem do not get their own
+      // entries — they ride on ReconcileResult the same way RefreshResult's
+      // own item shapes ride on it above.
+      katra.ReconcileResult,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -117,8 +123,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 25;
-    expect(count).toBe(25);
+    const count: PublishedDocuments["length"] = 26;
+    expect(count).toBe(26);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {

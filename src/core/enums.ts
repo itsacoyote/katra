@@ -251,6 +251,56 @@ export function isPriority(value: unknown): value is Priority {
 }
 
 /**
+ * What `reconcile` (F9) decided for one task, against the cached ref
+ * statuses `refresh` (F8) already wrote.
+ *
+ * Declared here rather than beside the pure engine that produces them
+ * (`src/core/reconcile/`) so the engine, the gathering repo, and the
+ * `reconcile` command itself all import the one canonical set, instead of
+ * three files independently inventing overlapping literal unions — the same
+ * reasoning {@link REFRESH_REASONS} gives for its own placement.
+ *
+ * Unlike every other set in this module, and exactly like
+ * {@link REFRESH_REASONS}, nothing here is `CHECK`-enforced: a verdict is
+ * never written to a column — `reconcile --apply` writes ordinary
+ * `closed`/`cancelled` events through the existing lifecycle machinery, not
+ * a verdict token — so there is no `CHECK` for this to drift from. This is
+ * the closed vocabulary `reconcile` reports on stdout and in `--json`.
+ *
+ * Ordered by the engine's own pinned precedence (`reconcile/engine.ts`'s
+ * module doc), not alphabetically or by first-appearance-in-spec the way
+ * {@link EVENT_TYPES} is ordered: `conflict` is decided first, `no-op` last,
+ * and this list reads top-to-bottom as the same decision the engine makes.
+ */
+export const RECONCILE_VERDICT_KINDS = [
+  // Mapped refs disagree on the target lane (e.g. one -> Done, another ->
+  // Cancelled). Checked first: the most actionable signal, and it must win
+  // even when the same task would otherwise also qualify as blocked-by-ref.
+  "conflict",
+  // At least one ref maps to a target and at least one other does not (an
+  // unmapped status, or unresolved -- cachedStatus still null, never
+  // successfully refreshed). The unmapped/unresolved ref is what is named in
+  // the report; "prevents advancement" is the safety property, this is only
+  // the reason given (epic vocabulary note).
+  "blocked-by-ref",
+  // Every linked ref maps to the identical target lane. Would-be terminal
+  // verdict, downgraded to skip-claimed below when another worktree holds
+  // the claim -- advance is the only verdict skip-claimed ever overrides.
+  "advance",
+  // What an otherwise-advancing task becomes when claimHolder names a
+  // worktree other than the one invoking reconcile (the caller resolves
+  // "not mine" before this ever reaches the engine -- Candidate.claimHolder
+  // is non-null only for someone else's claim). A blocked or conflicted
+  // task reports its ref verdict even when claimed; only advance is masked.
+  "skip-claimed",
+  // Zero refs map to anything -- distinct from blocked-by-ref, which needs
+  // at least one mapped ref to contrast against. Never reported as blocked:
+  // there is nothing here actually blocking a move that was never on offer.
+  "no-op",
+] as const;
+export type ReconcileVerdictKind = (typeof RECONCILE_VERDICT_KINDS)[number];
+
+/**
  * Renders a set as a SQL `IN`-list fragment: `'epic','task'`.
  *
  * Single quotes are doubled so a value can never terminate its own literal.
