@@ -392,6 +392,16 @@ const CONTROLS_KEEPING_LAYOUT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\
  * hardest - it is the basis on which `--apply` commits a destructive write
  * (closing or cancelling a task), so what the terminal shows must not be able
  * to disagree with what is actually stored.
+ *
+ * **The named cost of that widening**: `U+200D` (zero-width joiner) falls
+ * inside the stripped range too, so an emoji built as a join sequence (a
+ * family, a profession with a gender variant, and similar multi-codepoint
+ * glyphs) renders here as its separate component characters rather than the
+ * single combined emoji. Accepted, not carved out - an invisible codepoint
+ * that makes two distinct stored strings render identically is the worse
+ * hazard for a preview a destructive write is about to be gated on, and
+ * singling out `U+200D` for an exception would reopen exactly that gap for
+ * one specific codepoint.
  */
 const BIDI = /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
 
