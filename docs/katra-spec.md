@@ -190,7 +190,7 @@ The agent is usually the one searching, and often from vague input ("that auth t
 
 ## 7. External references (pluggable providers)
 
-> **Narrowed by [ADR-014](decisions/ADR-014-core-parses-known-ref-urls.md) and [ADR-015](decisions/ADR-015-built-in-provider-registry.md):** as shipped, *core* recognizes `github.com` and `linear.app` URLs and bare ids by pure string parsing (F7), and the provider interface below is implemented as a compiled-in registry — GitHub via the `gh` CLI and Linear via its API ship inside katra (F8); external plugin discovery is deferred until a third party wants in. Storage, resolution, and `refresh` are built; `reconcile` is not.
+> **Narrowed by [ADR-014](decisions/ADR-014-core-parses-known-ref-urls.md), [ADR-015](decisions/ADR-015-built-in-provider-registry.md), and [ADR-016](decisions/ADR-016-reconcile-policy-as-injected-data.md):** as shipped, *core* recognizes `github.com` and `linear.app` URLs and bare ids by pure string parsing (F7), and the provider interface below is implemented as a compiled-in registry — GitHub via the `gh` CLI and Linear via its API ship inside katra (F8); external plugin discovery is deferred until a third party wants in. Storage, resolution, `refresh`, and `reconcile` are all built (F9): the policy below is injected data with a compiled-in default (`github/merged` → Done, `linear/completed` → Done, `linear/canceled` → Cancelled; GitHub `closed` deliberately unmapped), the multi-ref rule defaults to **all**, and two narrowings are recorded in ADR-016 — no user-facing policy-configuration surface yet, and no backward-suggestion tier (vacuous under a terminal-only map).
 
 katra tracks a **relationship** to an external issue/PR. It is not an integration, a mirror, or a sync target. **GitHub is the first provider, not a dependency.**
 
@@ -322,7 +322,7 @@ Hooks are an *enhancement* (automatic + enforced), not a requirement. Where an a
 - Final ID scheme (ULID vs short-random) + human alias handling.
 - Snapshot serialization format (faithful, restorable; format is only for git-diffability since no human reads it).
 - Modeling task↔external-ref many-to-many and the cached-status shape.
-- The default reconcile policy map (external state → lane) and whether the multi-ref rule defaults to *all* or *any*.
+- ~~The default reconcile policy map (external state → lane) and whether the multi-ref rule defaults to *all* or *any*.~~ Decided (F9, decision `katra-9aw.5`): terminal-only map — `github/merged` → Done, `linear/completed` → Done, `linear/canceled` → Cancelled, GitHub `closed` unmapped pending `state_reason` support — and the multi-ref rule is **all**.
 - Which providers ship at launch (GitHub via `gh` is the reference implementation; Linear/Jira later).
 - Which agent adapters ship at launch (Claude Code / Codex / Pi) and the exact fast-check CLI calls each touchpoint runs.
 - Whether the spec document produced in the Define phase is referenced by katra (as an external link/note) or lives entirely outside katra. (katra is not a document store; it tracks the tasks derived from the spec.)

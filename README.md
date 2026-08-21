@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, external refs that link tasks to GitHub PRs and Linear issues with live status through `refresh`, and twenty-four commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. Reconcile — acting on that live status — is still to come. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, external refs that link tasks to GitHub PRs and Linear issues with live status through `refresh` and policy-driven advancement through `reconcile`, and twenty-five commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -266,9 +266,32 @@ unresolved (1)
 
 `refresh` is pure read on the external side and never moves a task — acting on what it learned is `reconcile`'s job, deliberately a separate, explicit command ([ADR-015](docs/decisions/ADR-015-built-in-provider-registry.md) covers why providers are built-in rather than discovered plugins).
 
+### Acting on it
+
+`katra reconcile` is the one path by which external state can move a task, and it never runs implicitly. It reads only what `refresh` cached — no network — applies a fixed policy map (GitHub `merged` → Done, Linear `completed` → Done, Linear `canceled` → Cancelled; everything else no move), and **previews by default**:
+
+```console
+$ katra reconcile
+2 task(s) checked — 1 would advance, 1 blocked, 0 conflicting, 0 skip-claimed, 0 no-op
+
+advance (1)
+  kt-qyeewf  wire the auth flow  -> Done
+    reason: merged — github:itsacoyote/katra#13
+    github: itsacoyote/katra#13  merged  · synced just now
+
+blocked (1)
+  kt-ab12cd  split the parser
+    github: itsacoyote/katra#14  open  · synced just now
+
+$ katra reconcile --apply
+2 task(s) checked — 1 advanced, 1 blocked, 0 conflicting, 0 skip-claimed, 0 no-op
+```
+
+A task with several refs advances only when **all** of them agree (one merged PR out of three is not done); refs that disagree — one says Done, another Cancelled — are a flagged conflict and never auto-apply. A task claimed by another worktree is skipped and reported, even under `--apply`, and a never-refreshed ref holds its task back ("couldn't read it" never means "it's gone"). Every applied move lands in the task's history as a `closed`/`cancelled` event stamped `actor = reconcile` with the triggering ref in the reason — reconcile-derived changes are always distinguishable from an agent's own judgment. The policy is data inside the engine, not branches; a user-facing way to swap it is deliberately deferred ([ADR-016](docs/decisions/ADR-016-reconcile-policy-as-injected-data.md)).
+
 ## Still to come
 
-Reconcile (acting on refreshed external status — preview by default, the only path external state can move a task), external provider discovery, and snapshots. The [spec](docs/katra-spec.md) describes all of it.
+External provider discovery and snapshots. The [spec](docs/katra-spec.md) describes both.
 
 Until `snapshot` lands, the store lives only in your `.git` directory: it is not shareable, not reviewable in a pull request, and does not survive a fresh clone.
 
