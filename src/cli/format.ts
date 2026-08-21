@@ -91,6 +91,13 @@ function claimedField(claim: ClaimInfo, now: string): string {
  * threaded into each as the last positional parameter (F7 A5: appended after
  * existing parameters, never inserted before them).
  *
+ * **Exported** (plan-review HIGH-3, F9 T4): `reconcile`'s preview renders
+ * every triggering/blocking ref through this exact function rather than a
+ * fourth, parallel "provider: id" renderer — `reconcile/repo.ts`'s
+ * `Candidate.refs` is already the identical `Ref` shape this takes, cached
+ * title included, so no adaptation is needed at that fourth call site either.
+ *
+
  * `provider`/`externalId`/`url` are all attacker-influenced (F7 risk note
  * 23 — stored via the `--provider/--id/--url` escape hatch with only the
  * control-character screen `validateExplicitRef` applies to all three; bidi
@@ -125,7 +132,7 @@ function claimedField(claim: ClaimInfo, now: string): string {
  * (never refreshed) — that case renders with no synced age at all, same as
  * `cachedStatus`/`cachedTitle` render nothing when they are `null`.
  */
-function formatRefLine(ref: Ref, now: string): string {
+export function formatRefLine(ref: Ref, now: string): string {
   const qualified = `${text(ref.provider)}: ${text(ref.externalId)}`;
   const status = ref.cachedStatus === null ? "" : `  ${text(ref.cachedStatus)}`;
   const title = ref.cachedTitle === null ? "" : `  ${clamp(text(ref.cachedTitle), SNIPPET_WIDTH)}`;

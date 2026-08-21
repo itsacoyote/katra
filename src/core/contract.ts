@@ -18,12 +18,25 @@
  * Nothing here may import from `store.ts`, `db/`, or any module that does.
  * `enums.ts`, `tasks/types.ts`, `claims/types.ts`, `beads/types.ts` and
  * `refs/types.ts` are the only permitted dependencies, and none of them
- * touches the database.
+ * touches the database. `reconcile/types.ts` (F9 T2) is pure too, but is
+ * deliberately *not* added here: `test/index.test.ts` walks this file's own
+ * real import graph and pins the exact set it reaches, so every shape this
+ * file needs from `reconcile/` — {@link ReconcileConflictTarget} — is
+ * redeclared locally instead, the same way `RefreshUpdatedRef` and friends
+ * redeclare rather than import their own module's shapes.
  */
 
 import type { MigrationReport } from "./beads/types.js";
 import type { ClaimInfo } from "./claims/types.js";
-import type { Kind, Lane, Level, NoteKind, Priority, RefreshReason } from "./enums.js";
+import type {
+  Kind,
+  Lane,
+  Level,
+  NoteKind,
+  Priority,
+  RefreshReason,
+  TerminalLane,
+} from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
 import type { Note } from "./notes/types.js";
 import type { Ref } from "./refs/types.js";
@@ -692,6 +705,119 @@ export interface RefreshResult {
   readonly updated: RefreshSection<RefreshUpdatedRef>;
   readonly unchanged: RefreshSection<RefreshUnchangedRef>;
   readonly unresolved: RefreshSection<RefreshUnresolvedRef>;
+}
+
+/**
+ * One task `reconcile` would advance (preview) or has advanced (`--apply`) —
+ * `reconcile`'s "advance" category.
+ *
+ * `reason` is the exact text recorded on the lane-change event: raw,
+ * uncapped, built from `triggeringRefs`' own stored fields the same way
+ * `events.reason` always is (`events` store raw; a sink — `describeEvent`'s
+ * own `oneLine` — sanitizes on render, never the write). Present under
+ * preview too, as the reason `--apply` *would* record, so a caller can see
+ * it before committing to it.
+ */
+export interface ReconcileAdvanceItem {
+  readonly taskId: string;
+  readonly title: string;
+  readonly target: TerminalLane;
+  readonly triggeringRefs: readonly Ref[];
+  readonly reason: string;
+}
+
+/** One task at least one ref maps for, but at least one other prevents advancing — `reconcile`'s "blocked-by-ref" category. */
+export interface ReconcileBlockedItem {
+  readonly taskId: string;
+  readonly title: string;
+  readonly blockingRefs: readonly Ref[];
+}
+
+/**
+ * One target a conflicted task's mapped refs disagree on, and which refs
+ * mapped to it — redeclared from `reconcile/types.ts`'s own `ConflictTarget`
+ * rather than imported (this file's own module doc says why).
+ */
+export interface ReconcileConflictTarget {
+  readonly target: TerminalLane;
+  readonly refs: readonly Ref[];
+}
+
+/** One task whose mapped refs disagree on a target — `reconcile`'s "conflict" category. Never applied, preview or not. */
+export interface ReconcileConflictItem {
+  readonly taskId: string;
+  readonly title: string;
+  readonly targets: readonly ReconcileConflictTarget[];
+}
+
+/**
+ * One task masked from advancing by a foreign claim — `reconcile`'s
+ * "skip-claimed" category. Populated identically whether the engine decided
+ * it up front (`Verdict`'s own `skip-claimed` arm, `gatherCandidates`
+ * already knew the claim at gather time) or `--apply` discovered it only
+ * when the write itself raced a claim taken after gathering (`transition`'s
+ * in-tx `claimed_elsewhere` refusal, T1) — the same shape either way is the
+ * whole point (plan-review MEDIUM-2): a caller reading this category never
+ * has to know, or care, which path produced a given row.
+ */
+export interface ReconcileSkipClaimedItem {
+  readonly taskId: string;
+  readonly title: string;
+  readonly holder: string;
+}
+
+/**
+ * One task with nothing mapped to act on — `reconcile`'s "no-op" category.
+ * Two distinct causes land here, both meaning the same thing to a reader
+ * ("nothing for reconcile to do"): zero of the task's refs mapped to any
+ * policy target (the engine's own `no-op` verdict), and `--apply` finding a
+ * task already terminal by the time its write transaction opened — a task
+ * some other process (or another `reconcile`) already finished no longer
+ * needs advancing, whatever moved it there.
+ */
+export interface ReconcileNoOpItem {
+  readonly taskId: string;
+  readonly title: string;
+}
+
+/** The exact, uncapped counts behind {@link ReconcileResult}'s five sections. */
+export interface ReconcileTotals {
+  readonly tasks: number;
+  readonly advance: number;
+  readonly blockedByRef: number;
+  readonly conflict: number;
+  readonly skipClaimed: number;
+  readonly noOp: number;
+}
+
+/**
+ * What `reconcile` prints (F9 T4, spec §7 requirement 9).
+ *
+ * `reconcile` gathers every eligible task's linked refs (T3's
+ * `gatherCandidates`), plans a verdict per task against the built-in policy
+ * (T2's `planReconcile`), and — under `--apply` — commits every `advance`
+ * verdict through the existing lifecycle machinery (`closeTask`/`cancelTask`
+ * with T1's `reconcile` overrides), never a path a manual close/cancel could
+ * not also take.
+ *
+ * `applied` is the one field that distinguishes a preview from a commit —
+ * `beads/types.ts`'s own `MigrationReport.applied` is the precedent for a
+ * single top-level flag over a per-item one: every section below reports the
+ * identical shape either way, and only the wording a renderer chooses
+ * (`--json` never does) differs between "would advance" and "advanced".
+ * Preview writes nothing at all — no task, event, claim, or ref row changes
+ * (acceptance criterion 1) — proven by direct reads, not a byte-compare
+ * (`openStore`'s own presence heartbeat is the standing, documented
+ * exception every command shares).
+ */
+export interface ReconcileResult {
+  readonly applied: boolean;
+  readonly totals: ReconcileTotals;
+  readonly advance: RefreshSection<ReconcileAdvanceItem>;
+  readonly blockedByRef: RefreshSection<ReconcileBlockedItem>;
+  readonly conflict: RefreshSection<ReconcileConflictItem>;
+  readonly skipClaimed: RefreshSection<ReconcileSkipClaimedItem>;
+  readonly noOp: RefreshSection<ReconcileNoOpItem>;
 }
 
 /** What `--help --json` prints: the usage screen, as data. */

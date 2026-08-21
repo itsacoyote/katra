@@ -114,10 +114,28 @@ import { withStoreAsync } from "../with-store.js";
  * is a fixed ceiling on the *report*, not on how many refs actually get
  * resolved and written — every ref gathered in step 1 is still resolved and
  * written in full, whatever this bounds.
+ *
+ * **Also `reconcile`'s own bound (F9 T4), deliberately.** `reconcile.ts`
+ * imports this constant directly rather than declaring its own — the same
+ * "a bound reports itself" shape, the same order of magnitude of rows, and
+ * no reason for the two commands' report caps to be able to drift apart
+ * independently. Cross-command reuse, not a coincidence of both needing
+ * *some* number: if the two ever need different bounds, that is the moment
+ * to split them, not before.
  */
 export const MAX_REFRESH_SECTION_ITEMS = 50;
 
-/** Bounds `items` to {@link MAX_REFRESH_SECTION_ITEMS}, reporting whether the cap cut anything — pure, and exported so its boundary (a limit of 0 emptying a category) is unit-testable without a store. */
+/**
+ * Bounds `items` to {@link MAX_REFRESH_SECTION_ITEMS}, reporting whether the
+ * cap cut anything — pure, and exported so its boundary (a limit of 0
+ * emptying a category) is unit-testable without a store.
+ *
+ * **Shared with `reconcile.ts` (F9 T4), deliberately** — see
+ * {@link MAX_REFRESH_SECTION_ITEMS}'s own docs for why the two commands'
+ * report-bounding stays one function rather than two. The generic `<T>`
+ * already made this safe to reuse for a differently-shaped item before a
+ * second caller existed to prove it.
+ */
 export function buildRefreshSection<T>(
   items: readonly T[],
   limit: number = MAX_REFRESH_SECTION_ITEMS,
