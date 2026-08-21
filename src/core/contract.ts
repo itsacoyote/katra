@@ -768,12 +768,16 @@ export interface ReconcileSkipClaimedItem {
 
 /**
  * One task with nothing mapped to act on — `reconcile`'s "no-op" category.
- * Two distinct causes land here, both meaning the same thing to a reader
+ * Three distinct causes land here, all meaning the same thing to a reader
  * ("nothing for reconcile to do"): zero of the task's refs mapped to any
- * policy target (the engine's own `no-op` verdict), and `--apply` finding a
+ * policy target (the engine's own `no-op` verdict); `--apply` finding a
  * task already terminal by the time its write transaction opened — a task
  * some other process (or another `reconcile`) already finished no longer
- * needs advancing, whatever moved it there.
+ * needs advancing, whatever moved it there; and an explicitly-named id that
+ * never became a `Candidate` at all — an epic, an already-terminal task, or
+ * one holding no ref (`gatherCandidates`'s own eligibility rule, epic
+ * requirement 4) — reported here rather than silently dropping out of the
+ * total (validate round-1 LOW-1).
  */
 export interface ReconcileNoOpItem {
   readonly taskId: string;

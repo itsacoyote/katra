@@ -66,6 +66,7 @@ import type {
   ReconcileTotals,
 } from "../../core/contract.js";
 import type { ReconcileVerdictKind, TerminalLane } from "../../core/enums.js";
+import { isTerminal } from "../../core/enums.js";
 import { isKatraException } from "../../core/errors.js";
 import { planReconcile } from "../../core/reconcile/engine.js";
 import { DEFAULT_POLICY } from "../../core/reconcile/policy.js";
@@ -75,6 +76,7 @@ import type { Ref } from "../../core/refs/types.js";
 import type { OpenStore } from "../../core/store.js";
 import { requireId } from "../../core/tasks/ids.js";
 import { cancelTask, closeTask } from "../../core/tasks/lifecycle.js";
+import { getTask } from "../../core/tasks/repo.js";
 import { formatRefLine, oneLine } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
@@ -144,6 +146,38 @@ interface Buckets {
 }
 
 /**
+ * Reports every explicitly-named id `gatherCandidates` silently dropped —
+ * an epic, an already-terminal task, or a task holding no ref
+ * (`gatherCandidates`'s own eligibility rule, epic requirement 4) — under
+ * `no-op` instead of letting it vanish from the count entirely. Never runs
+ * for a bare `reconcile` (`taskIds` `undefined`): scanning every eligible
+ * task has no "explicitly asked for and ineligible" case to report.
+ *
+ * `getTask` rather than a second `requireId`: the id already passed
+ * `requireId` once, at the CLI boundary, before `runReconcile` ever saw it —
+ * re-resolving it here would re-run the same partial-id search for no
+ * reason. `task === undefined` is unreachable in practice for exactly that
+ * reason, and skipped rather than thrown on: a task deleted in the gap
+ * between resolving the id and this read is `reconcile`'s problem to shrug
+ * off, not to crash over.
+ */
+function reportIneligibleIds(
+  store: OpenStore,
+  taskIds: readonly string[] | undefined,
+  candidates: readonly Candidate[],
+  buckets: Buckets,
+): void {
+  if (taskIds === undefined) return;
+  const candidateIds = new Set(candidates.map((candidate) => candidate.id));
+  for (const taskId of taskIds) {
+    if (candidateIds.has(taskId)) continue;
+    const task = getTask(store, taskId);
+    if (task === undefined) continue;
+    buckets.noOp.push({ taskId, title: task.title });
+  }
+}
+
+/**
  * Plans and — under `applyChanges` — commits every candidate's verdict,
  * bucketed by kind. See this module's own doc for the full apply/race
  * discipline.
@@ -167,9 +201,20 @@ function runReconcile(
   for (const { candidate, verdict } of verdicts) {
     handleVerdict(store, candidate, verdict, applyChanges, buckets);
   }
+  reportIneligibleIds(store, taskIds, candidates, buckets);
 
+  // The sum of the five buckets, not `verdicts.length`: an explicitly-named
+  // ineligible id (reportIneligibleIds, above) lands in `noOp` without ever
+  // producing a verdict, and `tasks` has to keep naming "how many ids this
+  // run accounted for" rather than "how many the engine actually decided" —
+  // otherwise the header's own count would undercount its own sections.
   const totals: ReconcileTotals = {
-    tasks: verdicts.length,
+    tasks:
+      buckets.advance.length +
+      buckets.blockedByRef.length +
+      buckets.conflict.length +
+      buckets.skipClaimed.length +
+      buckets.noOp.length,
     advance: buckets.advance.length,
     blockedByRef: buckets.blockedByRef.length,
     conflict: buckets.conflict.length,
@@ -231,10 +276,21 @@ function handleVerdict(
         if (isKatraException(error) && error.detail.code === "claimed_elsewhere") {
           buckets.skipClaimed.push({ taskId, title, holder: error.detail.holder });
         } else if (isKatraException(error) && error.detail.code === "conflict") {
-          // Already terminal by the time this write's transaction opened —
+          // "conflict" alone does not prove this is the already-terminal
+          // race this branch means to catch — five different modules throw
+          // that same code (claims, dependency cycles, and lifecycle's own
+          // terminal-lane guard among them), and the CLI has no way to tell
+          // them apart from the code alone. Re-reading the task's current
+          // lane verifies the actual cause: only a genuinely terminal task —
           // some other process (another `reconcile`, a manual close/cancel)
-          // finished it first. Nothing left for this run to do.
-          buckets.noOp.push({ taskId, title });
+          // finished it first — becomes a no-op. Anything else escapes as a
+          // real failure rather than being silently swallowed into one.
+          const current = getTask(store, taskId);
+          if (current !== undefined && isTerminal(current.lane)) {
+            buckets.noOp.push({ taskId, title });
+          } else {
+            throw error;
+          }
         } else {
           throw error;
         }

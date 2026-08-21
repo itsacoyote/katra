@@ -269,6 +269,30 @@ describe("katra reconcile", () => {
     expect(readTaskRow(task)?.lane).not.toBe("Done");
   });
 
+  it("a stubbed cancel conflict is verified against the task's real lane before becoming a no-op", async () => {
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "ENG-451"], { cwd: repo.dir });
+    setCachedStatus(dbPath(), "linear", "ENG-451", "canceled");
+
+    // The claimed cause is "already Done", but the task's real row is left
+    // exactly as gatherCandidates just saw it — non-terminal. The old code
+    // trusted the "conflict" code string alone and would have swallowed this
+    // into a silent no-op regardless; the fix re-reads the task and only
+    // treats a *genuinely* terminal lane as the harmless already-finished
+    // race this branch means to catch.
+    lifecycleHook.cancelThrows = new KatraException({
+      code: "conflict",
+      message: `${task} is already Done — reopen it before you cancel it`,
+      reason: "lane is Done",
+    });
+
+    const result = await runCli(["reconcile", "--apply", "--json"], { cwd: repo.dir });
+
+    // Escapes as a real conflict for the whole run, not absorbed into no-op.
+    expect(result.exitCode).toBe(EXIT.conflict);
+    expect(readTaskRow(task)?.lane).not.toBe("Done");
+  });
+
   it("applying to a self-claimed task emits released and closed both stamped reconcile", async () => {
     const task = await add(["a task"]);
     await runCli(["ref", "add", task, "https://github.com/acme/widgets/pull/7"], {
@@ -444,5 +468,31 @@ describe("katra reconcile", () => {
       expect.objectContaining({ taskId: task, target: "Cancelled" }),
     ]);
     expect(readTaskRow(task)?.lane).toBe("Cancelled");
+  });
+
+  it("an explicitly-named epic or already-terminal task reports under no-op instead of 0 checked", async () => {
+    const epic = (
+      await runCli(["add", "an epic", "--level", "epic"], { cwd: repo.dir })
+    ).stdout.trim();
+    const done = await add(["already finished"]);
+    await runCli(["close", done], { cwd: repo.dir });
+
+    const epicResult = await runCli(["reconcile", epic, "--json"], { cwd: repo.dir });
+    expect(epicResult.exitCode, epicResult.stderr).toBe(EXIT.ok);
+    const epicDoc = epicResult.json() as ReconcileResult;
+    expect(epicDoc.totals.tasks).toBe(1);
+    expect(epicDoc.noOp.items).toEqual([expect.objectContaining({ taskId: epic })]);
+
+    const doneResult = await runCli(["reconcile", done, "--json"], { cwd: repo.dir });
+    expect(doneResult.exitCode, doneResult.stderr).toBe(EXIT.ok);
+    const doneDoc = doneResult.json() as ReconcileResult;
+    expect(doneDoc.totals.tasks).toBe(1);
+    expect(doneDoc.noOp.items).toEqual([expect.objectContaining({ taskId: done })]);
+
+    // The text rendering names the id, not just a bare zero count that reads
+    // as if the id was never seen at all.
+    const epicText = (await runCli(["reconcile", epic], { cwd: repo.dir })).stdout;
+    expect(epicText).toContain(epic);
+    expect(epicText).not.toContain("0 task(s) checked");
   });
 });
