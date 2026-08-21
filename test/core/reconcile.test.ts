@@ -206,6 +206,30 @@ describe("planReconcile: policy", () => {
   });
 });
 
+describe("planReconcile: prototype-chain safety", () => {
+  // `provider` and `cachedStatus` are both attacker-influenced (F7's `ref add
+  // --provider/--id` escape hatch), and a plain `policy[provider]?.[status]`
+  // lookup on `DEFAULT_POLICY` — an ordinary object literal — walks
+  // `Object.prototype` for any of these pairs instead of reporting "unmapped".
+  // Each must still yield `no-op`, never a truthy prototype member mistaken
+  // for a mapped target.
+  it.each([
+    ["__proto__", "toString"],
+    ["constructor", "name"],
+    ["github", "__proto__"],
+  ])(
+    "a ref shaped (%s, %s) yields no-op, not a prototype-chain member",
+    (provider, cachedStatus) => {
+      const ref = buildRef({ provider, externalId: "acme/app#1", cachedStatus });
+      const c = candidate({ refs: [ref] });
+
+      const [result] = planReconcile([c], DEFAULT_POLICY);
+
+      expect(result?.verdict).toEqual({ kind: "no-op" });
+    },
+  );
+});
+
 describe("gatherCandidates", () => {
   let fixture: StoreFixture;
   beforeEach(() => {

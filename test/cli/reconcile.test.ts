@@ -348,6 +348,48 @@ describe("katra reconcile", () => {
     );
   });
 
+  it("a multi-ref advance neutralizes every hostile id in the joined reason and stores both raw", async () => {
+    // Built by codepoint, not typed as literals: RLO and ALM are ordinary
+    // printable codepoints that reorder text without being visible, the same
+    // technique this file's own single-ref hostile-id test above uses.
+    const rlo = String.fromCharCode(0x202e);
+    const alm = String.fromCharCode(0x061c);
+    const githubId = `evil${rlo}gh`;
+    const linearId = `EVIL${alm}LN`;
+
+    const task = await add(["a task"]);
+    await runCli(["ref", "add", task, "--provider", "github", "--id", githubId], {
+      cwd: repo.dir,
+    });
+    await runCli(["ref", "add", task, "--provider", "linear", "--id", linearId], {
+      cwd: repo.dir,
+    });
+    setCachedStatus(dbPath(), "github", githubId, "merged");
+    setCachedStatus(dbPath(), "linear", linearId, "completed");
+
+    const preview = await runCli(["reconcile"], { cwd: repo.dir });
+    expect(preview.exitCode, preview.stderr).toBe(EXIT.ok);
+    expect(preview.stdout).not.toContain(rlo);
+    expect(preview.stdout).not.toContain(alm);
+
+    const applied = await runCli(["reconcile", "--apply", "--json"], { cwd: repo.dir });
+    expect(applied.exitCode, applied.stderr).toBe(EXIT.ok);
+
+    // Stored raw — events store raw, sinks sanitize — read back verbatim via
+    // log --json, carrying both hostile ids intact.
+    const log = await runCli(["log", task, "--json"], { cwd: repo.dir });
+    const events = (
+      log.json() as { events: ReadonlyArray<{ type: string; reason: string | null }> }
+    ).events;
+    const closedReason = events.find((event) => event.type === "closed")?.reason;
+    expect(closedReason).toBe(`merged — github:${githubId}, completed — linear:${linearId}`);
+
+    // But rendering that stored reason neutralizes it, end to end.
+    const logText = await runCli(["log", task], { cwd: repo.dir });
+    expect(logText.stdout).not.toContain(rlo);
+    expect(logText.stdout).not.toContain(alm);
+  });
+
   it("--json mirrors the text verdicts for preview and apply", async () => {
     const previewTask = await add(["preview task"]);
     await runCli(["ref", "add", previewTask, "https://github.com/acme/widgets/pull/7"], {

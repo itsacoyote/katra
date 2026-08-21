@@ -97,7 +97,6 @@ function claimedField(claim: ClaimInfo, now: string): string {
  * `Candidate.refs` is already the identical `Ref` shape this takes, cached
  * title included, so no adaptation is needed at that fourth call site either.
  *
-
  * `provider`/`externalId`/`url` are all attacker-influenced (F7 risk note
  * 23 — stored via the `--provider/--id/--url` escape hatch with only the
  * control-character screen `validateExplicitRef` applies to all three; bidi
@@ -383,8 +382,18 @@ const CONTROLS_KEEPING_LAYOUT = /[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u2028\
  * Removed rather than replaced with a marker: a marker in the middle of a line
  * is itself a rendering change, and katra has no styling vocabulary to make it
  * legible.
+ *
+ * **Widened (F9 T4 security review) past bidi-only to every zero-width and
+ * invisible formatting codepoint**: soft hyphen, the zero-width
+ * space/non-joiner/joiner run, word joiner, and the BOM used as a zero-width
+ * no-break space join the bidi overrides already covered above. Two stored
+ * strings that differ only in an invisible member of this set render
+ * identically, and a reconcile preview is exactly the place that gap bites
+ * hardest - it is the basis on which `--apply` commits a destructive write
+ * (closing or cancelling a task), so what the terminal shows must not be able
+ * to disagree with what is actually stored.
  */
-const BIDI = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/g;
+const BIDI = /[\u00AD\u061C\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
 
 /** What an event says happened, beyond its type and what it is about. */
 function describeEvent(event: LoggedEvent): string {

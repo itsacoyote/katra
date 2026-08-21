@@ -41,6 +41,7 @@
  */
 
 import type { TerminalLane } from "../enums.js";
+import { isTerminal } from "../enums.js";
 import type { Ref } from "../refs/types.js";
 import type { Candidate, CandidateVerdict, ConflictTarget, PolicyTable, Verdict } from "./types.js";
 
@@ -50,10 +51,25 @@ import type { Candidate, CandidateVerdict, ConflictTarget, PolicyTable, Verdict 
  * `policy` simply has no entry for its `(provider, status)` pair (mapped to
  * nothing). Both are "this ref does not map" from the engine's point of
  * view; nothing downstream of this function ever needs to tell them apart.
+ *
+ * **Own-property lookups only.** `ref.provider` is attacker-influenced (F7's
+ * `ref add --provider/--id` escape hatch places no restriction on the string
+ * stored there), and a plain `policy[ref.provider]` indexes the object's
+ * prototype chain along with its own keys — `"__proto__"`, `"toString"`,
+ * `"constructor"`, and every other `Object.prototype` member resolve to
+ * *something* rather than `undefined`. `Object.hasOwn` is checked at both
+ * levels — provider, then status — before either index runs, and the final
+ * `isTerminal` guard is a second, independent check that whatever survives
+ * both `hasOwn` calls is actually `"Done"`/`"Cancelled"` and not some other
+ * value a non-default, caller-supplied `PolicyTable` happened to store.
  */
 function refTarget(ref: Ref, policy: PolicyTable): TerminalLane | undefined {
   if (ref.cachedStatus === null) return undefined;
-  return policy[ref.provider]?.[ref.cachedStatus];
+  if (!Object.hasOwn(policy, ref.provider)) return undefined;
+  const statuses = policy[ref.provider];
+  if (statuses === undefined || !Object.hasOwn(statuses, ref.cachedStatus)) return undefined;
+  const target = statuses[ref.cachedStatus];
+  return isTerminal(target) ? target : undefined;
 }
 
 /** The base verdict — precedence rules 1 through 4, before the claim override. */
