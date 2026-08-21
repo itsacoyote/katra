@@ -11,17 +11,7 @@ import { describe, expect, it } from "vitest";
 import { planReconcile } from "../../src/core/reconcile/engine.js";
 import { DEFAULT_POLICY } from "../../src/core/reconcile/policy.js";
 import type { Candidate, PolicyTable } from "../../src/core/reconcile/types.js";
-import type { Ref } from "../../src/core/refs/types.js";
-
-function ref(overrides: Partial<Ref> & Pick<Ref, "provider" | "externalId">): Ref {
-  return {
-    url: null,
-    cachedStatus: null,
-    cachedTitle: null,
-    syncedAt: null,
-    ...overrides,
-  };
-}
+import { buildRef } from "../helpers/refs.js";
 
 let candidateCounter = 0;
 
@@ -39,8 +29,8 @@ function candidate(overrides: Partial<Candidate> & Pick<Candidate, "refs">): Can
 
 describe("planReconcile: precedence", () => {
   it("a task whose every ref maps to Done yields advance citing every ref", () => {
-    const refA = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
-    const refB = ref({ provider: "github", externalId: "acme/app#2", cachedStatus: "merged" });
+    const refA = buildRef({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
+    const refB = buildRef({ provider: "github", externalId: "acme/app#2", cachedStatus: "merged" });
     const c = candidate({ refs: [refA, refB] });
 
     const [result] = planReconcile([c], DEFAULT_POLICY);
@@ -53,8 +43,12 @@ describe("planReconcile: precedence", () => {
   });
 
   it("one merged and one open PR yields blocked-by-ref naming the open ref", () => {
-    const merged = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
-    const open = ref({ provider: "github", externalId: "acme/app#2", cachedStatus: "open" });
+    const merged = buildRef({
+      provider: "github",
+      externalId: "acme/app#1",
+      cachedStatus: "merged",
+    });
+    const open = buildRef({ provider: "github", externalId: "acme/app#2", cachedStatus: "open" });
     const c = candidate({ refs: [merged, open] });
 
     const [result] = planReconcile([c], DEFAULT_POLICY);
@@ -63,8 +57,12 @@ describe("planReconcile: precedence", () => {
   });
 
   it("a merged PR plus a never-refreshed ref yields blocked-by-ref", () => {
-    const merged = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
-    const neverRefreshed = ref({
+    const merged = buildRef({
+      provider: "github",
+      externalId: "acme/app#1",
+      cachedStatus: "merged",
+    });
+    const neverRefreshed = buildRef({
       provider: "github",
       externalId: "acme/app#2",
       cachedStatus: null,
@@ -77,7 +75,7 @@ describe("planReconcile: precedence", () => {
   });
 
   it("a task whose refs are all unmapped yields no-op, not blocked-by-ref", () => {
-    const open = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "open" });
+    const open = buildRef({ provider: "github", externalId: "acme/app#1", cachedStatus: "open" });
     const c = candidate({ refs: [open] });
 
     const [result] = planReconcile([c], DEFAULT_POLICY);
@@ -86,8 +84,12 @@ describe("planReconcile: precedence", () => {
   });
 
   it("refs mapping to Done and Cancelled yield conflict naming both targets", () => {
-    const done = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
-    const cancelled = ref({ provider: "linear", externalId: "ENG-1", cachedStatus: "canceled" });
+    const done = buildRef({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
+    const cancelled = buildRef({
+      provider: "linear",
+      externalId: "ENG-1",
+      cachedStatus: "canceled",
+    });
     const c = candidate({ refs: [done, cancelled] });
 
     const [result] = planReconcile([c], DEFAULT_POLICY);
@@ -105,9 +107,17 @@ describe("planReconcile: precedence", () => {
     // Three refs on one task: one -> Done, one -> Cancelled (the conflict),
     // and one unmapped (open, which alone would make the task blocked-by-ref).
     // Precedence pins conflict first regardless.
-    const done = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
-    const cancelled = ref({ provider: "linear", externalId: "ENG-1", cachedStatus: "canceled" });
-    const blocking = ref({ provider: "github", externalId: "acme/app#2", cachedStatus: "open" });
+    const done = buildRef({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
+    const cancelled = buildRef({
+      provider: "linear",
+      externalId: "ENG-1",
+      cachedStatus: "canceled",
+    });
+    const blocking = buildRef({
+      provider: "github",
+      externalId: "acme/app#2",
+      cachedStatus: "open",
+    });
     const c = candidate({ refs: [done, cancelled, blocking] });
 
     const [result] = planReconcile([c], DEFAULT_POLICY);
@@ -118,7 +128,11 @@ describe("planReconcile: precedence", () => {
 
 describe("planReconcile: claim safety", () => {
   it("a would-advance task claimed by another worktree yields skip-claimed", () => {
-    const merged = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
+    const merged = buildRef({
+      provider: "github",
+      externalId: "acme/app#1",
+      cachedStatus: "merged",
+    });
     const c = candidate({ refs: [merged], claimHolder: "feature/other @ /repo/wt-other" });
 
     const [result] = planReconcile([c], DEFAULT_POLICY);
@@ -130,8 +144,12 @@ describe("planReconcile: claim safety", () => {
   });
 
   it("a blocked task claimed by another worktree stays blocked-by-ref", () => {
-    const merged = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "merged" });
-    const open = ref({ provider: "github", externalId: "acme/app#2", cachedStatus: "open" });
+    const merged = buildRef({
+      provider: "github",
+      externalId: "acme/app#1",
+      cachedStatus: "merged",
+    });
+    const open = buildRef({ provider: "github", externalId: "acme/app#2", cachedStatus: "open" });
     const c = candidate({ refs: [merged, open], claimHolder: "feature/other @ /repo/wt-other" });
 
     const [result] = planReconcile([c], DEFAULT_POLICY);
@@ -142,7 +160,11 @@ describe("planReconcile: claim safety", () => {
 
 describe("planReconcile: policy", () => {
   it("a single canceled linear ref yields advance to Cancelled", () => {
-    const cancelled = ref({ provider: "linear", externalId: "ENG-1", cachedStatus: "canceled" });
+    const cancelled = buildRef({
+      provider: "linear",
+      externalId: "ENG-1",
+      cachedStatus: "canceled",
+    });
     const c = candidate({ refs: [cancelled] });
 
     const [result] = planReconcile([c], DEFAULT_POLICY);
@@ -159,7 +181,7 @@ describe("planReconcile: policy", () => {
     // never a hardcoded branch — an "open" -> Cancelled table the default
     // policy does not have produces a different verdict for the identical
     // candidate.
-    const open = ref({ provider: "github", externalId: "acme/app#1", cachedStatus: "open" });
+    const open = buildRef({ provider: "github", externalId: "acme/app#1", cachedStatus: "open" });
     const c = candidate({ refs: [open] });
     const customPolicy: PolicyTable = { github: { open: "Cancelled" } };
 

@@ -67,19 +67,18 @@ function baseVerdict(candidate: Candidate, policy: PolicyTable): Verdict {
     else mapped.push({ ref, target });
   }
 
-  // Rule 1: conflict. Grouped in first-encountered order, not sorted — the
-  // order a reader's report names the disagreeing targets should match the
-  // order the refs themselves were linked, not an arbitrary rule.
-  const targets: ConflictTarget[] = [];
+  // Rule 1: conflict. A Map preserves insertion order, so the report names
+  // disagreeing targets in the order the refs themselves were linked, not an
+  // arbitrary one — the same guarantee the previous find()-then-push version
+  // gave, without a readonly-array cast to get there.
+  const byTarget = new Map<TerminalLane, Ref[]>();
   for (const { ref, target } of mapped) {
-    const existing = targets.find((entry) => entry.target === target);
-    if (existing === undefined) {
-      targets.push({ target, refs: [ref] });
-    } else {
-      (existing.refs as Ref[]).push(ref);
-    }
+    const refs = byTarget.get(target);
+    if (refs === undefined) byTarget.set(target, [ref]);
+    else refs.push(ref);
   }
-  if (targets.length >= 2) {
+  if (byTarget.size >= 2) {
+    const targets: ConflictTarget[] = Array.from(byTarget, ([target, refs]) => ({ target, refs }));
     return { kind: "conflict", targets };
   }
 

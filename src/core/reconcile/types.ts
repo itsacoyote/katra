@@ -17,7 +17,7 @@
  * shape would be exactly the kind of copy that drifts from the original.
  */
 
-import type { Lane, Level, TerminalLane } from "../enums.js";
+import type { Lane, Level, ReconcileVerdictKind, TerminalLane } from "../enums.js";
 import type { Ref } from "../refs/types.js";
 
 /**
@@ -80,10 +80,15 @@ export interface ConflictTarget {
  * `RECONCILE_VERDICT_KINDS` declares — not imported from there: a
  * discriminated union needs each arm typed to its own specific literal, and
  * `kind: ReconcileVerdictKind` on every arm would type every arm as the
- * *whole* union instead, losing the narrowing this shape exists for.
- * `RECONCILE_VERDICT_KINDS` is what `reconcile`'s CLI (F9 T4) and
- * `reconcile/repo.ts` (F9 T3) import — the closed vocabulary shared *across*
- * files; this file's own literals are what a caller narrows *within* one.
+ * *whole* union instead, losing the narrowing this shape exists for. Each
+ * arm keeps its own literal untouched; {@link _VerdictKindsMatchEnum} below
+ * is a separate, compile-time-only proof that the two lists still agree,
+ * catching the drift a hand-kept-in-sync pair invites — a typo'd arm, or a
+ * vocabulary token with no arm — as a type error instead of a silent gap a
+ * test would have to happen to cover. `RECONCILE_VERDICT_KINDS` is what
+ * `reconcile`'s CLI (F9 T4) and `reconcile/repo.ts` (F9 T3) import — the
+ * closed vocabulary shared *across* files; this file's own literals are what
+ * a caller narrows *within* one.
  *
  * Deliberately **not** `RefResult`'s flat, always-present-fields shape: each
  * arm below answers a structurally different question (which lane, which
@@ -103,6 +108,26 @@ export type Verdict =
     }
   | { readonly kind: "skip-claimed"; readonly holder: string }
   | { readonly kind: "no-op" };
+
+/**
+ * Compile-time-only proof that {@link Verdict}'s five `kind` literals are
+ * exactly `enums.ts`'s `RECONCILE_VERDICT_KINDS` — bidirectional, so it
+ * catches drift in either direction: a `Verdict` arm renamed to a literal
+ * outside the vocabulary, or a vocabulary token with no arm to produce it.
+ * `Verdict["kind"]` never touches how each arm narrows (every arm still
+ * carries its own individual literal, per the doc above) — this type is
+ * never referenced by anything that runs, only by the `const` immediately
+ * below it, whose sole job is forcing TypeScript to actually evaluate the
+ * conditional: a conditional type nothing is assigned to is checked by
+ * nothing.
+ */
+type _VerdictKindsMatchEnum = Verdict["kind"] extends ReconcileVerdictKind
+  ? ReconcileVerdictKind extends Verdict["kind"]
+    ? true
+    : never
+  : never;
+const _verdictKindsMatchEnum: _VerdictKindsMatchEnum = true;
+void _verdictKindsMatchEnum;
 
 /** One candidate paired with the verdict `planReconcile` reached for it. */
 export interface CandidateVerdict {
