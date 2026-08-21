@@ -7,6 +7,7 @@
 
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { oneLine } from "../../src/cli/format.js";
 import { EXIT } from "../../src/cli/output.js";
 import type { ReconcileResult } from "../../src/core/contract.js";
 import { DB_FILE_NAME, STORE_DIR_NAME } from "../../src/core/db/locate.js";
@@ -523,5 +524,33 @@ describe("katra reconcile", () => {
     const epicText = (await runCli(["reconcile", epic], { cwd: repo.dir })).stdout;
     expect(epicText).toContain(epic);
     expect(epicText).not.toContain("0 task(s) checked");
+  });
+});
+
+// --- the widened invisible-codepoint class (F9 security scan) -------------
+// F9 widened format.ts's shared BIDI class beyond the Trojan Source
+// reordering set to the invisible codepoints that make two different stored
+// strings render identically — the hazard a reconcile preview gating a
+// destructive --apply cannot afford. The six additions had no regression
+// guard of their own (QA finding katra-9aw.65.6); this pins each one, plus
+// one pre-existing member as a canary that the widening didn't narrow.
+describe("oneLine strips the widened invisible-codepoint set", () => {
+  const NEW_MEMBERS: ReadonlyArray<readonly [name: string, code: number]> = [
+    ["soft hyphen U+00AD", 0x00ad],
+    ["zero width space U+200B", 0x200b],
+    ["zero width non-joiner U+200C", 0x200c],
+    ["zero width joiner U+200D", 0x200d],
+    ["word joiner U+2060", 0x2060],
+    ["zero width no-break space U+FEFF", 0xfeff],
+  ];
+
+  it.each(NEW_MEMBERS)("strips %s", (_name, code) => {
+    const invisible = String.fromCharCode(code);
+    expect(oneLine(`a${invisible}b`)).toBe("ab");
+  });
+
+  it("still strips the original reordering set (RLO canary)", () => {
+    const rlo = String.fromCharCode(0x202e);
+    expect(oneLine(`a${rlo}b`)).toBe("ab");
   });
 });
