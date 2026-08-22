@@ -325,9 +325,15 @@ function loadAllRows(db: DatabaseHandle, rowsByTable: RowsByTable): readonly Sna
  * never the target it points to, so a dangling link is correctly seen as
  * present here and removed by `unlinkSync`, which likewise never follows it.
  */
-/** How many times a swap filesystem mutation retries a transient Windows lock, and the backoff between tries. */
-const FS_RETRY_ATTEMPTS = 20;
-const FS_RETRY_BACKOFF_MS = 25;
+/**
+ * How many times a swap filesystem mutation retries a transient Windows lock,
+ * and the backoff between tries — ~6s total. Generous on purpose: on a
+ * Windows CI runner the lock is often an antivirus real-time scan of the
+ * just-closed database file, which can hold it for a second or more, well past
+ * the sub-100ms a bare handle-release takes. POSIX never retries at all.
+ */
+const FS_RETRY_ATTEMPTS = 60;
+const FS_RETRY_BACKOFF_MS = 100;
 
 /** A synchronous sleep — the swap is synchronous by construction, so the backoff must be too. */
 function sleepSync(ms: number): void {
@@ -525,6 +531,10 @@ export function restoreSnapshot(snapshotPath: string, liveDbPath: string): Resto
   // one — a deliberate simplicity choice this function makes silently; T4's
   // CLI surface is where a user actually needs to be told about it.
   try {
+    // Remove a prior restore's `.bak` first so this rename is a create, not a
+    // replace: on Windows a rename *over* an existing file has to unlink the
+    // destination, a second lock-prone operation the plain move avoids.
+    removeIfExists(`${liveDbPath}.bak`);
     withFsRetry(() => renameSync(liveDbPath, `${liveDbPath}.bak`));
   } catch (error) {
     safeCleanupTemp(tempPath);
