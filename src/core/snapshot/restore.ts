@@ -308,10 +308,49 @@ function clearSidecars(path: string): void {
   for (const sidecar of sidecarsFor(path)) removeIfExists(sidecar);
 }
 
+/** One row of `PRAGMA wal_checkpoint(TRUNCATE)`'s result. */
+interface WalCheckpointRow {
+  readonly busy: number;
+  readonly log: number;
+  readonly checkpointed: number;
+}
+
+/**
+ * Runs `PRAGMA wal_checkpoint(TRUNCATE)` and refuses if it could not fully
+ * checkpoint. `busy !== 0` means some other connection held a lock the
+ * checkpoint needed, so the WAL is not guaranteed fully flushed — this is
+ * the "assert its `-wal`/`-shm` are gone" the module docs promise, made
+ * real: without checking the result, a checkpoint that silently left WAL
+ * content behind would slip straight past a comment that only claimed to
+ * assert it. Never called on its own — always immediately followed by
+ * `clearSidecars`, which removes whatever the checkpoint left clean.
+ */
+function checkpointOrThrow(db: DatabaseHandle, message: string): void {
+  const [result] = db.pragma("wal_checkpoint(TRUNCATE)") as readonly WalCheckpointRow[];
+  if ((result?.busy ?? 0) !== 0) {
+    throw new KatraException({ code: "conflict", reason: "wal-checkpoint-busy", message });
+  }
+}
+
 /** Best-effort teardown of a temp build that will never be used — every failure path before the swap runs this. */
 function cleanupTemp(tempPath: string): void {
   removeIfExists(tempPath);
   clearSidecars(tempPath);
+}
+
+/**
+ * `cleanupTemp`, but its own failure never masks the real refusal that led
+ * here — `export.ts`'s `writeAtomic` precedent for the same shape: a failed
+ * refusal is what a caller needs to see, and an unlink error encountered
+ * while cleaning up after it is, at most, a second problem worth noting, not
+ * one that should replace the first.
+ */
+function safeCleanupTemp(tempPath: string): void {
+  try {
+    cleanupTemp(tempPath);
+  } catch {
+    // Best-effort — see the docstring above.
+  }
 }
 
 /**
@@ -377,7 +416,12 @@ export function restoreSnapshot(snapshotPath: string, liveDbPath: string): Resto
         });
       }
 
-      tempDb.pragma("wal_checkpoint(TRUNCATE)");
+      checkpointOrThrow(
+        tempDb,
+        "the just-built restore database could not be fully checkpointed — something else has " +
+          "the temp file open, which should not happen for a private build. Restore refuses " +
+          "rather than swap in a store that might not be fully flushed.",
+      );
     } finally {
       tempDb.close();
     }
@@ -388,12 +432,19 @@ export function restoreSnapshot(snapshotPath: string, liveDbPath: string): Resto
     // entirely here, never a handle the caller passed in (the ownership
     // contract above).
     const liveDb = openDatabase(liveDbPath);
-    liveDb.pragma("wal_checkpoint(TRUNCATE)");
-    liveDb.close();
+    try {
+      checkpointOrThrow(
+        liveDb,
+        "another session has the store open — the .bak may be incomplete if the swap proceeds " +
+          "regardless. Close other katra sessions in this repository and try again.",
+      );
+    } finally {
+      liveDb.close();
+    }
     clearSidecars(liveDbPath);
     clearSidecars(`${liveDbPath}.bak`);
   } catch (error) {
-    cleanupTemp(tempPath);
+    safeCleanupTemp(tempPath);
     throw error;
   }
 
@@ -407,7 +458,7 @@ export function restoreSnapshot(snapshotPath: string, liveDbPath: string): Resto
   try {
     renameSync(liveDbPath, `${liveDbPath}.bak`);
   } catch (error) {
-    cleanupTemp(tempPath);
+    safeCleanupTemp(tempPath);
     throw error;
   }
   renameSync(tempPath, liveDbPath);
