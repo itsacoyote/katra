@@ -35,6 +35,7 @@ import type {
   NoteKind,
   Priority,
   RefreshReason,
+  SnapshotTable,
   TerminalLane,
 } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
@@ -822,6 +823,37 @@ export interface ReconcileResult {
   readonly conflict: RefreshSection<ReconcileConflictItem>;
   readonly skipClaimed: RefreshSection<ReconcileSkipClaimedItem>;
   readonly noOp: RefreshSection<ReconcileNoOpItem>;
+}
+
+/**
+ * One table's row count in a `katra snapshot` — always present, even when
+ * `count` is `0`: a snapshot serializes every source-of-truth table on every
+ * run (F10's own non-goal, "no partial/filtered snapshots"), so there is no
+ * "not attempted" state a missing entry could mean instead.
+ */
+export interface SnapshotTableCount {
+  readonly table: SnapshotTable;
+  readonly count: number;
+}
+
+/**
+ * What `katra snapshot` prints (F10 T2, spec requirements 1/10).
+ *
+ * Not a {@link RefreshSection} despite living in that family's neighborhood:
+ * `RefreshSection<T>`'s `{count, items, truncated}` shape exists for a
+ * *bounded* read that might cap what it lists — a snapshot caps nothing,
+ * ever (F10's non-goal above), so there is no `items` list to bound and no
+ * `truncated` flag that could ever be true. `tables` is the exhaustive,
+ * always-ten-entries analogue of `beads/types.ts`'s `ImportedCounts`: one row
+ * per {@link SnapshotTable}, in that union's own fixed order, `0` when a
+ * table is empty rather than the entry being absent.
+ */
+export interface SnapshotResult {
+  /** Where the file was written — the resolved absolute path, whether from the default or `--out`. */
+  readonly path: string;
+  /** `user_version` at export time — the same value the file's own header line carries. */
+  readonly schemaVersion: number;
+  readonly tables: readonly SnapshotTableCount[];
 }
 
 /** What `--help --json` prints: the usage screen, as data. */
