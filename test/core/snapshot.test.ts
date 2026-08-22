@@ -23,7 +23,7 @@ import { describe, expect, it, vi } from "vitest";
 import { openDatabase } from "../../src/core/db/connection.js";
 import { migrate, targetVersion } from "../../src/core/db/migrate.js";
 import { MIGRATIONS } from "../../src/core/db/migrations/index.js";
-import type { SnapshotTable } from "../../src/core/enums.js";
+import { SNAPSHOT_TABLES, type SnapshotTable } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { restoreSnapshot } from "../../src/core/snapshot/restore.js";
 import {
@@ -43,7 +43,7 @@ import type {
   TaskRefRow,
   TaskRow,
 } from "../../src/core/snapshot/types.js";
-import { SNAPSHOT_FORMAT_VERSION } from "../../src/core/snapshot/types.js";
+import { SNAPSHOT_FORMAT_VERSION, SNAPSHOT_ROW_FIELDS } from "../../src/core/snapshot/types.js";
 import { seedTask } from "../helpers/seed.js";
 import { createStoreFixture } from "../helpers/store.js";
 
@@ -433,6 +433,31 @@ describe("structural: no store import, no Buffer in types.ts", () => {
     const bufferWord = /\bBuffer\b/;
     const typesSource = stripComments(readFileSync(join(root, "types.ts"), "utf8"));
     expect(typesSource, "types.ts must never reference Buffer").not.toMatch(bufferWord);
+  });
+});
+
+describe("restore.ts's routing invariant", () => {
+  it("every table's SNAPSHOT_ROW_FIELDS key set is pairwise distinct", () => {
+    // restoreSnapshot's tableForKeys routes a parsed line to a table by
+    // matching its exact JSON key set against SNAPSHOT_ROW_FIELDS — "one row
+    // per table, self-describing by its own keys" (epic requirement 2) only
+    // works because no two tables share a field set. A signature collision
+    // here would make tableForKeys silently route one table's rows into
+    // another's INSERT, undetected: nothing about the count or the exit
+    // code would say so, exactly the failure class this suite exists to
+    // catch elsewhere in this file.
+    const seen = new Map<string, SnapshotTable>();
+    for (const table of SNAPSHOT_TABLES) {
+      const fields = SNAPSHOT_ROW_FIELDS[table] as readonly string[];
+      const signature = [...fields].sort().join(",");
+      const collidesWith = seen.get(signature);
+      expect(
+        collidesWith,
+        `"${table}" and "${String(collidesWith)}" share the same field set ` +
+          `(${signature}) — restoreSnapshot could never tell their rows apart`,
+      ).toBeUndefined();
+      seen.set(signature, table);
+    }
   });
 });
 
