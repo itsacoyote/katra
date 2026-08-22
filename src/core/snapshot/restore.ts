@@ -116,12 +116,12 @@ export interface RestoreSnapshotResult {
 }
 
 /** One validated row, still keyed loosely — `lineToRow` already narrowed and copied it through T1's own field whitelist. */
-export interface ParsedEntry {
+interface ParsedEntry {
   readonly lineNo: number;
   readonly row: Record<string, unknown>;
 }
 
-export type RowsByTable = { [T in SnapshotTable]: ParsedEntry[] };
+type RowsByTable = { [T in SnapshotTable]: ParsedEntry[] };
 
 function emptyRowsByTable(): RowsByTable {
   const result = {} as RowsByTable;

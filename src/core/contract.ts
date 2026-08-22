@@ -844,7 +844,7 @@ export interface SnapshotTableCount {
  * *bounded* read that might cap what it lists — a snapshot caps nothing,
  * ever (F10's non-goal above), so there is no `items` list to bound and no
  * `truncated` flag that could ever be true. `tables` is the exhaustive,
- * always-ten-entries analogue of `beads/types.ts`'s `ImportedCounts`: one row
+ * always-nine-entries analogue of `beads/types.ts`'s `ImportedCounts`: one row
  * per {@link SnapshotTable}, in that union's own fixed order, `0` when a
  * table is empty rather than the entry being absent.
  */
