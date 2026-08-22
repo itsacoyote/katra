@@ -164,3 +164,27 @@ export function readPresence(store: OpenStore, worktree: string): PresenceRecord
   if (row === undefined) return null;
   return { worktree, branch: row.branch, lastSeen: row.last_seen };
 }
+
+/**
+ * Every worktree's presence row except `excludeWorktree` — the caller's own,
+ * whose consent is not what a "is anyone else here?" read is asking about.
+ * Ordered by worktree so the result is stable. `restore`'s preview
+ * (`cli/commands/snapshot.ts`) uses it to surface other live sessions before a
+ * destructive swap; keeping the query here rather than in the command is why
+ * the CLI never reaches into `store.db` for presence itself.
+ */
+export function listOtherWorktreesPresence(
+  store: OpenStore,
+  excludeWorktree: string,
+): readonly PresenceRecord[] {
+  const rows = store.db
+    .prepare(
+      "SELECT worktree, branch, last_seen FROM presence WHERE worktree != ? ORDER BY worktree",
+    )
+    .all(excludeWorktree) as ReadonlyArray<{ worktree: string } & PresenceRow>;
+  return rows.map((row) => ({
+    worktree: row.worktree,
+    branch: row.branch,
+    lastSeen: row.last_seen,
+  }));
+}
