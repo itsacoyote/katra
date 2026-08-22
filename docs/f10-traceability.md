@@ -47,6 +47,14 @@ not that a line executed.
   cap; a streaming parser is the fix if that ceiling ever binds, not a smaller constant.
 - **GitHub `closed`-style vocabulary growth** is out of scope; snapshots carry whatever the schema
   holds.
+- **`restore --apply` swap on Windows** (`katra-9aw.69`, P1) — the CLI path opens a guard store
+  (for the emptiness check), closes it, then renames `katra.db`; on Windows better-sqlite3's WAL
+  memory-map holds the just-closed file open past `close()`, so the rename hits `EBUSY` and a ~6s
+  retry can't outlast it. The swap *logic* is Windows-correct — `test/core/snapshot.test.ts` runs
+  `restoreSnapshot` with clean handles and passes on Windows — so the five CLI swap tests are
+  `it.runIf(onPosix)`-gated pending a Windows map-release fix (whether real single-process usage is
+  affected, or only the in-process test worker, is the open question the fix answers). Snapshot,
+  preview, and refusal all run on every platform.
 
 ## Validation
 
