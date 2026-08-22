@@ -57,6 +57,8 @@ export type {
   RefreshResult,
   SearchHit,
   SearchResult,
+  SnapshotResult,
+  SnapshotTableCount,
   StaleResult,
   StoreWarning,
   TaskList,
