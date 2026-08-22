@@ -97,7 +97,7 @@ export function rowToLine<T extends SnapshotTable>(table: T, row: SnapshotRowByT
 
   for (const field of fields) {
     const value = source[field];
-    if (typeof Buffer !== "undefined" && Buffer.isBuffer(value)) {
+    if (Buffer.isBuffer(value)) {
       throw new KatraException({
         code: "validation",
         field: `${table}.${field}`,
