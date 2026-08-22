@@ -41,8 +41,13 @@ import { SNAPSHOT_FORMAT_VERSION, SNAPSHOT_HEADER_FIELDS, SNAPSHOT_ROW_FIELDS } 
  * untrusted input). `reason` is always one of this module's own fixed
  * strings, or a known-safe schema token (a table or field name), never
  * anything read from the line itself.
+ *
+ * Exported for `restore.ts` (F10 T3), which needs the identical malformed-
+ * line wording for the rows it validates before this module's own
+ * `lineToRow` ever sees them (routing a line to its table first) — a second,
+ * hand-copied definition would drift from this one silently.
  */
-function malformedLine(lineNo: number, reason: string): never {
+export function malformedLine(lineNo: number, reason: string): never {
   throw new KatraException({
     code: "validation",
     field: "line",
@@ -68,8 +73,15 @@ function pickFields(
   return result;
 }
 
-/** A JSON object — the shape basics every parsed line or header must clear before anything reads a field off it. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+/**
+ * A JSON object — the shape basics every parsed line or header must clear
+ * before anything reads a field off it.
+ *
+ * Exported for `restore.ts` (F10 T3), which needs the same shape check
+ * before it can determine which table a line belongs to, ahead of handing
+ * it to this module's own `lineToRow`.
+ */
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 

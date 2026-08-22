@@ -57,7 +57,7 @@ import { MIGRATIONS } from "../db/migrations/index.js";
 import { readBoundedExportFile } from "../db/read-export.js";
 import { SNAPSHOT_TABLES, type SnapshotTable } from "../enums.js";
 import { KatraException } from "../errors.js";
-import { lineToRow, parseHeader } from "./serialize.js";
+import { isPlainObject, lineToRow, malformedLine, parseHeader } from "./serialize.js";
 import type { SnapshotHeader } from "./types.js";
 import { SNAPSHOT_ROW_FIELDS } from "./types.js";
 
@@ -80,20 +80,6 @@ export interface RestoreSnapshotResult {
   readonly fromSchemaVersion: number;
   /** The version the restored store ends on — always the running build's own `targetVersion`. */
   readonly toSchemaVersion: number;
-}
-
-function malformedSnapshotLine(lineNo: number, reason: string): never {
-  throw new KatraException({
-    code: "validation",
-    field: "line",
-    value: lineNo,
-    message: `snapshot line ${lineNo} is malformed (${reason}) — the file may be corrupt or hand-edited`,
-  });
-}
-
-/** Shape basics for a parsed line — mirrors `serialize.ts`'s own private `isPlainObject`, not exported there for this to reuse. */
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** One validated row, still keyed loosely — `lineToRow` already narrowed and copied it through T1's own field whitelist. */
@@ -123,7 +109,7 @@ function tableForKeys(keys: ReadonlySet<string>, lineNo: number): SnapshotTable 
     const fields = SNAPSHOT_ROW_FIELDS[table] as readonly string[];
     if (fields.length === keys.size && fields.every((field) => keys.has(field))) return table;
   }
-  malformedSnapshotLine(lineNo, "does not match any known table's row shape");
+  malformedLine(lineNo, "does not match any known table's row shape");
 }
 
 interface ParsedSnapshot {
@@ -147,7 +133,7 @@ function parseSnapshotFile(text: string, knownSchemaVersion: number): ParsedSnap
   const lines = text.split("\n");
   const headerLine = lines[0];
   if (headerLine === undefined || headerLine.trim() === "") {
-    malformedSnapshotLine(1, "missing header line");
+    malformedLine(1, "missing header line");
   }
   const header = parseHeader(headerLine, knownSchemaVersion);
 
@@ -161,10 +147,10 @@ function parseSnapshotFile(text: string, knownSchemaVersion: number): ParsedSnap
     try {
       parsed = JSON.parse(line);
     } catch {
-      malformedSnapshotLine(lineNo, "invalid JSON");
+      malformedLine(lineNo, "invalid JSON");
     }
     if (!isPlainObject(parsed)) {
-      malformedSnapshotLine(lineNo, "not a JSON object");
+      malformedLine(lineNo, "not a JSON object");
     }
 
     const table = tableForKeys(new Set(Object.keys(parsed)), lineNo);
