@@ -77,8 +77,13 @@ interface MigrateBeadsOptions {
  * a relative `--from` inside a linked worktree (iteration-2 finding E), and
  * reaching for it here would mean touching store-resolution machinery from
  * the one path that must not open a store at all.
+ *
+ * Exported for `commands/snapshot.ts`'s `restore` (F10 T4), whose own file
+ * argument needs the identical cwd-relative resolution — `DEFAULT_FROM` never
+ * applies there, since restore's argument is required and so `from` is never
+ * `undefined` on that call path.
  */
-function resolveFromPath(context: CliContext, from: string | undefined): string {
+export function resolveFromPath(context: CliContext, from: string | undefined): string {
   const raw = from ?? DEFAULT_FROM;
   return isAbsolute(raw) ? raw : resolve(context.cwd, raw);
 }

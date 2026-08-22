@@ -856,6 +856,70 @@ export interface SnapshotResult {
   readonly tables: readonly SnapshotTableCount[];
 }
 
+/**
+ * One table's row count in the snapshot file next to the live store's own —
+ * read before any swap, so "live" always describes what was there when
+ * `katra restore` was invoked, never a post-swap state.
+ */
+export interface RestoreTableComparison {
+  readonly table: SnapshotTable;
+  readonly snapshot: number;
+  readonly live: number;
+}
+
+/**
+ * One other worktree's presence, surfaced by a preview so a later forced
+ * swap is informed consent (ADR-018) rather than a guess about who else
+ * might be using the store right now. Never includes the calling worktree's
+ * own row — that one is not "another session".
+ */
+export interface RestoreWorktreePresence {
+  readonly worktree: string;
+  readonly branch: string;
+  readonly lastSeen: string;
+}
+
+/**
+ * What `katra restore` prints (F10 T4, spec requirements 5/6/8) — a
+ * discriminated union on `applied` rather than one shape with fields that
+ * are only sometimes meaningful, because preview and apply genuinely answer
+ * different questions: preview compares the snapshot against the live store
+ * without touching either; apply reports what actually landed. `--json`
+ * parity holds across both arms, not by forcing one shape to fit both.
+ */
+export type RestoreResult = RestorePreviewResult | RestoreApplyResult;
+
+/** `katra restore <file>` with no `--apply`: what would happen, changing nothing. */
+export interface RestorePreviewResult {
+  readonly applied: false;
+  /** The resolved absolute path of the file previewed. */
+  readonly file: string;
+  /** The snapshot's own recorded `schemaVersion`. */
+  readonly fromSchemaVersion: number;
+  /** The running build's own target version — where a restore would migrate forward to. */
+  readonly toSchemaVersion: number;
+  /** One entry per {@link SnapshotTable}, `SNAPSHOT_TABLES`' own order. */
+  readonly tables: readonly RestoreTableComparison[];
+  readonly otherWorktrees: readonly RestoreWorktreePresence[];
+}
+
+/** `katra restore <file> --apply`: what was actually loaded and swapped in. */
+export interface RestoreApplyResult {
+  readonly applied: true;
+  /** The resolved absolute path of the file that was applied. */
+  readonly file: string;
+  readonly fromSchemaVersion: number;
+  readonly toSchemaVersion: number;
+  /** Per-table counts of rows actually loaded — `restoreSnapshot`'s own return, passed through. */
+  readonly tables: readonly SnapshotTableCount[];
+  /**
+   * Where the previous store was preserved. A single-backup model: this path
+   * is overwritten by every restore, so only the most recent pre-restore
+   * store survives here, never a history of them.
+   */
+  readonly bakPath: string;
+}
+
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {
   readonly help: string;
