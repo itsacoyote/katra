@@ -493,4 +493,85 @@ describe("katra restore", () => {
       source.cleanup();
     }
   });
+
+  it("a missing file refuses not_found with restore's own wording; a directory refuses with a typed validation error", async () => {
+    const fixture = createStoreFixture();
+    try {
+      const missingPath = join(fixture.repo.dir, "nope.jsonl");
+      const missing = await runCli(["restore", missingPath], { cwd: fixture.repo.dir });
+
+      expect(missing.exitCode).toBe(EXIT.user);
+      // restore's own wording (r2 HIGH): never beads'/--from's.
+      expect(missing.stderr).toContain("katra snapshot");
+      expect(missing.stderr).not.toContain("bd export");
+      expect(missing.stderr).not.toContain("--from");
+
+      const dirPath = join(fixture.repo.dir, "a-directory");
+      mkdirSync(dirPath);
+      const directory = await runCli(["restore", dirPath], { cwd: fixture.repo.dir });
+
+      expect(directory.exitCode).toBe(EXIT.user);
+      expect(directory.stderr).toContain("not a regular file");
+      expect(directory.stderr).toContain("the snapshot file");
+      expect(directory.stderr).not.toContain("--from");
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("--json mirrors preview and apply", async () => {
+    const source = createStoreFixture();
+    try {
+      seedTask(source.store, { id: "kt-s00001", title: "mirrored" });
+      const snapPath = join(source.repo.dir, "snap.jsonl");
+      const snap = await runCli(["snapshot", "--out", snapPath], { cwd: source.repo.dir });
+      expect(snap.exitCode).toBe(0);
+
+      // Preview: --json and text against the same store, which a preview
+      // never changes, so running it twice is safe.
+      const previewJson = await runCli(["restore", snapPath, "--json"], {
+        cwd: source.repo.dir,
+      });
+      expect(previewJson.exitCode).toBe(0);
+      const previewDocument = previewJson.json() as RestoreResult;
+      if (previewDocument.applied) throw new Error("unreachable");
+
+      const previewText = await runCli(["restore", snapPath], { cwd: source.repo.dir });
+      expect(previewText.exitCode).toBe(0);
+      for (const entry of previewDocument.tables) {
+        expect(previewText.stdout).toContain(
+          `${entry.table}: ${String(entry.snapshot)} (snapshot) vs ${String(entry.live)} (live)`,
+        );
+      }
+      expect(previewText.stdout).toContain(`v${String(previewDocument.fromSchemaVersion)}`);
+
+      // Apply: --json and text each against their own fresh-init target, so
+      // neither needs --force and neither's swap affects the other.
+      const jsonTarget = createStoreFixture();
+      const textTarget = createStoreFixture();
+      try {
+        const applyJson = await runCli(["restore", snapPath, "--apply", "--json"], {
+          cwd: jsonTarget.repo.dir,
+        });
+        expect(applyJson.exitCode).toBe(0);
+        const applyDocument = applyJson.json() as RestoreResult;
+        if (!applyDocument.applied) throw new Error("unreachable");
+
+        const applyText = await runCli(["restore", snapPath, "--apply"], {
+          cwd: textTarget.repo.dir,
+        });
+        expect(applyText.exitCode).toBe(0);
+        for (const entry of applyDocument.tables) {
+          expect(applyText.stdout).toContain(`${entry.table}: ${String(entry.count)}`);
+        }
+        // Its own target's .bak, not jsonTarget's — two separate stores.
+        expect(applyText.stdout).toContain(`${textTarget.store.dbPath}.bak`);
+      } finally {
+        jsonTarget.cleanup();
+        textTarget.cleanup();
+      }
+    } finally {
+      source.cleanup();
+    }
+  });
 });
