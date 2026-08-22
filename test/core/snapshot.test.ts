@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
+import type { DatabaseHandle } from "../../src/core/db/connection.js";
 import { openDatabase } from "../../src/core/db/connection.js";
 import { migrate, targetVersion } from "../../src/core/db/migrate.js";
 import { MIGRATIONS } from "../../src/core/db/migrations/index.js";
@@ -213,6 +214,47 @@ function buildSnapshotFile(
   const lines = [buildHeader(schemaVersion)];
   for (const [table, row] of entries) lines.push(rowToLine(table as never, row as never));
   return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Every table's primary key, in the same column order `export.ts`'s own
+ * `PRIMARY_KEY` uses for its `ORDER BY` — duplicated here rather than
+ * imported, since reaching into `export.ts` from this test would be reaching
+ * for T2, which this suite has no dependency on (see `buildSnapshotFile`'s
+ * own docs); this copy exists purely to read data back out in the same
+ * canonical order it would have been written in.
+ */
+const RESTORED_PRIMARY_KEY: { readonly [T in SnapshotTable]: readonly string[] } = {
+  tasks: ["id"],
+  deps: ["task_id", "depends_on_id"],
+  links: ["a_id", "b_id"],
+  tags: ["task_id", "tag"],
+  events: ["id"],
+  notes: ["id"],
+  claims: ["task_id"],
+  refs: ["id"],
+  task_refs: ["task_id", "ref_id"],
+};
+
+/**
+ * Reads every source-of-truth table back out of a restored store, in
+ * `SNAPSHOT_TABLES`' fixed order and each table's own primary-key order, and
+ * re-serializes every row through `rowToLine` — the same function the
+ * snapshot's own lines were built with. Comparing this against the
+ * snapshot's original lines proves genuine byte-for-byte fidelity across
+ * every column of every row, not just the handful a test happens to `SELECT`
+ * by name — the difference between "byte-faithfully" as a test's own name
+ * claims and a test that only spot-checks a few fields.
+ */
+function restoredLines(db: DatabaseHandle): string[] {
+  const lines: string[] = [];
+  for (const table of SNAPSHOT_TABLES) {
+    const fields = (SNAPSHOT_ROW_FIELDS[table] as readonly string[]).join(", ");
+    const order = RESTORED_PRIMARY_KEY[table].join(", ");
+    const rows = db.prepare(`SELECT ${fields} FROM ${table} ORDER BY ${order}`).all();
+    for (const row of rows) lines.push(rowToLine(table as never, row as never));
+  }
+  return lines;
 }
 
 /** A fresh, empty, fully-migrated store's db path — closed, ready for `restoreSnapshot` to target. */
@@ -507,51 +549,15 @@ describe("restoreSnapshot", () => {
     expect(result.tables.find((t) => t.table === "tasks")?.count).toBe(3);
     expect(result.tables.find((t) => t.table === "events")?.count).toBe(2);
 
+    // The name's actual claim: re-serializing every restored row through the
+    // same rowToLine the snapshot's own lines were built with reproduces
+    // those lines exactly, column for column — event ids and prior_actor
+    // included, since neither is special-cased here, just carried like every
+    // other value.
     const db = openDatabase(live.dbPath);
     try {
-      expect(db.prepare("SELECT id, level, parent_id, title FROM tasks ORDER BY id").all()).toEqual(
-        [
-          { id: "kt-epicaa", level: "epic", parent_id: null, title: "An epic" },
-          { id: "kt-task1a", level: "task", parent_id: "kt-epicaa", title: "Task one" },
-          { id: "kt-task2a", level: "task", parent_id: null, title: "Task two" },
-        ],
-      );
-      // Event ids and prior_actor carried through literally — never re-minted,
-      // never dropped (ADR-018's whole point).
-      expect(db.prepare("SELECT id, type, prior_actor FROM events ORDER BY id").all()).toEqual([
-        { id: 7, type: "created", prior_actor: null },
-        { id: 12, type: "released", prior_actor: "old-branch @ /repo/wt-old" },
-      ]);
-      expect(db.prepare("SELECT task_id, depends_on_id FROM deps").get()).toEqual({
-        task_id: "kt-task1a",
-        depends_on_id: "kt-task2a",
-      });
-      expect(db.prepare("SELECT a_id, b_id FROM links").get()).toEqual({
-        a_id: "kt-task1a",
-        b_id: "kt-task2a",
-      });
-      expect(db.prepare("SELECT task_id, tag FROM tags").get()).toEqual({
-        task_id: "kt-task1a",
-        tag: "urgent",
-      });
-      expect(db.prepare("SELECT id, task_id, body FROM notes").get()).toEqual({
-        id: "nt-000001",
-        task_id: "kt-task1a",
-        body: "a note that survives restore",
-      });
-      expect(db.prepare("SELECT task_id, holder FROM claims").get()).toEqual({
-        task_id: "kt-task1a",
-        holder: "/repo/wt-a",
-      });
-      expect(db.prepare("SELECT id, provider, external_id FROM refs").get()).toEqual({
-        id: 3,
-        provider: "github",
-        external_id: "123",
-      });
-      expect(db.prepare("SELECT task_id, ref_id FROM task_refs").get()).toEqual({
-        task_id: "kt-task1a",
-        ref_id: 3,
-      });
+      const expectedLines = content.split("\n").slice(1, -1); // drop the header line and the trailing blank
+      expect(restoredLines(db)).toEqual(expectedLines);
     } finally {
       db.close();
     }
