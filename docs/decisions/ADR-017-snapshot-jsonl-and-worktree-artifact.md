@@ -31,9 +31,18 @@ is definitionally a tracked file katra writes.
   a fixed order, rows in primary-key order. An unchanged store snapshots to a
   byte-identical file, so committed snapshots diff empty when nothing moved.
   JSON escaping gives exact round-tripping of every stored byte for free.
-- **Full fidelity.** Every table, claims and presence included. A backup does
-  not editorialize; restore is exact. Stale restored claims cannot wedge work
-  (claims never gate lane movement — ADR-012 — and `release --force` exists).
+- **Full fidelity — amended 2026-08-22: presence excluded.** Every
+  source-of-truth table, claims included. The original "everything, no
+  exceptions" reading fell to a proven conflict during implementation: the
+  presence heartbeat rewrites `last_seen` on every store open past its 30s
+  freshness window, so a snapshot containing presence is never byte-identical
+  across real runs (killing the clean-commit story this ADR's determinism
+  exists for) and carries every worktree's absolute path into a committed
+  file. Presence is derived operational telemetry — `openStore` repopulates
+  it on the first command after any restore — so nothing recoverable is
+  lost. Claims stay: they are stable coordination state, and stale restored
+  claims cannot wedge work (claims never gate lane movement — ADR-012 — and
+  `release --force` exists).
 - **Restore rebuilds at the snapshot's schema version, then migrates
   forward** through the existing migration chain, so a snapshot dug out of
   git history stays restorable after any number of upgrades. The rebuild
