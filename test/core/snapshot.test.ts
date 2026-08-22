@@ -230,6 +230,16 @@ describe("structural: no store import, no Buffer in types.ts", () => {
       expect(source, `${file} must not import a store module`).not.toMatch(storeImport);
     }
 
+    // The probe this loop exists to pass: every file in STORE_TOUCHING_FILES
+    // must actually trip storeImport, or the regex could be silently broken
+    // (a typo that matches nothing) and the PURE_FILES loop above would pass
+    // vacuously — proving nothing, the same trap git.test.ts's own spawning
+    // pattern guards against with a matching positive assertion.
+    for (const file of STORE_TOUCHING_FILES) {
+      const source = stripComments(readFileSync(join(root, file), "utf8"));
+      expect(source, `${file} was expected to import a store module`).toMatch(storeImport);
+    }
+
     const bufferWord = /\bBuffer\b/;
     const typesSource = stripComments(readFileSync(join(root, "types.ts"), "utf8"));
     expect(typesSource, "types.ts must never reference Buffer").not.toMatch(bufferWord);
