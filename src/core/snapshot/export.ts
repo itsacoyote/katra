@@ -17,12 +17,23 @@
  *
  * **Atomicity.** The write goes to a temp file in the SAME directory as the
  * target — never `os.tmpdir()`, since a rename across filesystems is not
- * atomic — and is renamed into place only once fully written. A failure at
- * either the write or the rename cleans up the temp file and leaves the
- * target path exactly as it was: absent if this is the first snapshot, or
- * holding the previous snapshot's bytes if this is a repeat. `renameSync` on
- * one filesystem is POSIX's own atomic-replace primitive, so no observer can
- * ever see a torn or partially-written file at the target path.
+ * atomic — is `fsync`ed before the rename (a snapshot's whole purpose is
+ * surviving a dead machine, so its bytes must reach disk, not just the OS's
+ * write cache, before the rename that makes them visible), and is renamed
+ * into place only once. A failure at any step cleans up the temp file and
+ * leaves the target path exactly as it was: absent if this is the first
+ * snapshot, or holding the previous snapshot's bytes if this is a repeat.
+ * `renameSync` on one filesystem is POSIX's own atomic-replace primitive, so
+ * no observer can ever see a torn or partially-written file at the target
+ * path. (On win32, `renameSync` replaces via `MOVEFILE_REPLACE_EXISTING`
+ * rather than POSIX `rename(2)` — already correct here, and it throws
+ * `EPERM`/`EBUSY` instead of succeeding if the target is open elsewhere,
+ * which this module's existing catch-and-cleanup already handles as an
+ * ordinary failure.) A stale temp file left behind by a prior run that was
+ * killed mid-write (`SIGKILL` reaches no `finally`) is swept before this
+ * run's own write begins — `.katra/` is a tracked directory, and a stray
+ * temp file sitting in it would otherwise get picked up and committed by a
+ * later `git add -A`.
  *
  * **Canonical order.** Every table is read with an explicit column list
  * (`SNAPSHOT_ROW_FIELDS`, T1) and an explicit `ORDER BY` over its primary key
@@ -32,7 +43,15 @@
  * regardless of the order rows were originally inserted in.
  */
 
-import { renameSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+  closeSync,
+  fsyncSync,
+  openSync,
+  readdirSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { SnapshotResult, SnapshotTableCount } from "../contract.js";
 import type { DatabaseHandle } from "../db/connection.js";
@@ -82,33 +101,70 @@ function selectRows<T extends SnapshotTable>(
 }
 
 /**
- * Writes `content` to `outPath` atomically: a temp file beside the target,
- * then `renameSync`. Assumes `outPath`'s directory already exists — the
- * caller (the CLI's `snapshot` command) owns creating `.katra/`, the same
- * division `openStore`/`store.ts` draws between "ensure the directory" and
- * "write the file".
+ * Sweeps this target's own stale temp files before writing a new one — a
+ * `SIGKILL`-stranded temp from a run that never reached its own cleanup
+ * (nothing runs a `finally` across a kill signal). `.katra/` is a tracked
+ * directory, so a name left behind here is one `git add -A` away from being
+ * committed as noise the snapshot format never meant to produce.
  *
- * Every failure path — the write itself, or the rename — removes the temp
- * file before rethrowing, so nothing observable is ever left behind except
- * the target path in whatever state it was already in.
+ * Best-effort per entry: a name that matches but is gone by the time this
+ * calls `unlinkSync` (another process racing the identical cleanup) is not
+ * this call's problem to report.
+ */
+function sweepStaleTemp(dir: string, tempPrefix: string): void {
+  for (const entry of readdirSync(dir)) {
+    if (!entry.startsWith(tempPrefix)) continue;
+    try {
+      unlinkSync(join(dir, entry));
+    } catch {
+      // Raced or already gone — see the function docs above.
+    }
+  }
+}
+
+/**
+ * Writes `content` to `outPath` atomically: a temp file beside the target,
+ * `fsync`ed, then `renameSync`. Assumes `outPath`'s directory already
+ * exists — the caller (the CLI's `snapshot` command) owns creating
+ * `.katra/`, the same division `openStore`/`store.ts` draws between "ensure
+ * the directory" and "write the file".
+ *
+ * Every failure path — the open, the write, the `fsync`, or the rename —
+ * removes the temp file before rethrowing, so nothing observable is ever
+ * left behind except the target path in whatever state it was already in.
  */
 function writeAtomic(outPath: string, content: string): void {
   const dir = dirname(outPath);
+  const tempPrefix = `.${basename(outPath)}.tmp-`;
+
+  sweepStaleTemp(dir, tempPrefix);
+
   const tempPath = join(
     dir,
-    `.${basename(outPath)}.tmp-${String(process.pid)}-${String(Date.now())}-${Math.random().toString(36).slice(2)}`,
+    `${tempPrefix}${String(process.pid)}-${String(Date.now())}-${Math.random().toString(36).slice(2)}`,
   );
 
   try {
-    writeFileSync(tempPath, content, "utf8");
+    const fd = openSync(tempPath, "w");
+    try {
+      writeFileSync(fd, content, "utf8");
+      // fsync before rename, not after: the artifact's stated purpose is
+      // surviving a dead machine, so its bytes must reach disk — not just
+      // the OS's write cache — before the rename that makes them visible at
+      // the target path.
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(tempPath, outPath);
   } catch (error) {
     try {
       unlinkSync(tempPath);
     } catch {
-      // Best-effort cleanup — writeFileSync itself may have failed before the
-      // temp file ever existed, in which case unlinkSync's own ENOENT here is
-      // expected and not itself worth surfacing over the original error.
+      // Best-effort cleanup — openSync/writeFileSync themselves may have
+      // failed before the temp file ever existed, in which case
+      // unlinkSync's own ENOENT here is expected and not itself worth
+      // surfacing over the original error.
     }
     throw error;
   }
