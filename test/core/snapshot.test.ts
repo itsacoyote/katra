@@ -26,7 +26,11 @@ import { migrate, targetVersion } from "../../src/core/db/migrate.js";
 import { MIGRATIONS } from "../../src/core/db/migrations/index.js";
 import { SNAPSHOT_TABLES, type SnapshotTable } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
-import { checkpointOrThrow, restoreSnapshot } from "../../src/core/snapshot/restore.js";
+import {
+  checkpointOrThrow,
+  restoreSnapshot,
+  withFsRetry,
+} from "../../src/core/snapshot/restore.js";
 import {
   buildHeader,
   lineToRow,
@@ -938,6 +942,40 @@ describe("restoreSnapshot", () => {
 
     it("returns without throwing when the checkpoint fully completes", () => {
       expect(() => checkpointOrThrow(stubDb({ busy: 0 }), "unused")).not.toThrow();
+    });
+  });
+
+  // The swap's rename/unlink retry absorbs Windows's asynchronous file-handle
+  // release after close (EBUSY on a just-closed db). POSIX never triggers it,
+  // so it can't be exercised through a real restore here — the branches are
+  // pinned directly instead.
+  describe("withFsRetry", () => {
+    function errno(code: string): NodeJS.ErrnoException {
+      const err = new Error(code) as NodeJS.ErrnoException;
+      err.code = code;
+      return err;
+    }
+
+    it("retries a transient EBUSY and returns once the lock clears", () => {
+      let calls = 0;
+      const result = withFsRetry(() => {
+        calls += 1;
+        if (calls < 3) throw errno("EBUSY");
+        return "ok";
+      });
+      expect(result).toBe("ok");
+      expect(calls).toBe(3);
+    });
+
+    it("passes a non-lock error straight through without retrying", () => {
+      let calls = 0;
+      expect(() =>
+        withFsRetry(() => {
+          calls += 1;
+          throw errno("ENOENT");
+        }),
+      ).toThrow("ENOENT");
+      expect(calls).toBe(1);
     });
   });
 

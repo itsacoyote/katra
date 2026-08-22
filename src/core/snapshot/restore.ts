@@ -325,6 +325,42 @@ function loadAllRows(db: DatabaseHandle, rowsByTable: RowsByTable): readonly Sna
  * never the target it points to, so a dangling link is correctly seen as
  * present here and removed by `unlinkSync`, which likewise never follows it.
  */
+/** How many times a swap filesystem mutation retries a transient Windows lock, and the backoff between tries. */
+const FS_RETRY_ATTEMPTS = 20;
+const FS_RETRY_BACKOFF_MS = 25;
+
+/** A synchronous sleep — the swap is synchronous by construction, so the backoff must be too. */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * Runs a filesystem mutation on the store's own files (rename, unlink),
+ * retrying a transient lock a bounded number of times.
+ *
+ * Windows releases a file handle *asynchronously* after `close()`, so a
+ * `renameSync`/`unlinkSync` of a SQLite database this process closed
+ * milliseconds earlier can fail `EBUSY`/`EPERM` even with no other session
+ * involved — the OS simply has not finished tearing the handle down. POSIX
+ * releases synchronously and hits the happy path on the first attempt, so
+ * this costs nothing there. A genuinely persistent lock (another live
+ * worktree under `--force`) still surfaces after the attempts are exhausted —
+ * this only absorbs the self-inflicted, sub-second race, never a real
+ * conflict. `ENOENT` and every non-lock error propagate immediately.
+ */
+export function withFsRetry<T>(op: () => T): T {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return op();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const transient = code === "EBUSY" || code === "EPERM" || code === "EACCES";
+      if (!transient || attempt >= FS_RETRY_ATTEMPTS - 1) throw error;
+      sleepSync(FS_RETRY_BACKOFF_MS);
+    }
+  }
+}
+
 function removeIfExists(path: string): void {
   try {
     lstatSync(path);
@@ -332,7 +368,7 @@ function removeIfExists(path: string): void {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  unlinkSync(path);
+  withFsRetry(() => unlinkSync(path));
 }
 
 function sidecarsFor(path: string): readonly [string, string] {
@@ -489,12 +525,12 @@ export function restoreSnapshot(snapshotPath: string, liveDbPath: string): Resto
   // one — a deliberate simplicity choice this function makes silently; T4's
   // CLI surface is where a user actually needs to be told about it.
   try {
-    renameSync(liveDbPath, `${liveDbPath}.bak`);
+    withFsRetry(() => renameSync(liveDbPath, `${liveDbPath}.bak`));
   } catch (error) {
     safeCleanupTemp(tempPath);
     throw error;
   }
-  renameSync(tempPath, liveDbPath);
+  withFsRetry(() => renameSync(tempPath, liveDbPath));
 
   return { tables, fromSchemaVersion: header.schemaVersion, toSchemaVersion: currentVersion };
 }
