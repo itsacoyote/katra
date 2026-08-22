@@ -195,12 +195,20 @@ describe("structural: no store import, no Buffer in types.ts", () => {
   }
 
   /**
-   * Both files T1 creates. Hand-triaged rather than a glob, so a third file
-   * added later (T2's `export.ts`, T3's `restore.ts` — both legitimately
-   * store-touching) has to be triaged deliberately rather than silently
+   * The two files T1 creates. Hand-triaged rather than a glob, so a third
+   * file added later has to be triaged deliberately rather than silently
    * inheriting "pure" by virtue of living in this directory.
    */
   const PURE_FILES = ["types.ts", "serialize.ts"];
+
+  /**
+   * `export.ts` (T2) — the deliberate store-touching exception: `exportSnapshot`
+   * legitimately imports `OpenStore`, `readTx` and `readSchemaVersion` to read
+   * a real store, the identical split `reconcile/repo.ts` (store-touching) vs
+   * `reconcile/{types,policy,engine}.ts` (pure) already draws one level up.
+   * `restore.ts` (T3) joins this list when it lands.
+   */
+  const STORE_TOUCHING_FILES = ["export.ts"];
 
   function snapshotRoot(): string {
     return fileURLToPath(new URL("../../src/core/snapshot", import.meta.url));
@@ -214,7 +222,7 @@ describe("structural: no store import, no Buffer in types.ts", () => {
         (entry) => entry.isFile() && entry.name.endsWith(".ts") && !entry.name.endsWith(".test.ts"),
       )
       .map((entry) => entry.name);
-    expect([...PURE_FILES].sort()).toEqual([...onDisk].sort());
+    expect([...PURE_FILES, ...STORE_TOUCHING_FILES].sort()).toEqual([...onDisk].sort());
 
     const storeImport = /\bbetter-sqlite3\b|\bOpenStore\b|\bstore\.js\b/;
     for (const file of PURE_FILES) {
