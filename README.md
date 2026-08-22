@@ -1,6 +1,6 @@
 # katra
 
-> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, external refs that link tasks to GitHub PRs and Linear issues with live status through `refresh` and policy-driven advancement through `reconcile`, and twenty-five commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
+> **Status: pre-alpha.** The core tracker works — tasks, epics, dependencies, an append-only event stream, typed notes, cross-worktree claims and presence, full-text search with structured filters, activity and staleness reads, external refs that link tasks to GitHub PRs and Linear issues with live status through `refresh` and policy-driven advancement through `reconcile`, `snapshot`/`restore` so the store survives a fresh clone, and twenty-seven commands over them, including `brief` and `board` for restoring context at the start of a session, and `migrate beads` for importing an existing beads backlog. See [`docs/katra-spec.md`](docs/katra-spec.md) for the full design.
 
 **katra** is a local, git-native, **agent-first** project manager and coordination layer for AI coding sessions working in a single repo across multiple git worktrees.
 
@@ -289,11 +289,26 @@ $ katra reconcile --apply
 
 A task with several refs advances only when **all** of them agree (one merged PR out of three is not done); refs that disagree — one says Done, another Cancelled — are a flagged conflict and never auto-apply. A task claimed by another worktree is skipped and reported, even under `--apply`, and a never-refreshed ref holds its task back ("couldn't read it" never means "it's gone"). Every applied move lands in the task's history as a `closed`/`cancelled` event stamped `actor = reconcile` with the triggering ref in the reason — reconcile-derived changes are always distinguishable from an agent's own judgment. The policy is data inside the engine, not branches; a user-facing way to swap it is deliberately deferred ([ADR-016](docs/decisions/ADR-016-reconcile-policy-as-injected-data.md)).
 
+### Surviving the machine
+
+The store lives inside `.git/`, so it is invisible to git by construction — which is right for cross-worktree coordination but means a fresh clone starts empty. `katra snapshot` writes the whole store to one deterministic, git-diffable JSONL file you commit; `katra restore` rebuilds a store from one:
+
+```console
+$ katra snapshot
+wrote 954 row(s) across 9 table(s) to /repo/.katra/snapshot.jsonl (schema v6)
+
+$ git add .katra/snapshot.jsonl && git commit -m "snapshot the backlog"
+
+# on a fresh clone, or to undo a bad write:
+$ katra init && katra restore .katra/snapshot.jsonl --apply
+applied .katra/snapshot.jsonl: loaded 954 row(s) across 9 table(s) (schema v6 -> v6)
+```
+
+An unchanged store snapshots to a **byte-identical** file, so a no-op session commits a clean diff. `restore` **previews by default** — `--apply` executes, and `--force` is additionally required over a non-empty store, since restore replaces everything. It rebuilds a fresh database at the snapshot's own recorded schema version and migrates it forward, so a snapshot dug out of git history stays restorable after upgrades; the previous store is kept alongside as `katra.db.bak`. Snapshots carry every source-of-truth table (claims included; presence, machine-local telemetry, is not), round-trip stored bytes exactly (a backup never sanitizes), and are how a backlog is shared, survives a fresh clone, or a bad write is undone ([ADR-017](docs/decisions/ADR-017-snapshot-jsonl-and-worktree-artifact.md), [ADR-018](docs/decisions/ADR-018-restore-bypasses-the-write-seams.md)).
+
 ## Still to come
 
-External provider discovery and snapshots. The [spec](docs/katra-spec.md) describes both.
-
-Until `snapshot` lands, the store lives only in your `.git` directory: it is not shareable, not reviewable in a pull request, and does not survive a fresh clone.
+External provider discovery. The [spec](docs/katra-spec.md) describes it.
 
 ## Install
 

@@ -8,7 +8,7 @@ Instructions for AI coding agents working **on the katra repository**. This is t
 
 A local, git-native, agent-first project manager and coordination layer for AI coding sessions across git worktrees. Read [`docs/katra-spec.md`](docs/katra-spec.md) before doing anything substantial — it is the settled design, including rationale.
 
-**Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, an append-only event stream, typed notes, cross-worktree claims and presence, the two orientation reads, a beads (`bd`) migration converter, full-text search with structured filters, activity-sorted and staleness reads, provider-agnostic external refs with built-in GitHub/Linear URL parsing, live status resolution through built-in GitHub and Linear providers with `refresh`, policy-driven advancement from cached external status with `reconcile` (preview by default, `--apply` to commit, the only path external state can move a task), and twenty-five commands over them (`init add show list update close cancel reopen delete dep link next log note brief board claim release migrate search recent stale ref refresh reconcile`). Everything else in the spec is not: external provider discovery and snapshots. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
+**Status: pre-alpha.** The core tracker is built and tested — tasks, epics, dependencies, links, an append-only event stream, typed notes, cross-worktree claims and presence, the two orientation reads, a beads (`bd`) migration converter, full-text search with structured filters, activity-sorted and staleness reads, provider-agnostic external refs with built-in GitHub/Linear URL parsing, live status resolution through built-in GitHub and Linear providers with `refresh`, policy-driven advancement from cached external status with `reconcile` (preview by default, `--apply` to commit, the only path external state can move a task), deterministic full-store `snapshot`/`restore` so a committed backlog survives a fresh clone (preview by default, `--apply` to execute, `--force` over a non-empty store), and twenty-seven commands over them (`init add show list update close cancel reopen delete dep link next log note brief board claim release migrate search recent stale ref refresh reconcile snapshot restore`). Everything else in the spec is not: external provider discovery. Don't assume a command works because the spec describes it — check `src/cli/commands/`, which is the complete list.
 
 Eight decisions in the spec were superseded or refined during implementation; the ADRs in `docs/decisions/` win where they disagree.
 
@@ -54,6 +54,13 @@ assembles a task with its notes and events for exactly that reason, since
 `notes/repo.ts` already imports from `tasks/repo.ts` and reaching back would
 make the two mutually dependent.
 
+Cross-cutting concerns that aren't a single table's repo get their own
+directory beside the entities: `core/providers/*` (F8), `core/reconcile/*`
+(F9), `core/snapshot/*` (F10 — `serialize.ts` pure rows↔lines, `export.ts`
+store→file, `restore.ts` file→store with the raw-insert seam bypass). Each
+keeps a pure half (no `better-sqlite3` import, structurally enforced) apart
+from the store-touching half.
+
 ## Commands
 
 ```bash
@@ -75,7 +82,7 @@ These come from the spec and are not open for re-litigation in a PR:
 1. **katra is complete standalone.** Zero providers, no network, no external tracker — every core feature works unchanged. External refs are augmentation.
 2. **Strictly one-directional.** katra reads external trackers and never writes to them. The provider interface has no write method *by construction*, not by convention.
 3. **katra never reacts automatically to external state.** Task state changes only from an explicit command — never as a side effect of a read.
-4. **The database is never committed.** It lives under the git common dir — *inside* `.git/`, which git cannot track — so this is structural, not enforced by an ignore rule. katra writes no ignore entry; see [ADR-004](docs/decisions/ADR-004-no-ignore-entry.md). What katra must never do is modify a tracked file. Snapshots are disposable backups, not a source of truth and not a review surface.
+4. **The database is never committed.** It lives under the git common dir — *inside* `.git/`, which git cannot track — so this is structural, not enforced by an ignore rule. katra writes no ignore entry; see [ADR-004](docs/decisions/ADR-004-no-ignore-entry.md). What katra must never do is modify a tracked file **as a side effect** — narrowed by [ADR-017](docs/decisions/ADR-017-snapshot-jsonl-and-worktree-artifact.md): `katra snapshot` writes exactly the `.katra/snapshot.jsonl` (or `--out`) file it was explicitly asked to, and nothing else, on explicit invocation only. Snapshots are disposable backups — a diffable text export you commit, not a source of truth and not a review surface. `restore` rebuilds the store from one through raw id-preserving inserts that deliberately bypass the domain write seams ([ADR-018](docs/decisions/ADR-018-restore-bypasses-the-write-seams.md)), fenced to `core/snapshot/restore.ts`.
 5. **Events are append-only and immutable.** Never edit or delete one, even when the underlying entity changes.
 6. **Never auto-log every attribute edit.** Event types are a curated, fixed set. Field churn buries the signal.
 

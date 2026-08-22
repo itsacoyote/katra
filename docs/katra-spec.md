@@ -59,6 +59,8 @@ Named after the Vulcan *katra* (Star Trek): stored consciousness/memory that can
 - `katra snapshot` exports the DB to diffable text, committed to git, purely as a **disposable backup** for time-travel / restore. It is **not** a source of truth and **not** a review surface (nobody reads it). SQLite is truth; the snapshot is insurance you regenerate.
 - `katra restore <snapshot>` rebuilds the DB from a snapshot — for recovering from a bad agent write, or seeding a fresh clone on a new machine.
 
+> **As shipped (F10, [ADR-017](decisions/ADR-017-snapshot-jsonl-and-worktree-artifact.md) + [ADR-018](decisions/ADR-018-restore-bypasses-the-write-seams.md)):** the format is deterministic JSONL — a header (`format`/`formatVersion`/`schemaVersion`, no timestamp) then one row per line, tables in fixed order, rows in primary-key order, so an unchanged store snapshots byte-identically. Every source-of-truth table is carried; **presence is excluded** (machine-local telemetry whose heartbeat would otherwise defeat byte-identity — the "everything, no exceptions" intent narrowed during build). `restore` previews by default, `--apply` executes, `--force` is additionally required over a non-empty store; it rebuilds at the snapshot's recorded schema version and migrates forward, keeping the prior DB as `katra.db.bak`, and loads rows through raw id-preserving inserts (bypassing the write seams, so a restore reproduces the original exactly). `.katra/snapshot.jsonl` is the first katra-written path outside `.git/`.
+
 **Why SQLite (and not the alternatives):**
 - Daemon-free, single file, ACID transactions for compare-and-set claims, WAL for safe multi-process concurrency on a local filesystem, most battle-tested durable store in existence.
 - No shared-server conflict surface: SQLite is a file, not a daemon — no port, no global database/role namespace, so there is no "existing database" for katra to collide with. Each repo's store is an isolated file under that repo's `.git/`. (This is the Postgres-server hazard — port/db-name/role collisions — that SQLite sidesteps entirely.)
@@ -320,7 +322,7 @@ Hooks are an *enhancement* (automatic + enforced), not a requirement. Where an a
 
 - Exact table/column schema for every entity (tasks, deps, links, notes, claims, presence, events, external refs).
 - Final ID scheme (ULID vs short-random) + human alias handling.
-- Snapshot serialization format (faithful, restorable; format is only for git-diffability since no human reads it).
+- ~~Snapshot serialization format (faithful, restorable; format is only for git-diffability since no human reads it).~~ Decided (F10, decision `katra-9aw.4`): deterministic JSONL, full fidelity minus presence, restore-at-version-then-migrate-forward. See §3's "As shipped" note and ADR-017/018.
 - Modeling task↔external-ref many-to-many and the cached-status shape.
 - ~~The default reconcile policy map (external state → lane) and whether the multi-ref rule defaults to *all* or *any*.~~ Decided (F9, decision `katra-9aw.5`): terminal-only map — `github/merged` → Done, `linear/completed` → Done, `linear/canceled` → Cancelled, GitHub `closed` unmapped pending `state_reason` support — and the multi-ref rule is **all**.
 - Which providers ship at launch (GitHub via `gh` is the reference implementation; Linear/Jira later).
