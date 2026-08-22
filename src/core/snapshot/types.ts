@@ -2,7 +2,7 @@
  * The snapshot format's shapes (F10, `katra-9aw.67`, T1): the file header and
  * one row type per {@link SnapshotTable}, each paired with an `as const
  * satisfies readonly (keyof Row)[]` field-order array — the `ISSUE_FIELDS`
- * precedent (`beads/extract.ts`) generalized to ten tables plus the header.
+ * precedent (`beads/extract.ts`) generalized to nine tables plus the header.
  *
  * Determinism is hand-pinned here, never inferred: `serialize.ts`'s
  * `rowToLine`/`buildHeader` walk these arrays field by field and never
@@ -203,18 +203,6 @@ export const CLAIM_ROW_FIELDS = [
   "claimed_at",
 ] as const satisfies readonly (keyof ClaimRow)[];
 
-/** `presence` (migration 0003). */
-export interface PresenceRow {
-  readonly worktree: string;
-  readonly branch: string;
-  readonly last_seen: string;
-}
-export const PRESENCE_ROW_FIELDS = [
-  "worktree",
-  "branch",
-  "last_seen",
-] as const satisfies readonly (keyof PresenceRow)[];
-
 /** `refs` (migration 0005). */
 export interface RefRow {
   readonly id: number;
@@ -258,7 +246,6 @@ export interface SnapshotRowByTable {
   readonly events: EventRow;
   readonly notes: NoteRow;
   readonly claims: ClaimRow;
-  readonly presence: PresenceRow;
   readonly refs: RefRow;
   readonly task_refs: TaskRefRow;
 }
@@ -279,7 +266,6 @@ export const SNAPSHOT_ROW_FIELDS = {
   events: EVENT_ROW_FIELDS,
   notes: NOTE_ROW_FIELDS,
   claims: CLAIM_ROW_FIELDS,
-  presence: PRESENCE_ROW_FIELDS,
   refs: REF_ROW_FIELDS,
   task_refs: TASK_REF_ROW_FIELDS,
 } as const satisfies {

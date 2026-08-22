@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import type { SnapshotResult } from "../../src/core/contract.js";
 import { MIGRATIONS } from "../../src/core/db/migrations/index.js";
+import { PRESENCE_FRESH_MS } from "../../src/core/presence.js";
 import { SNAPSHOT_FORMAT_VERSION } from "../../src/core/snapshot/types.js";
 import { runCli } from "../helpers/cli.js";
 import { seedTask } from "../helpers/seed.js";
@@ -97,6 +98,20 @@ describe("katra snapshot", () => {
       const first = await runCli(["snapshot", "--out", outPath], { cwd: fixture.repo.dir });
       expect(first.exitCode).toBe(0);
       const firstContent = readFileSync(outPath, "utf8");
+
+      // Ages every presence row well past PRESENCE_FRESH_MS before the
+      // second run — the exact condition ADR-017's amendment names: the
+      // second `katra snapshot` invocation's own `openStore` call rewrites
+      // `last_seen` to a fresh timestamp for a row this stale (`presence.ts`'s
+      // `bumpPresence`), which is precisely what made byte-identity false
+      // before presence was excluded from SNAPSHOT_TABLES. With the
+      // exclusion in place this assertion stays green; reverting the
+      // exclusion (temporarily dropping "presence" back into
+      // SNAPSHOT_TABLES) turns it red on a presence-line diff — that's the
+      // whole point of aging the row here rather than leaving presence
+      // untouched, which would pass either way and prove nothing.
+      const staleTimestamp = new Date(Date.now() - PRESENCE_FRESH_MS * 2).toISOString();
+      fixture.store.db.prepare("UPDATE presence SET last_seen = ?").run(staleTimestamp);
 
       const second = await runCli(["snapshot", "--out", outPath], { cwd: fixture.repo.dir });
       expect(second.exitCode).toBe(0);

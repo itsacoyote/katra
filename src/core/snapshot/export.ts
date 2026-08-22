@@ -59,7 +59,6 @@ const PRIMARY_KEY: { readonly [T in SnapshotTable]: readonly string[] } = {
   events: ["id"],
   notes: ["id"],
   claims: ["task_id"],
-  presence: ["worktree"],
   refs: ["id"],
   task_refs: ["task_id", "ref_id"],
 };
