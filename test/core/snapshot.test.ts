@@ -8,7 +8,15 @@
  * suite depends on T1 only.
  */
 
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  lstatSync,
+  readdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
@@ -38,6 +46,9 @@ import type {
 import { SNAPSHOT_FORMAT_VERSION } from "../../src/core/snapshot/types.js";
 import { seedTask } from "../helpers/seed.js";
 import { createStoreFixture } from "../helpers/store.js";
+
+/** Symlink creation needs elevated privileges on Windows CI runners. */
+const onPosix = process.platform !== "win32";
 
 /**
  * A pass-through call counter for `openDatabase` — the only way a database
@@ -787,6 +798,48 @@ describe("restoreSnapshot", () => {
       );
       expect(db.prepare("SELECT body FROM notes WHERE task_id='kt-hostl1'").get()).toEqual({
         body: hostileBody,
+      });
+    } finally {
+      db.close();
+    }
+
+    live.cleanup();
+  });
+
+  it.runIf(onPosix)("clears a dangling symlink at the temp path", () => {
+    const live = emptyLiveDbPath();
+    const currentVersion = targetVersion(MIGRATIONS);
+
+    // A dangling symlink sitting exactly where the temp build wants to
+    // create its database — the shape a stranded attacker-controlled link
+    // (or a genuinely stale one) would take. `existsSync` follows symlinks,
+    // so it would report this path as *absent* and skip removing it; left
+    // in place, `openDatabase(tempPath)` would build the restore at
+    // `dangleTarget` instead (outside this test's own store directory), and
+    // the final swap would rename the *link* onto the live path rather than
+    // a real database file.
+    const dangleTarget = join(tmpdir(), `katra-restore-escape-${String(process.pid)}.db`);
+    const tempPath = `${live.dbPath}.tmp-restore`;
+    symlinkSync(dangleTarget, tempPath);
+
+    const task = fullTaskRow({ id: "kt-danglk", parent_id: null, title: "not escaped" });
+    const content = buildSnapshotFile(currentVersion, [["tasks", task]]);
+    const snapshotPath = join(live.repoDir, "dangling.jsonl");
+    writeFileSync(snapshotPath, content, "utf8");
+
+    restoreSnapshot(snapshotPath, live.dbPath);
+
+    // The live path is a real database file now, not the symlink that was
+    // sitting at the temp path.
+    expect(lstatSync(live.dbPath).isSymbolicLink()).toBe(false);
+    // Nothing was ever built at the link's target — the escape never
+    // happened.
+    expect(existsSync(dangleTarget)).toBe(false);
+    // The restore itself genuinely succeeded, using a real file.
+    const db = openDatabase(live.dbPath);
+    try {
+      expect(db.prepare("SELECT title FROM tasks WHERE id='kt-danglk'").get()).toEqual({
+        title: "not escaped",
       });
     } finally {
       db.close();

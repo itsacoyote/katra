@@ -48,7 +48,7 @@
  *    `.bak`. Nothing after this point attempts to roll back a partial swap.
  */
 
-import { existsSync, renameSync, unlinkSync } from "node:fs";
+import { lstatSync, renameSync, unlinkSync } from "node:fs";
 import type { SnapshotTableCount } from "../contract.js";
 import type { DatabaseHandle } from "../db/connection.js";
 import { openDatabase, writeTx } from "../db/connection.js";
@@ -270,19 +270,36 @@ function loadAllRows(db: DatabaseHandle, rowsByTable: RowsByTable): readonly Sna
   });
 }
 
+/**
+ * Removes whatever sits at `path`, including a dangling symlink.
+ *
+ * `existsSync` follows symlinks: a dangling one (its target missing) reads
+ * as *absent*, even though the link itself is a real filesystem entry
+ * sitting exactly where this module is about to build a fresh database. Left
+ * in place, `openDatabase(tempPath)` would silently build the restore at
+ * wherever the link points — potentially outside the store's own directory —
+ * and stage 7's `renameSync` would then move that same link onto the live
+ * path, not a real database file. `lstatSync` reports on the link itself,
+ * never the target it points to, so a dangling link is correctly seen as
+ * present here and removed by `unlinkSync`, which likewise never follows it.
+ */
+function removeIfExists(path: string): void {
+  try {
+    lstatSync(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  unlinkSync(path);
+}
+
 function sidecarsFor(path: string): readonly [string, string] {
   return [`${path}-wal`, `${path}-shm`];
 }
 
-/** Removes `path`'s `-wal`/`-shm` sidecars if present. Idempotent — a path with none of its own is a no-op. */
+/** Removes `path`'s `-wal`/`-shm` sidecars if present — including a dangling symlink, via {@link removeIfExists}. Idempotent. */
 function clearSidecars(path: string): void {
-  for (const sidecar of sidecarsFor(path)) {
-    if (existsSync(sidecar)) unlinkSync(sidecar);
-  }
-}
-
-function removeIfExists(path: string): void {
-  if (existsSync(path)) unlinkSync(path);
+  for (const sidecar of sidecarsFor(path)) removeIfExists(sidecar);
 }
 
 /** Best-effort teardown of a temp build that will never be used — every failure path before the swap runs this. */
