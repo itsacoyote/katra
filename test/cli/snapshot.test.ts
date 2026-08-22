@@ -3,8 +3,15 @@
  * write, through the real CLI end to end.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
+import { basename, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import type { SnapshotResult } from "../../src/core/contract.js";
@@ -236,6 +243,37 @@ describe("katra snapshot", () => {
         name.includes(".snap.jsonl.tmp-"),
       );
       expect(strays).toEqual([]);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("sweeps a stranded temp file but leaves a concurrent writer's alone", async () => {
+    const fixture = createStoreFixture();
+    try {
+      seedTask(fixture.store, {});
+      const outPath = join(fixture.repo.dir, "snap.jsonl");
+      const tempPrefix = `.${basename(outPath)}.tmp-`;
+
+      const strandedPath = join(fixture.repo.dir, `${tempPrefix}stranded`);
+      const freshPath = join(fixture.repo.dir, `${tempPrefix}fresh`);
+      writeFileSync(strandedPath, "stranded", "utf8");
+      writeFileSync(freshPath, "fresh", "utf8");
+
+      // Ages the stranded file two hours past its creation — well past
+      // STALE_TEMP_AGE_MS (1h), old enough that no real snapshot write could
+      // still be in flight. The fresh file is left at its just-created
+      // mtime, standing in for a concurrent writer's own temp file mid-write
+      // — the exact file a name-only sweep would have unlinked out from
+      // under that writer, stranding its own renameSync on ENOENT.
+      const staleTime = new Date(Date.now() - 2 * 60 * 60 * 1000);
+      utimesSync(strandedPath, staleTime, staleTime);
+
+      const result = await runCli(["snapshot", "--out", outPath], { cwd: fixture.repo.dir });
+
+      expect(result.exitCode).toBe(0);
+      expect(existsSync(strandedPath)).toBe(false);
+      expect(existsSync(freshPath)).toBe(true);
     } finally {
       fixture.cleanup();
     }

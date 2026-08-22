@@ -29,11 +29,18 @@
  * rather than POSIX `rename(2)` — already correct here, and it throws
  * `EPERM`/`EBUSY` instead of succeeding if the target is open elsewhere,
  * which this module's existing catch-and-cleanup already handles as an
- * ordinary failure.) A stale temp file left behind by a prior run that was
- * killed mid-write (`SIGKILL` reaches no `finally`) is swept before this
- * run's own write begins — `.katra/` is a tracked directory, and a stray
- * temp file sitting in it would otherwise get picked up and committed by a
- * later `git add -A`.
+ * ordinary failure.) **The durability claim is scoped to the data, not the
+ * rename's own directory entry**: `fsyncSync` guarantees the temp file's
+ * bytes are on disk before the rename, but the rename itself is not
+ * separately synced — a power loss at the wrong instant can still lose the
+ * rename, never the bytes. Either way the outcome is one of the two files
+ * that were ever fully written: the previous snapshot if the rename did not
+ * survive, the new one if it did — never a torn file, because nothing was
+ * ever written to the target path directly. A stale temp file left behind
+ * by a prior run that was killed mid-write (`SIGKILL` reaches no `finally`)
+ * is swept before this run's own write begins — `.katra/` is a tracked
+ * directory, and a stray temp file sitting in it would otherwise get picked
+ * up and committed by a later `git add -A`.
  *
  * **Canonical order.** Every table is read with an explicit column list
  * (`SNAPSHOT_ROW_FIELDS`, T1) and an explicit `ORDER BY` over its primary key
@@ -49,6 +56,7 @@ import {
   openSync,
   readdirSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -101,21 +109,43 @@ function selectRows<T extends SnapshotTable>(
 }
 
 /**
+ * A temp file older than this is stranded, not in flight: no snapshot write
+ * stays open for an hour.
+ */
+const STALE_TEMP_AGE_MS = 60 * 60 * 1000;
+
+/**
  * Sweeps this target's own stale temp files before writing a new one — a
  * `SIGKILL`-stranded temp from a run that never reached its own cleanup
  * (nothing runs a `finally` across a kill signal). `.katra/` is a tracked
  * directory, so a name left behind here is one `git add -A` away from being
  * committed as noise the snapshot format never meant to produce.
  *
+ * **Age-gated by `STALE_TEMP_AGE_MS`, not swept on name match alone.** A
+ * concurrent writer's own in-flight temp matches the identical prefix, and
+ * unlinking it out from under that writer would not stop its already-open
+ * file descriptor from finishing the write — POSIX keeps the inode alive
+ * past an `unlink` — but it removes the directory entry that writer's own
+ * `renameSync` needs, so that writer's rename throws `ENOENT` for a file it
+ * just finished writing (reviewer-reproduced probe). Skipping anything
+ * young enough to plausibly still be in flight is what keeps this sweep
+ * from being the exact bug it exists to prevent.
+ *
  * Best-effort per entry: a name that matches but is gone by the time this
- * calls `unlinkSync` (another process racing the identical cleanup) is not
- * this call's problem to report.
+ * calls `statSync`/`unlinkSync` (another process racing the identical
+ * cleanup, or the age check above simply losing a race with that writer's
+ * own rename) is not this call's problem to report.
  */
 function sweepStaleTemp(dir: string, tempPrefix: string): void {
+  const cutoff = Date.now() - STALE_TEMP_AGE_MS;
   for (const entry of readdirSync(dir)) {
     if (!entry.startsWith(tempPrefix)) continue;
+    const entryPath = join(dir, entry);
     try {
-      unlinkSync(join(dir, entry));
+      // Recent enough to plausibly still be in flight — unlinking it would
+      // strand that writer's own rename on ENOENT (function docs above).
+      if (statSync(entryPath).mtimeMs > cutoff) continue;
+      unlinkSync(entryPath);
     } catch {
       // Raced or already gone — see the function docs above.
     }
