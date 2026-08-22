@@ -7,11 +7,11 @@
 import { mkdirSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { Command } from "commander";
+import { nowIso, timeAgoOrNull } from "../../core/clock.js";
 import type {
   RestoreApplyResult,
   RestorePreviewResult,
   RestoreResult,
-  RestoreWorktreePresence,
   SnapshotResult,
 } from "../../core/contract.js";
 import { targetVersion } from "../../core/db/migrate.js";
@@ -19,21 +19,18 @@ import { MIGRATIONS } from "../../core/db/migrations/index.js";
 import { readBoundedExportFile } from "../../core/db/read-export.js";
 import { SNAPSHOT_TABLES, type SnapshotTable } from "../../core/enums.js";
 import { KatraException } from "../../core/errors.js";
+import { listOtherWorktreesPresence } from "../../core/presence.js";
 import { exportSnapshot } from "../../core/snapshot/export.js";
-import { MAX_SNAPSHOT_BYTES, restoreSnapshot } from "../../core/snapshot/restore.js";
 import {
-  isPlainObject,
-  lineToRow,
-  malformedLine,
-  parseHeader,
-} from "../../core/snapshot/serialize.js";
-import { SNAPSHOT_ROW_FIELDS } from "../../core/snapshot/types.js";
+  parseSnapshotFile,
+  restoreSnapshot,
+  SNAPSHOT_READ_OPTIONS,
+} from "../../core/snapshot/restore.js";
 import type { OpenStore } from "../../core/store.js";
-import { openStore } from "../../core/store.js";
 import { oneLine } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
-import { withStore } from "../with-store.js";
+import { openContextStore, withStore } from "../with-store.js";
 import { resolveFromPath } from "./migrate.js";
 
 /** Relative to the worktree toplevel — joined with `path.join` so the separator is right on every platform. */
@@ -111,90 +108,6 @@ export function registerSnapshot(program: Command, context: CliContext): void {
 // `katra restore` — F10 T4.
 // ---------------------------------------------------------------------------
 
-/**
- * The same `readBoundedExportFile` options `restoreSnapshot` (T3) uses
- * internally — duplicated rather than imported, since that object is inlined
- * at T3's own call site, not exported. A caller must see the identical
- * refusal for the same bad file whether they asked for a preview or the real
- * thing, so this copy has to stay byte-for-byte the same as T3's.
- */
-const RESTORE_READ_OPTIONS = {
-  field: "file",
-  maxBytes: MAX_SNAPSHOT_BYTES,
-  notFoundHint: (path: string) =>
-    `snapshot at ${path} — check the path, or run \`katra snapshot\` on the machine that ` +
-    "has the data to create one",
-  kindHint: "a katra snapshot written to disk",
-  flagLabel: "the snapshot file",
-  readerHint: "katra restore",
-};
-
-/**
- * Determines which table a parsed line's own key set describes — the same
- * "self-describing row" match `restoreSnapshot` (T3, `core/snapshot/restore.ts`)
- * performs internally, reimplemented here rather than imported: that match is
- * private to a module this task does not touch, and it is small enough
- * (every table's field set is a distinct combination — T3's own structural
- * test pins it) that duplicating it here costs less than widening T3's
- * exports for one caller that never builds a database.
- */
-function tableForPreviewKeys(keys: ReadonlySet<string>, lineNo: number): SnapshotTable {
-  for (const table of SNAPSHOT_TABLES) {
-    const fields = SNAPSHOT_ROW_FIELDS[table] as readonly string[];
-    if (fields.length === keys.size && fields.every((field) => keys.has(field))) return table;
-  }
-  malformedLine(lineNo, "does not match any known table's row shape");
-}
-
-interface PreviewParse {
-  readonly schemaVersion: number;
-  readonly counts: { readonly [T in SnapshotTable]: number };
-}
-
-/**
- * Parses and validates a whole snapshot file — the header and every row line
- * — without building a database. The same shape checks `restoreSnapshot`
- * performs (T1's `parseHeader`/`lineToRow`, T3's self-describing table
- * match), stopping short of accumulating rows for an INSERT: a preview only
- * needs to know the file is well-formed and how many rows each table holds.
- * A malformed line refuses exactly the way `--apply` would inside
- * `restoreSnapshot` — before either path ever opens a database.
- */
-function parseSnapshotForPreview(text: string, knownSchemaVersion: number): PreviewParse {
-  const lines = text.split("\n");
-  const headerLine = lines[0];
-  if (headerLine === undefined || headerLine.trim() === "") {
-    malformedLine(1, "missing header line");
-  }
-  const header = parseHeader(headerLine, knownSchemaVersion);
-
-  const counts = Object.fromEntries(SNAPSHOT_TABLES.map((table) => [table, 0])) as {
-    [T in SnapshotTable]: number;
-  };
-
-  for (let index = 1; index < lines.length; index++) {
-    const line = lines[index];
-    if (line === undefined || line.trim() === "") continue;
-    const lineNo = index + 1;
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      malformedLine(lineNo, "invalid JSON");
-    }
-    if (!isPlainObject(parsed)) {
-      malformedLine(lineNo, "not a JSON object");
-    }
-
-    const table = tableForPreviewKeys(new Set(Object.keys(parsed)), lineNo);
-    lineToRow(table, line, lineNo); // Validates field presence; the count is all preview needs.
-    counts[table] += 1;
-  }
-
-  return { schemaVersion: header.schemaVersion, counts };
-}
-
 /** Every source-of-truth table's current row count in the live store — feeds both the emptiness guard and preview's comparison. */
 function liveTableCounts(store: OpenStore): { readonly [T in SnapshotTable]: number } {
   const counts = {} as { [T in SnapshotTable]: number };
@@ -222,24 +135,6 @@ function isEmptyStore(counts: { readonly [T in SnapshotTable]: number }): boolea
   return SNAPSHOT_TABLES.every((table) => counts[table] === 0);
 }
 
-/** Every OTHER worktree's presence row — never the caller's own, which is not "another session" whose consent matters. */
-function otherWorktreesPresence(store: OpenStore): readonly RestoreWorktreePresence[] {
-  const rows = store.db
-    .prepare(
-      "SELECT worktree, branch, last_seen FROM presence WHERE worktree != ? ORDER BY worktree",
-    )
-    .all(store.identity().worktree) as ReadonlyArray<{
-    worktree: string;
-    branch: string;
-    last_seen: string;
-  }>;
-  return rows.map((row) => ({
-    worktree: row.worktree,
-    branch: row.branch,
-    lastSeen: row.last_seen,
-  }));
-}
-
 // ---------------------------------------------------------------------------
 // Human rendering. `oneLine` wraps every snapshot- or presence-derived
 // string (the file path, other worktrees' branch/worktree) — table names,
@@ -253,7 +148,7 @@ function formatRestoreApply(result: RestoreApplyResult): string {
       `${String(result.tables.length)} table(s) (schema v${String(result.fromSchemaVersion)} -> ` +
       `v${String(result.toSchemaVersion)})`,
     ...result.tables.map((entry) => `  ${entry.table}: ${String(entry.count)}`),
-    `previous store preserved at ${result.bakPath}`,
+    `previous store preserved at ${oneLine(result.bakPath)} (overwritten by the next restore)`,
   ].join("\n");
 }
 
@@ -267,11 +162,21 @@ function formatRestorePreview(result: RestorePreviewResult): string {
     ),
   ];
   if (result.otherWorktrees.length > 0) {
+    // `last_seen` renders as a relative age, never raw: it has no CHECK
+    // constraint and is written by *other* worktrees' processes, so a
+    // co-tenant could otherwise plant terminal-escape bytes in the exact
+    // string an operator reads before typing `--apply --force`. `timeAgoOrNull`
+    // is the same "presence is a row we don't fully trust" treatment
+    // `claimLiveness`/`formatRefLine` already give it; a malformed timestamp
+    // shows "unknown", never its stored bytes.
+    const now = nowIso();
     lines.push("other worktrees currently present:");
     lines.push(
       ...result.otherWorktrees.map(
         (worktree) =>
-          `  ${oneLine(worktree.branch)} @ ${oneLine(worktree.worktree)} — last seen ${worktree.lastSeen}`,
+          `  ${oneLine(worktree.branch)} @ ${oneLine(worktree.worktree)} — last seen ${
+            timeAgoOrNull(worktree.lastSeen, now) ?? "unknown"
+          }`,
       ),
     );
   }
@@ -305,29 +210,31 @@ export function registerRestore(program: Command, context: CliContext): void {
         // the live store is ever opened — then read the live store's own
         // counts and other worktrees' presence. No temp file, no swap;
         // nothing here writes beyond openStore's own presence heartbeat.
-        const text = readBoundedExportFile(filePath, RESTORE_READ_OPTIONS);
+        // The SAME validator `--apply` runs inside `restoreSnapshot` (T3),
+        // shared rather than re-implemented: preview and apply must refuse the
+        // identical bad file with the identical wording, which two
+        // independently-maintained parsers on a destructive path cannot
+        // guarantee. Preview needs only per-table counts, so it reads
+        // `rowsByTable[table].length` off the shared parse and discards the rows.
+        const text = readBoundedExportFile(filePath, SNAPSHOT_READ_OPTIONS);
         const currentVersion = targetVersion(MIGRATIONS);
-        const parsed = parseSnapshotForPreview(text, currentVersion);
+        const parsed = parseSnapshotFile(text, currentVersion);
 
-        const { store, warnings } = openStore(context.cwd, {
-          env: context.env,
-          actor: context.actor,
-          identity: context.identity,
-        });
+        const { store, warnings } = openContextStore(context);
         let result: RestorePreviewResult;
         try {
           const live = liveTableCounts(store);
           result = {
             applied: false,
             file: filePath,
-            fromSchemaVersion: parsed.schemaVersion,
+            fromSchemaVersion: parsed.header.schemaVersion,
             toSchemaVersion: currentVersion,
             tables: SNAPSHOT_TABLES.map((table) => ({
               table,
-              snapshot: parsed.counts[table],
+              snapshot: parsed.rowsByTable[table].length,
               live: live[table],
             })),
-            otherWorktrees: otherWorktreesPresence(store),
+            otherWorktrees: listOtherWorktreesPresence(store, store.identity().worktree),
           };
         } finally {
           store.close();
@@ -344,11 +251,7 @@ export function registerRestore(program: Command, context: CliContext): void {
       // Apply: init.ts's own shape — direct openStore with its own
       // try/finally, never withStore, whose finally would double-close a
       // handle restoreSnapshot also manages on its own paths-only terms.
-      const { store, warnings } = openStore(context.cwd, {
-        env: context.env,
-        actor: context.actor,
-        identity: context.identity,
-      });
+      const { store, warnings } = openContextStore(context);
       const dbPath = store.dbPath;
       try {
         const counts = liveTableCounts(store);

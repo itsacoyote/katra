@@ -574,4 +574,65 @@ describe("katra restore", () => {
       source.cleanup();
     }
   });
+
+  it("neutralizes a hostile last_seen on another worktree's presence row in the preview", async () => {
+    const fixture = createStoreFixture();
+    try {
+      seedTask(fixture.store, { id: "kt-s00001", title: "first" });
+      const snapPath = join(fixture.repo.dir, "snap.jsonl");
+      expect(
+        (await runCli(["snapshot", "--out", snapPath], { cwd: fixture.repo.dir })).exitCode,
+      ).toBe(0);
+
+      // Another worktree's presence row, its `last_seen` carrying terminal
+      // escapes. `last_seen` has no CHECK constraint and is written by other
+      // worktrees' processes, so this is a value a co-tenant genuinely
+      // controls — and it renders at the consent-before-`--force` moment.
+      const rlo = String.fromCharCode(0x202e);
+      const esc = String.fromCharCode(27);
+      fixture.store.db
+        .prepare("INSERT INTO presence (worktree, branch, last_seen) VALUES (?, ?, ?)")
+        .run("/tmp/evil-wt", "main", `2026-01-01${esc}[31m${rlo}INJECTED`);
+
+      const preview = await runCli(["restore", snapPath], { cwd: fixture.repo.dir });
+      expect(preview.exitCode).toBe(0);
+      expect(preview.stdout).not.toContain(rlo);
+      expect(preview.stdout).not.toContain(esc);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("preview and apply refuse the same malformed file with identical wording", async () => {
+    const source = createStoreFixture();
+    try {
+      seedTask(source.store, { id: "kt-s00001", title: "first" });
+      const goodPath = join(source.repo.dir, "good.jsonl");
+      expect(
+        (await runCli(["snapshot", "--out", goodPath], { cwd: source.repo.dir })).exitCode,
+      ).toBe(0);
+
+      // A real snapshot with one garbage row appended — malformed at a line
+      // both paths must reach through the *same* validator (the whole point of
+      // sharing it), so both refuse with the same message.
+      const malformedPath = join(source.repo.dir, "malformed.jsonl");
+      writeFileSync(malformedPath, `${readFileSync(goodPath, "utf8")}{ not valid json\n`, "utf8");
+
+      const preview = await runCli(["restore", malformedPath], { cwd: source.repo.dir });
+      // Apply against a fresh-init (empty) target, so the emptiness guard lets
+      // it through to the file validator rather than refusing first.
+      const target = createStoreFixture();
+      try {
+        const apply = await runCli(["restore", malformedPath, "--apply"], { cwd: target.repo.dir });
+        expect(preview.exitCode).toBe(EXIT.user);
+        expect(apply.exitCode).toBe(EXIT.user);
+        expect(preview.stderr).toContain("malformed");
+        expect(preview.stderr).toBe(apply.stderr);
+      } finally {
+        target.cleanup();
+      }
+    } finally {
+      source.cleanup();
+    }
+  });
 });
