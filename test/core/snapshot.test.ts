@@ -70,6 +70,30 @@ vi.mock("../../src/core/db/connection.js", async (importOriginal) => {
   return { ...original, openDatabase };
 });
 
+/**
+ * A single toggle, not `vi.spyOn` — Vitest cannot redefine a property on a
+ * real ESM module's namespace object (Node's own "node:fs", frozen and
+ * non-configurable), only replace the whole module via `vi.mock`, which is
+ * hoisted once for this file (`test/cli/snapshot.test.ts`'s own precedent for
+ * forcing a real filesystem failure). Every other `node:fs` function passes
+ * straight through to the real implementation; only `renameSync` is
+ * interceptable, and only while `renameShouldFail` is true — off by default
+ * so every other test in this file (and every helper it calls) sees the
+ * genuine filesystem.
+ */
+let renameShouldFail = false;
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    renameSync: (...args: Parameters<typeof actual.renameSync>) => {
+      if (renameShouldFail) throw new Error("simulated rename failure");
+      return actual.renameSync(...args);
+    },
+  };
+});
+
 /** A fully-populated tasks row — every field set, none left to default. */
 function fullTaskRow(overrides: Partial<TaskRow> = {}): TaskRow {
   return {
@@ -752,6 +776,58 @@ describe("restoreSnapshot", () => {
       expect(hits.length).toBeGreaterThan(0);
     } finally {
       restored.close();
+    }
+
+    fixture.repo.cleanup();
+  });
+
+  it("a failed first rename leaks nothing and leaves the live store readable at its pre-restore rows", () => {
+    const fixture = createStoreFixture();
+    const dbPath = fixture.store.dbPath;
+    const repoDir = fixture.repo.dir;
+    seedTask(fixture.store, { id: "kt-orig02", title: "pre-restore, survives a failed swap" });
+    fixture.store.close();
+
+    const currentVersion = targetVersion(MIGRATIONS);
+    const task = fullTaskRow({ id: "kt-never1", parent_id: null, title: "never lands" });
+    const content = buildSnapshotFile(currentVersion, [["tasks", task]]);
+    const snapshotPath = join(repoDir, "forced-fail.jsonl");
+    writeFileSync(snapshotPath, content, "utf8");
+
+    renameShouldFail = true;
+    let caught: unknown;
+    try {
+      restoreSnapshot(snapshotPath, dbPath);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      caught = err;
+    } finally {
+      renameShouldFail = false;
+    }
+
+    // A raw filesystem failure, not a KatraException — the same distinction
+    // test/cli/snapshot.test.ts's own forced-failure test draws.
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).message).toContain("simulated rename failure");
+
+    // The fully-built temp database is not leaked...
+    expect(existsSync(`${dbPath}.tmp-restore`)).toBe(false);
+    // ...and nothing was ever renamed onto .bak, since the very first
+    // rename is what failed.
+    expect(existsSync(`${dbPath}.bak`)).toBe(false);
+
+    // The live store itself: still the pre-restore file, still holding its
+    // original row, the attempted replacement nowhere in it.
+    const db = openDatabase(dbPath);
+    try {
+      expect(db.prepare("SELECT title FROM tasks WHERE id = 'kt-orig02'").get()).toEqual({
+        title: "pre-restore, survives a failed swap",
+      });
+      expect(db.prepare("SELECT COUNT(*) c FROM tasks WHERE id = 'kt-never1'").get()).toEqual({
+        c: 0,
+      });
+    } finally {
+      db.close();
     }
 
     fixture.repo.cleanup();

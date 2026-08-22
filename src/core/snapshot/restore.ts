@@ -17,7 +17,9 @@
  * a handle this function also tries to manage.
  *
  * **Stage order, every stage's failure leaving the live store untouched and
- * the temp file cleaned up (until the final two renames):**
+ * the temp file cleaned up — including a failed *first* rename in stage 7,
+ * the one case that is not simply "before the swap" but is still safe to
+ * unwind (see stage 7):**
  *
  * 1. Read the file (`readBoundedExportFile`) and validate the *whole* thing —
  *    the header and every row line — before any database work happens at
@@ -42,10 +44,14 @@
  *    not reused from the caller), then clear stale sidecars for both the
  *    live path and the path its `.bak` is about to occupy.
  * 7. The swap: `rename(live, live + ".bak")`, then `rename(temp, live)` — back
- *    to back, the smallest window achievable. **The crash window between
- *    these two renames is ADR-018's named, accepted residual**: a crash there
- *    leaves the live path briefly empty with the good data sitting in
- *    `.bak`. Nothing after this point attempts to roll back a partial swap.
+ *    to back, the smallest window achievable. The **first** rename still
+ *    fails safely — a fully-built, fully-validated temp file that was never
+ *    landed is waste, not risk, and its own failure (permissions, disk full,
+ *    a concurrent reader holding `.bak`) still cleans it up. **The crash
+ *    window between the two renames is ADR-018's named, accepted
+ *    residual**: nothing past the first rename attempts to roll back a
+ *    partial swap, and a crash there leaves the live path briefly empty with
+ *    the good data sitting in `.bak`.
  */
 
 import { lstatSync, renameSync, unlinkSync } from "node:fs";
@@ -391,9 +397,19 @@ export function restoreSnapshot(snapshotPath: string, liveDbPath: string): Resto
     throw error;
   }
 
-  // Stage 7: the swap. No rollback is attempted from here — see the module
-  // docs for the named, accepted residual.
-  renameSync(liveDbPath, `${liveDbPath}.bak`);
+  // Stage 7: the swap. The first rename still fails safely: a temp file
+  // fully built and validated but never landed is waste, not risk, so its
+  // own failure (permissions, disk full, a concurrent .bak already held
+  // open) still cleans it up rather than leaking it. The second is where
+  // recovery ends — once the live path is gone, the only way forward is
+  // landing the replacement, and that crash window is ADR-018's named,
+  // accepted residual (data safe in .bak either way).
+  try {
+    renameSync(liveDbPath, `${liveDbPath}.bak`);
+  } catch (error) {
+    cleanupTemp(tempPath);
+    throw error;
+  }
   renameSync(tempPath, liveDbPath);
 
   return { tables, fromSchemaVersion: header.schemaVersion, toSchemaVersion: currentVersion };
