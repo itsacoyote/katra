@@ -42,8 +42,9 @@ function resolveOutPath(context: CliContext, store: OpenStore, out: string | und
 }
 
 // ---------------------------------------------------------------------------
-// Human rendering — sections-accumulator style, like formatMigrationReport
-// (migrate.ts): one line of totals, then one row per table.
+// Human rendering — one totals line, then one unconditional row per table:
+// simpler than formatMigrationReport's (migrate.ts) accumulator, since
+// nothing here is ever empty or truncated.
 // ---------------------------------------------------------------------------
 
 function formatSnapshotResult(result: SnapshotResult): string {
