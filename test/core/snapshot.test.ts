@@ -26,7 +26,7 @@ import { migrate, targetVersion } from "../../src/core/db/migrate.js";
 import { MIGRATIONS } from "../../src/core/db/migrations/index.js";
 import { SNAPSHOT_TABLES, type SnapshotTable } from "../../src/core/enums.js";
 import { isKatraException } from "../../src/core/errors.js";
-import { restoreSnapshot } from "../../src/core/snapshot/restore.js";
+import { checkpointOrThrow, restoreSnapshot } from "../../src/core/snapshot/restore.js";
 import {
   buildHeader,
   lineToRow,
@@ -565,6 +565,51 @@ describe("restoreSnapshot", () => {
     live.cleanup();
   });
 
+  it("restores a child task listed before its parent epic (parentless-first ordering)", () => {
+    // Every other restore test happens to list the epic first, so the
+    // parent-before-child reordering never gets exercised — but a task id is
+    // random, so a child routinely sorts (and therefore serializes) before its
+    // parent. Here the child line comes FIRST in the file; migration 0001's
+    // BEFORE INSERT trigger has no DEFERRABLE escape, so a naive in-file-order
+    // load would hit "parent_id must reference an epic" and the restore would
+    // throw. orderTasksForInsert is what makes this succeed.
+    const live = emptyLiveDbPath();
+    const currentVersion = targetVersion(MIGRATIONS);
+
+    const child = fullTaskRow({ id: "kt-aaa001", parent_id: "kt-zzz001", title: "child first" });
+    const epic = fullTaskRow({
+      id: "kt-zzz001",
+      level: "epic",
+      parent_id: null,
+      title: "epic last",
+    });
+
+    const content = buildSnapshotFile(currentVersion, [
+      ["tasks", child], // deliberately before its parent
+      ["tasks", epic],
+    ]);
+    const snapshotPath = join(live.repoDir, "child-first.jsonl");
+    writeFileSync(snapshotPath, content, "utf8");
+
+    const result = restoreSnapshot(snapshotPath, live.dbPath);
+    expect(result.tables.find((t) => t.table === "tasks")?.count).toBe(2);
+
+    const db = openDatabase(live.dbPath);
+    try {
+      expect(
+        (
+          db.prepare("SELECT parent_id FROM tasks WHERE id = ?").get("kt-aaa001") as {
+            parent_id: string;
+          }
+        ).parent_id,
+      ).toBe("kt-zzz001");
+    } finally {
+      db.close();
+    }
+
+    live.cleanup();
+  });
+
   it("builds a v5 snapshot at v5 and migrates it forward to convergence", () => {
     const live = emptyLiveDbPath();
 
@@ -862,6 +907,38 @@ describe("restoreSnapshot", () => {
     }
 
     fixture.repo.cleanup();
+  });
+
+  // checkpointOrThrow is unit-tested directly rather than through a live
+  // WAL-busy race: better-sqlite3's own busy_timeout waits out a held read
+  // lock, so a real concurrent reader cannot deterministically force
+  // `busy != 0` in-process. A stub handle pins the exact branch — busy
+  // refuses, clean returns — which is the load-bearing logic (QA gap 67.7).
+  describe("checkpointOrThrow", () => {
+    function stubDb(row: { busy: number }): DatabaseHandle {
+      return {
+        pragma: () => [{ busy: row.busy, log: 0, checkpointed: 0 }],
+      } as unknown as DatabaseHandle;
+    }
+
+    it("refuses with a wal-checkpoint-busy conflict when the checkpoint reports busy", () => {
+      let caught: unknown;
+      try {
+        checkpointOrThrow(stubDb({ busy: 1 }), "another session has the store open");
+        expect.unreachable("should have thrown");
+      } catch (err) {
+        caught = err;
+      }
+      expect(isKatraException(caught)).toBe(true);
+      expect((caught as { detail: { code: string; reason?: string } }).detail).toMatchObject({
+        code: "conflict",
+        reason: "wal-checkpoint-busy",
+      });
+    });
+
+    it("returns without throwing when the checkpoint fully completes", () => {
+      expect(() => checkpointOrThrow(stubDb({ busy: 0 }), "unused")).not.toThrow();
+    });
   });
 
   it("hostile bytes in titles and note bodies survive restore exactly", () => {

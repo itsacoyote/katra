@@ -361,7 +361,7 @@ interface WalCheckpointRow {
  * assert it. Never called on its own — always immediately followed by
  * `clearSidecars`, which removes whatever the checkpoint left clean.
  */
-function checkpointOrThrow(db: DatabaseHandle, message: string): void {
+export function checkpointOrThrow(db: DatabaseHandle, message: string): void {
   const [result] = db.pragma("wal_checkpoint(TRUNCATE)") as readonly WalCheckpointRow[];
   if ((result?.busy ?? 0) !== 0) {
     throw new KatraException({ code: "conflict", reason: "wal-checkpoint-busy", message });
