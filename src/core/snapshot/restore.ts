@@ -86,6 +86,25 @@ import { SNAPSHOT_ROW_FIELDS } from "./types.js";
  */
 export const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
 
+/**
+ * The {@link readBoundedExportFile} options for reading a snapshot file, shared
+ * by {@link restoreSnapshot} and `restore`'s preview branch
+ * (`cli/commands/snapshot.ts`). One object, not two copies: a file must refuse
+ * with the identical wording whether the caller asked for a preview or the
+ * real thing, and two independently-maintained option objects on a
+ * security-sensitive validator drift silently.
+ */
+export const SNAPSHOT_READ_OPTIONS = {
+  field: "file",
+  maxBytes: MAX_SNAPSHOT_BYTES,
+  notFoundHint: (path: string) =>
+    `snapshot at ${path} — check the path, or run \`katra snapshot\` on the machine that ` +
+    "has the data to create one",
+  kindHint: "a katra snapshot written to disk",
+  flagLabel: "the snapshot file",
+  readerHint: "katra restore",
+} as const;
+
 /** What {@link restoreSnapshot} returns: per-table loaded counts and the schema versions traversed. */
 export interface RestoreSnapshotResult {
   /** One entry per {@link SnapshotTable}, `SNAPSHOT_TABLES`' own order, `0` for an empty table rather than an absent entry. */
@@ -97,12 +116,12 @@ export interface RestoreSnapshotResult {
 }
 
 /** One validated row, still keyed loosely — `lineToRow` already narrowed and copied it through T1's own field whitelist. */
-interface ParsedEntry {
+export interface ParsedEntry {
   readonly lineNo: number;
   readonly row: Record<string, unknown>;
 }
 
-type RowsByTable = { [T in SnapshotTable]: ParsedEntry[] };
+export type RowsByTable = { [T in SnapshotTable]: ParsedEntry[] };
 
 function emptyRowsByTable(): RowsByTable {
   const result = {} as RowsByTable;
@@ -126,7 +145,7 @@ function tableForKeys(keys: ReadonlySet<string>, lineNo: number): SnapshotTable 
   malformedLine(lineNo, "does not match any known table's row shape");
 }
 
-interface ParsedSnapshot {
+export interface ParsedSnapshot {
   readonly header: SnapshotHeader;
   readonly rowsByTable: RowsByTable;
 }
@@ -143,7 +162,7 @@ interface ParsedSnapshot {
  * discipline `beads/extract.ts` uses, so line numbers in a refusal always
  * match the file's own physical lines.
  */
-function parseSnapshotFile(text: string, knownSchemaVersion: number): ParsedSnapshot {
+export function parseSnapshotFile(text: string, knownSchemaVersion: number): ParsedSnapshot {
   const lines = text.split("\n");
   const headerLine = lines[0];
   if (headerLine === undefined || headerLine.trim() === "") {
@@ -381,16 +400,7 @@ function safeCleanupTemp(tempPath: string): void {
  * tries to paper over.
  */
 export function restoreSnapshot(snapshotPath: string, liveDbPath: string): RestoreSnapshotResult {
-  const text = readBoundedExportFile(snapshotPath, {
-    field: "file",
-    maxBytes: MAX_SNAPSHOT_BYTES,
-    notFoundHint: (path) =>
-      `snapshot at ${path} — check the path, or run \`katra snapshot\` on the machine that ` +
-      "has the data to create one",
-    kindHint: "a katra snapshot written to disk",
-    flagLabel: "the snapshot file",
-    readerHint: "katra restore",
-  });
+  const text = readBoundedExportFile(snapshotPath, SNAPSHOT_READ_OPTIONS);
 
   // Stage 1: whole-file validation, before any database work at all.
   const currentVersion = targetVersion(MIGRATIONS);
