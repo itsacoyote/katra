@@ -75,6 +75,14 @@ import { SNAPSHOT_ROW_FIELDS } from "./types.js";
  * table is append-only and only ever grows. 256 MiB is generous headroom for
  * a real project's full history while still refusing a garbage file before
  * it is ever materialized in memory.
+ *
+ * "In memory" is worth being precise about at this ceiling: the file's raw
+ * text, the `text.split("\n")` line array, and every parsed row object
+ * `rowsByTable` accumulates all coexist for the length of one call, which
+ * measures at roughly 3.8x the file's own byte size at this size class — a
+ * 256 MiB snapshot is closer to a 1 GiB peak than a 256 MiB one. Acceptable
+ * for a local CLI reading one file at a time; a streaming parser would be
+ * the fix if that ever stops being true, not a smaller constant here.
  */
 export const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
 
@@ -232,7 +240,16 @@ function bindable(
  *
  * A `CHECK`/foreign-key/`GLOB` violation at insert time refuses naming the
  * table and the row's original source line — never the row's own content,
- * which may carry hostile bytes from an untrusted file.
+ * which may carry hostile bytes from an untrusted file. That guarantee
+ * holds because `error.message` below is SQLite's own generic constraint
+ * description (e.g. "CHECK constraint failed: lane"), which never echoes a
+ * bound value. It is a constraint on every migration's own DDL, not
+ * something this function enforces: a future `CREATE TRIGGER ... RAISE(ABORT,
+ * ... || NEW.some_column)` that interpolates a row's own value into its
+ * abort message would defeat this silently, since `error.message` would
+ * then carry exactly the untrusted content this catch block exists to keep
+ * out. No migration does this today (verified against every `RAISE` in the
+ * chain); keep it that way.
  */
 function loadTable(
   db: DatabaseHandle,
@@ -455,6 +472,12 @@ export function restoreSnapshot(snapshotPath: string, liveDbPath: string): Resto
   // recovery ends — once the live path is gone, the only way forward is
   // landing the replacement, and that crash window is ADR-018's named,
   // accepted residual (data safe in .bak either way).
+  //
+  // Single-backup model: this rename overwrites whatever `.bak` already
+  // held. A second restore in a row loses the first restore's own
+  // pre-restore snapshot of the live store, keeping only the most recent
+  // one — a deliberate simplicity choice this function makes silently; T4's
+  // CLI surface is where a user actually needs to be told about it.
   try {
     renameSync(liveDbPath, `${liveDbPath}.bak`);
   } catch (error) {
