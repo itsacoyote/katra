@@ -623,6 +623,51 @@ describe("restoreSnapshot", () => {
     live.cleanup();
   });
 
+  it("refuses a non-scalar column value instead of letting it shift the row's binds", () => {
+    const live = emptyLiveDbPath();
+    const currentVersion = targetVersion(MIGRATIONS);
+
+    // closed_at:[] contributes zero bind values and close_reason:["a","b"]
+    // contributes two — the total still balances against the row's 13
+    // placeholders, so there is no arity error, and both columns are
+    // unconstrained (nullable, no CHECK) so nothing else would catch the
+    // result either: without `bindable`, this insert *succeeds*, silently,
+    // with closed_at="a" and close_reason="b" (verified directly against
+    // better-sqlite3). Deliberately not description/lane — a shift starting
+    // there lands in the CHECK-constrained lane column, which would throw
+    // for an unrelated reason and prove nothing about this guard.
+    const misalignedTask = {
+      ...fullTaskRow({ id: "kt-misal1", parent_id: null }),
+      closed_at: [],
+      close_reason: ["a", "b"],
+    };
+    const content = buildSnapshotFile(currentVersion, [["tasks", misalignedTask]]);
+    const snapshotPath = join(live.repoDir, "misaligned.jsonl");
+    writeFileSync(snapshotPath, content, "utf8");
+
+    let caught: unknown;
+    try {
+      restoreSnapshot(snapshotPath, live.dbPath);
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      caught = err;
+    }
+
+    expect(isKatraException(caught)).toBe(true);
+    if (!isKatraException(caught)) throw new Error("unreachable");
+    expect(caught.detail.code).toBe("validation");
+
+    // Nothing landed — not even a misaligned version of the row.
+    const db = openDatabase(live.dbPath);
+    try {
+      expect(db.prepare("SELECT COUNT(*) c FROM tasks").get()).toEqual({ c: 0 });
+    } finally {
+      db.close();
+    }
+
+    live.cleanup();
+  });
+
   it("a schemaVersion newer than the chain refuses before touching anything", () => {
     const live = emptyLiveDbPath();
     const currentVersion = targetVersion(MIGRATIONS);

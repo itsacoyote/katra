@@ -179,6 +179,45 @@ function orderTasksForInsert(entries: readonly ParsedEntry[]): readonly ParsedEn
 }
 
 /**
+ * Refuses a non-scalar column value instead of letting it shift the row's
+ * binds.
+ *
+ * better-sqlite3 splices an *array-valued* positional argument into the bind
+ * list at that position — `stmt.run('A', [], 'C', ['X', 'Y'])` against four
+ * `?` placeholders binds exactly four values (`'A'`, `'C'`, `'X'`, `'Y'`),
+ * because the empty array contributes zero and the two-element array
+ * contributes two: the count still balances, so there is no arity error and
+ * SQLite never sees anything wrong — it just receives `'C'` for the column
+ * meant to hold the (invalid) empty array, and every column after it shifted
+ * one to the left (verified: this is real, reproducible better-sqlite3
+ * behavior, not a hypothetical). A row whose JSON happens to carry an array
+ * or object for one field — malformed input, hand-edited, or truncated —
+ * would otherwise load *successfully*, silently, with every later column in
+ * that row holding the wrong value: exactly the failure mode that defeats a
+ * restore preview, since nothing about the count or the exit code would say
+ * anything went wrong. Every schema column here is TEXT or INTEGER, so
+ * string, number, and null are the only legal bind values; anything else
+ * refuses here, before it ever reaches `stmt.run`.
+ */
+function bindable(
+  value: unknown,
+  table: SnapshotTable,
+  field: string,
+  lineNo: number,
+): string | number | null {
+  if (value === null || typeof value === "string" || typeof value === "number") return value;
+  throw new KatraException({
+    code: "validation",
+    field: "row",
+    value: { table, line: lineNo, column: field },
+    message:
+      `snapshot line ${lineNo} (table "${table}") holds a non-scalar value for column ` +
+      `"${field}" — only text, number, or null bind safely, and anything else would silently ` +
+      "shift every later column's value",
+  });
+}
+
+/**
  * Inserts every row for one table with one prepared, parameterized,
  * explicit-column statement (ADR-018) — columns and value order both taken
  * from `SNAPSHOT_ROW_FIELDS[table]`, the same fixed array `export.ts`'s
@@ -200,7 +239,7 @@ function loadTable(
   const stmt = db.prepare(`INSERT INTO ${table} (${columns}) VALUES (${placeholders})`);
 
   for (const { lineNo, row } of entries) {
-    const values = fields.map((field) => row[field]);
+    const values = fields.map((field) => bindable(row[field], table, field, lineNo));
     try {
       stmt.run(...values);
     } catch (error) {
