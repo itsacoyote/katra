@@ -137,17 +137,23 @@ describe("F10 — snapshot and restore", () => {
   });
 
   it("AC3: preview writes nothing; --apply without --force refuses a non-empty store; .bak survives a forced swap", async () => {
+    // Two source tasks, so the source's counts are distinguishable from the
+    // single-task target's — the forced swap must replace the target's data
+    // with the source's, not silently no-op and leave the target's in place.
     await runCli(["add", "a source task"], { cwd: repo.dir });
+    await runCli(["add", "another source task"], { cwd: repo.dir });
     const snap = join(repo.dir, "snap.jsonl");
     expect((await runCli(["snapshot", "--out", snap], { cwd: repo.dir })).exitCode).toBe(EXIT.ok);
+    const sourceCounts = tableCounts(repo.dir);
 
-    // A separate populated target.
+    // A separate populated target — one task, so its count differs from source.
     const target = createGitRepo();
     try {
       await runCli(["init"], { cwd: target.dir });
       await runCli(["add", "a target task"], { cwd: target.dir });
       const dbPath = dbPathOf(target.dir);
       const before = tableCounts(target.dir);
+      expect(before).not.toEqual(sourceCounts);
 
       // Preview writes nothing: the target's own tables are unchanged and no
       // swap artifact appears (targeted reads, never mtime/byte-compare).
@@ -166,9 +172,14 @@ describe("F10 — snapshot and restore", () => {
       const forced = await runCli(["restore", snap, "--apply", "--force"], { cwd: target.dir });
       expect(forced.exitCode, forced.stderr).toBe(EXIT.ok);
       expect(existsSync(`${dbPath}.bak`)).toBe(true);
-      // The swapped-in store is the source's — a genuinely operational store.
-      const board = await runCli(["board", "--json"], { cwd: target.dir });
-      expect(board.exitCode).toBe(EXIT.ok);
+      // The swapped-in store is genuinely the source's — its counts now match
+      // the source and no longer the target's own pre-swap state (a silent
+      // no-op swap would leave `before` in place and fail this).
+      const after = tableCounts(target.dir);
+      expect(after).toEqual(sourceCounts);
+      expect(after).not.toEqual(before);
+      // And it is a genuinely operational store, not just correct rows.
+      expect((await runCli(["board", "--json"], { cwd: target.dir })).exitCode).toBe(EXIT.ok);
     } finally {
       target.cleanup();
     }
@@ -203,33 +214,64 @@ describe("F10 — snapshot and restore", () => {
     }
   });
 
-  it("AC5: --json parity for snapshot and restore", async () => {
+  it("AC5: --json and text outputs agree for snapshot and restore", async () => {
     await runCli(["add", "a task"], { cwd: repo.dir });
     const snap = join(repo.dir, "snap.jsonl");
 
+    // snapshot: the JSON document's schema version and per-table counts must
+    // appear in the text rendering of the same run — the two are two views of
+    // one object, never allowed to drift.
     const snapJson = await runCli(["snapshot", "--out", snap, "--json"], { cwd: repo.dir });
     expect(snapJson.exitCode).toBe(EXIT.ok);
     const snapDoc = snapJson.json() as SnapshotResult;
     expect(snapDoc.schemaVersion).toBe(CURRENT_SCHEMA_VERSION);
-    expect(snapDoc.tables.find((t) => t.table === "tasks")?.count).toBeGreaterThan(0);
+    const snapText = await runCli(["snapshot", "--out", snap], { cwd: repo.dir });
+    expect(snapText.exitCode).toBe(EXIT.ok);
+    expect(snapText.stdout).toContain(`(schema v${String(snapDoc.schemaVersion)})`);
+    for (const entry of snapDoc.tables) {
+      expect(snapText.stdout).toContain(`${entry.table}: ${String(entry.count)}`);
+    }
 
-    const target = createGitRepo();
+    // restore: preview and apply each compared JSON-vs-text against their own
+    // fresh target, so neither's swap affects the other.
+    const previewTarget = createGitRepo();
+    const applyTarget = createGitRepo();
     try {
-      await runCli(["init"], { cwd: target.dir });
-
-      const previewJson = await runCli(["restore", snap, "--json"], { cwd: target.dir });
-      expect(previewJson.exitCode).toBe(EXIT.ok);
+      await runCli(["init"], { cwd: previewTarget.dir });
+      const previewJson = await runCli(["restore", snap, "--json"], { cwd: previewTarget.dir });
       const previewDoc = previewJson.json() as RestoreResult;
       expect(previewDoc.applied).toBe(false);
+      if (previewDoc.applied) throw new Error("unreachable");
+      const previewText = await runCli(["restore", snap], { cwd: previewTarget.dir });
+      for (const entry of previewDoc.tables) {
+        expect(previewText.stdout).toContain(
+          `${entry.table}: ${String(entry.snapshot)} (snapshot) vs ${String(entry.live)} (live)`,
+        );
+      }
 
-      const applyJson = await runCli(["restore", snap, "--apply", "--json"], { cwd: target.dir });
-      expect(applyJson.exitCode).toBe(EXIT.ok);
+      await runCli(["init"], { cwd: applyTarget.dir });
+      const applyJson = await runCli(["restore", snap, "--apply", "--json"], {
+        cwd: applyTarget.dir,
+      });
       const applyDoc = applyJson.json() as RestoreResult;
       expect(applyDoc.applied).toBe(true);
       if (!applyDoc.applied) throw new Error("unreachable");
-      expect(applyDoc.tables.find((t) => t.table === "tasks")?.count).toBeGreaterThan(0);
+      // Apply's text is checked against a JSON run over its own second fresh
+      // target — apply is destructive, so the two modes cannot share one store.
+      const applyTextTarget = createGitRepo();
+      try {
+        await runCli(["init"], { cwd: applyTextTarget.dir });
+        const applyText = await runCli(["restore", snap, "--apply"], { cwd: applyTextTarget.dir });
+        expect(applyText.exitCode).toBe(EXIT.ok);
+        for (const entry of applyDoc.tables) {
+          expect(applyText.stdout).toContain(`${entry.table}: ${String(entry.count)}`);
+        }
+      } finally {
+        applyTextTarget.cleanup();
+      }
     } finally {
-      target.cleanup();
+      previewTarget.cleanup();
+      applyTarget.cleanup();
     }
   });
 });
