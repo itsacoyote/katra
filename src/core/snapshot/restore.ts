@@ -1,0 +1,358 @@
+/**
+ * File → store: `restoreSnapshot` (F10 T3, `katra-9aw.67.3`). The
+ * destructive half of snapshot/restore, and ADR-018's home: row loading uses
+ * raw, parameterized, explicit-column INSERTs — no domain seam, no id
+ * minting, no event appended — because restore's job is reproducing katra's
+ * own prior data exactly, not admitting new data (ADR-018's "reproduce, don't
+ * admit" distinction). Read that ADR before changing anything here.
+ *
+ * **Ownership contract — fixed, not this module's to renegotiate.**
+ * {@link restoreSnapshot} takes **paths only, never a store handle**: it must
+ * not be able to close a connection it did not itself open. Every connection
+ * this function touches (the temp build, the live checkpoint) is opened and
+ * closed entirely inside this call. A caller that already holds the live
+ * store open (T4's `apply` path) must close its own handle *before* calling
+ * this — mirroring `cli/commands/init.ts`'s direct-`openStore`-plus-its-own-
+ * `try/finally` shape, never `withStore`, whose `finally` would double-close
+ * a handle this function also tries to manage.
+ *
+ * **Stage order, every stage's failure leaving the live store untouched and
+ * the temp file cleaned up (until the final two renames):**
+ *
+ * 1. Read the file (`readBoundedExportFile`) and validate the *whole* thing —
+ *    the header and every row line — before any database work happens at
+ *    all. A file that is going to fail must fail here, not three-quarters of
+ *    the way through a load with a temp file already dirtied.
+ * 2. `openDatabase(tempPath)` — **never `openStore`**, which would resolve
+ *    against the wrong root and bump a presence heartbeat neither belongs
+ *    here — build the schema at the snapshot's own recorded version.
+ * 3. Load every row with a raw, parameterized, explicit-column `INSERT` per
+ *    table, inside one transaction. Schema `CHECK`s, foreign keys and `GLOB`
+ *    patterns still apply — the rows land in a real schema built by the real
+ *    migration chain — so a violating row refuses, naming its table and
+ *    source line, never its content.
+ * 4. Migrate the temp database forward to the current version.
+ * 5. Integrity: `PRAGMA foreign_key_check`, then `wal_checkpoint(TRUNCATE)`
+ *    and close, asserting no `-wal`/`-shm` sidecar survives. (The FTS index
+ *    needs no separate step: its triggers fire on the ordinary `INSERT`s in
+ *    stage 3 exactly as they would for any other write, and migrating through
+ *    0004 for an older snapshot backfills it the same way an upgraded
+ *    installation's does.)
+ * 6. Checkpoint and close the **live** connection (opened and closed here,
+ *    not reused from the caller), then clear stale sidecars for both the
+ *    live path and the path its `.bak` is about to occupy.
+ * 7. The swap: `rename(live, live + ".bak")`, then `rename(temp, live)` — back
+ *    to back, the smallest window achievable. **The crash window between
+ *    these two renames is ADR-018's named, accepted residual**: a crash there
+ *    leaves the live path briefly empty with the good data sitting in
+ *    `.bak`. Nothing after this point attempts to roll back a partial swap.
+ */
+
+import { existsSync, renameSync, unlinkSync } from "node:fs";
+import type { SnapshotTableCount } from "../contract.js";
+import type { DatabaseHandle } from "../db/connection.js";
+import { openDatabase, writeTx } from "../db/connection.js";
+import { migrate, targetVersion } from "../db/migrate.js";
+import { MIGRATIONS } from "../db/migrations/index.js";
+import { readBoundedExportFile } from "../db/read-export.js";
+import { SNAPSHOT_TABLES, type SnapshotTable } from "../enums.js";
+import { KatraException } from "../errors.js";
+import { lineToRow, parseHeader } from "./serialize.js";
+import type { SnapshotHeader } from "./types.js";
+import { SNAPSHOT_ROW_FIELDS } from "./types.js";
+
+/**
+ * Hard ceiling on a snapshot file's size, refused before it is even read.
+ *
+ * Far above `migrate.ts`'s `MAX_FROM_BYTES` (32 MiB, sized for a beads
+ * export): a snapshot carries the whole store, `events` included, and that
+ * table is append-only and only ever grows. 256 MiB is generous headroom for
+ * a real project's full history while still refusing a garbage file before
+ * it is ever materialized in memory.
+ */
+export const MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024;
+
+/** What {@link restoreSnapshot} returns: per-table loaded counts and the schema versions traversed. */
+export interface RestoreSnapshotResult {
+  /** One entry per {@link SnapshotTable}, `SNAPSHOT_TABLES`' own order, `0` for an empty table rather than an absent entry. */
+  readonly tables: readonly SnapshotTableCount[];
+  /** The snapshot's own recorded `schemaVersion` — where the temp database was built before migrating forward. */
+  readonly fromSchemaVersion: number;
+  /** The version the restored store ends on — always the running build's own `targetVersion`. */
+  readonly toSchemaVersion: number;
+}
+
+function malformedSnapshotLine(lineNo: number, reason: string): never {
+  throw new KatraException({
+    code: "validation",
+    field: "line",
+    value: lineNo,
+    message: `snapshot line ${lineNo} is malformed (${reason}) — the file may be corrupt or hand-edited`,
+  });
+}
+
+/** Shape basics for a parsed line — mirrors `serialize.ts`'s own private `isPlainObject`, not exported there for this to reuse. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** One validated row, still keyed loosely — `lineToRow` already narrowed and copied it through T1's own field whitelist. */
+interface ParsedEntry {
+  readonly lineNo: number;
+  readonly row: Record<string, unknown>;
+}
+
+type RowsByTable = { [T in SnapshotTable]: ParsedEntry[] };
+
+function emptyRowsByTable(): RowsByTable {
+  const result = {} as RowsByTable;
+  for (const table of SNAPSHOT_TABLES) result[table] = [];
+  return result;
+}
+
+/**
+ * Determines which table a parsed line's own key set describes — epic
+ * requirement 2's "self-describing" row, made concrete: every table's
+ * `SNAPSHOT_ROW_FIELDS` entry is a distinct combination of column names (no
+ * two tables share one), so a line's exact key set identifies its table with
+ * no need for the file to carry a separate marker, and with no dependence on
+ * which order the lines actually appear in.
+ */
+function tableForKeys(keys: ReadonlySet<string>, lineNo: number): SnapshotTable {
+  for (const table of SNAPSHOT_TABLES) {
+    const fields = SNAPSHOT_ROW_FIELDS[table] as readonly string[];
+    if (fields.length === keys.size && fields.every((field) => keys.has(field))) return table;
+  }
+  malformedSnapshotLine(lineNo, "does not match any known table's row shape");
+}
+
+interface ParsedSnapshot {
+  readonly header: SnapshotHeader;
+  readonly rowsByTable: RowsByTable;
+}
+
+/**
+ * Parses and validates the *entire* file — header plus every row line —
+ * before returning. Nothing here touches a filesystem path or a database:
+ * a malformed line anywhere in the file throws before stage 2 of the
+ * module docs ever runs, which is what "a malformed line aborts before any
+ * DB file is created" means operationally.
+ *
+ * Blank lines (including the trailing one every snapshot file's final
+ * newline produces) are skipped without consuming a table slot — the same
+ * discipline `beads/extract.ts` uses, so line numbers in a refusal always
+ * match the file's own physical lines.
+ */
+function parseSnapshotFile(text: string, knownSchemaVersion: number): ParsedSnapshot {
+  const lines = text.split("\n");
+  const headerLine = lines[0];
+  if (headerLine === undefined || headerLine.trim() === "") {
+    malformedSnapshotLine(1, "missing header line");
+  }
+  const header = parseHeader(headerLine, knownSchemaVersion);
+
+  const rowsByTable = emptyRowsByTable();
+  for (let index = 1; index < lines.length; index++) {
+    const line = lines[index];
+    if (line === undefined || line.trim() === "") continue;
+    const lineNo = index + 1;
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(line);
+    } catch {
+      malformedSnapshotLine(lineNo, "invalid JSON");
+    }
+    if (!isPlainObject(parsed)) {
+      malformedSnapshotLine(lineNo, "not a JSON object");
+    }
+
+    const table = tableForKeys(new Set(Object.keys(parsed)), lineNo);
+    const row = lineToRow(table, line, lineNo) as unknown as Record<string, unknown>;
+    rowsByTable[table].push({ lineNo, row });
+  }
+
+  return { header, rowsByTable };
+}
+
+/**
+ * Orders `tasks` rows so every parentless row (every epic, per the schema's
+ * own `CHECK (level <> 'epic' OR parent_id IS NULL)`, and any top-level task)
+ * lands before any row whose `parent_id` names one — migration 0001's
+ * `BEFORE INSERT` trigger checks the parent's existence immediately, with no
+ * `DEFERRABLE` escape hatch available for a trigger (unlike a native foreign
+ * key, `PRAGMA defer_foreign_keys` does not touch it). katra's hierarchy is
+ * exactly two levels deep (an epic's own `parent_id` is always `NULL`), so
+ * one partition is a complete topological sort — no general graph algorithm
+ * earns its complexity here.
+ */
+function orderTasksForInsert(entries: readonly ParsedEntry[]): readonly ParsedEntry[] {
+  const parentless = entries.filter((entry) => entry.row.parent_id === null);
+  const parented = entries.filter((entry) => entry.row.parent_id !== null);
+  return [...parentless, ...parented];
+}
+
+/**
+ * Inserts every row for one table with one prepared, parameterized,
+ * explicit-column statement (ADR-018) — columns and value order both taken
+ * from `SNAPSHOT_ROW_FIELDS[table]`, the same fixed array `export.ts`'s
+ * `selectRows` reads with, so a table's on-disk column order can never
+ * silently disagree between the two directions.
+ *
+ * A `CHECK`/foreign-key/`GLOB` violation at insert time refuses naming the
+ * table and the row's original source line — never the row's own content,
+ * which may carry hostile bytes from an untrusted file.
+ */
+function loadTable(
+  db: DatabaseHandle,
+  table: SnapshotTable,
+  entries: readonly ParsedEntry[],
+): number {
+  const fields = SNAPSHOT_ROW_FIELDS[table] as readonly string[];
+  const columns = fields.join(", ");
+  const placeholders = fields.map(() => "?").join(", ");
+  const stmt = db.prepare(`INSERT INTO ${table} (${columns}) VALUES (${placeholders})`);
+
+  for (const { lineNo, row } of entries) {
+    const values = fields.map((field) => row[field]);
+    try {
+      stmt.run(...values);
+    } catch (error) {
+      throw new KatraException({
+        code: "validation",
+        field: "row",
+        value: { table, line: lineNo },
+        message:
+          `snapshot line ${lineNo} (table "${table}") violates the live schema — ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  return entries.length;
+}
+
+/** Loads every table's rows inside one transaction, `SNAPSHOT_TABLES`' own foreign-key-safe order. */
+function loadAllRows(db: DatabaseHandle, rowsByTable: RowsByTable): readonly SnapshotTableCount[] {
+  return writeTx(db, () => {
+    const counts: SnapshotTableCount[] = [];
+    for (const table of SNAPSHOT_TABLES) {
+      const entries =
+        table === "tasks" ? orderTasksForInsert(rowsByTable.tasks) : rowsByTable[table];
+      counts.push({ table, count: loadTable(db, table, entries) });
+    }
+    return counts;
+  });
+}
+
+function sidecarsFor(path: string): readonly [string, string] {
+  return [`${path}-wal`, `${path}-shm`];
+}
+
+/** Removes `path`'s `-wal`/`-shm` sidecars if present. Idempotent — a path with none of its own is a no-op. */
+function clearSidecars(path: string): void {
+  for (const sidecar of sidecarsFor(path)) {
+    if (existsSync(sidecar)) unlinkSync(sidecar);
+  }
+}
+
+function removeIfExists(path: string): void {
+  if (existsSync(path)) unlinkSync(path);
+}
+
+/** Best-effort teardown of a temp build that will never be used — every failure path before the swap runs this. */
+function cleanupTemp(tempPath: string): void {
+  removeIfExists(tempPath);
+  clearSidecars(tempPath);
+}
+
+/**
+ * Rebuilds the store at `liveDbPath` from the snapshot at `snapshotPath`.
+ *
+ * See the module docs for the ownership contract (paths only, this function
+ * opens and closes every connection it touches) and the full stage order.
+ * Every failure before the final two `rename`s leaves `liveDbPath` completely
+ * untouched and removes the temp file; the crash window between those two
+ * renames is ADR-018's named, accepted residual, not something this function
+ * tries to paper over.
+ */
+export function restoreSnapshot(snapshotPath: string, liveDbPath: string): RestoreSnapshotResult {
+  const text = readBoundedExportFile(snapshotPath, {
+    field: "file",
+    maxBytes: MAX_SNAPSHOT_BYTES,
+    notFoundHint: (path) =>
+      `snapshot at ${path} — check the path, or run \`katra snapshot\` on the machine that ` +
+      "has the data to create one",
+    kindHint: "a katra snapshot written to disk",
+    flagLabel: "the snapshot file",
+    readerHint: "katra restore",
+  });
+
+  // Stage 1: whole-file validation, before any database work at all.
+  const currentVersion = targetVersion(MIGRATIONS);
+  const { header, rowsByTable } = parseSnapshotFile(text, currentVersion);
+
+  const tempPath = `${liveDbPath}.tmp-restore`;
+  let tables: readonly SnapshotTableCount[];
+
+  try {
+    // A stale temp file from a previously-crashed restore must not be
+    // reopened as though it were a fresh build.
+    cleanupTemp(tempPath);
+
+    const tempDb = openDatabase(tempPath);
+    try {
+      // Stage 2: build at the snapshot's own recorded version.
+      migrate(
+        tempDb,
+        MIGRATIONS.filter((m) => m.version <= header.schemaVersion),
+      );
+
+      // Stage 3: raw, parameterized, explicit-column loading (ADR-018).
+      tables = loadAllRows(tempDb, rowsByTable);
+
+      // Stage 4: forward to current.
+      migrate(tempDb, MIGRATIONS);
+
+      // Stage 5: integrity. The FTS index needs no separate step — see the
+      // module docs.
+      const violations = tempDb.pragma("foreign_key_check") as readonly unknown[];
+      if (violations.length > 0) {
+        throw new KatraException({
+          code: "validation",
+          field: "file",
+          value: violations.length,
+          message:
+            `the loaded snapshot fails a foreign-key check (${String(violations.length)} ` +
+            "violation(s)) after migrating forward — the file may be corrupt or from an " +
+            "incompatible build",
+        });
+      }
+
+      tempDb.pragma("wal_checkpoint(TRUNCATE)");
+    } finally {
+      tempDb.close();
+    }
+    // The temp file must be fully self-contained before the swap.
+    clearSidecars(tempPath);
+
+    // Stage 6: checkpoint and close the live connection — opened and closed
+    // entirely here, never a handle the caller passed in (the ownership
+    // contract above).
+    const liveDb = openDatabase(liveDbPath);
+    liveDb.pragma("wal_checkpoint(TRUNCATE)");
+    liveDb.close();
+    clearSidecars(liveDbPath);
+    clearSidecars(`${liveDbPath}.bak`);
+  } catch (error) {
+    cleanupTemp(tempPath);
+    throw error;
+  }
+
+  // Stage 7: the swap. No rollback is attempted from here — see the module
+  // docs for the named, accepted residual.
+  renameSync(liveDbPath, `${liveDbPath}.bak`);
+  renameSync(tempPath, liveDbPath);
+
+  return { tables, fromSchemaVersion: header.schemaVersion, toSchemaVersion: currentVersion };
+}
