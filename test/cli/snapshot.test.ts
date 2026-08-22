@@ -1,6 +1,7 @@
 /**
- * `katra snapshot` — the F10 T2 vertical slice: export.ts's real store→file
- * write, through the real CLI end to end.
+ * `katra snapshot` / `katra restore` — the F10 T2/T4 vertical slices:
+ * export.ts's real store→file write and restoreSnapshot's real file→store
+ * rebuild, both through the real CLI end to end.
  */
 
 import {
@@ -14,13 +15,14 @@ import {
 import { basename, join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
-import type { SnapshotResult } from "../../src/core/contract.js";
+import type { RestoreResult, SnapshotResult } from "../../src/core/contract.js";
+import { openDatabase } from "../../src/core/db/connection.js";
 import { MIGRATIONS } from "../../src/core/db/migrations/index.js";
 import { PRESENCE_FRESH_MS } from "../../src/core/presence.js";
 import { SNAPSHOT_FORMAT_VERSION } from "../../src/core/snapshot/types.js";
 import { runCli } from "../helpers/cli.js";
 import { seedTask } from "../helpers/seed.js";
-import { createStoreFixture } from "../helpers/store.js";
+import { createStoreFixture, OTHER_IDENTITY, openAs } from "../helpers/store.js";
 
 /**
  * A single toggle, not `vi.spyOn` — Vitest cannot redefine a property on a
@@ -301,6 +303,194 @@ describe("katra snapshot", () => {
       expect(textRun.stdout).toContain(`schema v${String(document.schemaVersion)}`);
     } finally {
       fixture.cleanup();
+    }
+  });
+});
+
+describe("katra restore", () => {
+  it("restore preview reports versions, per-table counts, and other worktrees' presence without swapping", async () => {
+    const fixture = createStoreFixture();
+    try {
+      seedTask(fixture.store, { id: "kt-s00001", title: "first" });
+
+      // A second worktree present, bumping its own presence row — the
+      // "informed consent" a later forced swap's preview exists to give.
+      const other = openAs(fixture.repo.dir, OTHER_IDENTITY);
+      other.close();
+
+      const snapPath = join(fixture.repo.dir, "snap.jsonl");
+      const snap = await runCli(["snapshot", "--out", snapPath], { cwd: fixture.repo.dir });
+      expect(snap.exitCode).toBe(0);
+
+      // The live store changes after the snapshot was taken, so snapshot
+      // and live counts genuinely disagree — proving both sides are read
+      // independently, not one echoing the other.
+      seedTask(fixture.store, { id: "kt-s00002", title: "added after the snapshot" });
+
+      const dbPath = fixture.store.dbPath;
+      const tasksBefore = fixture.store.db.prepare("SELECT COUNT(*) c FROM tasks").get();
+
+      const preview = await runCli(["restore", snapPath, "--json"], { cwd: fixture.repo.dir });
+      expect(preview.exitCode).toBe(0);
+      const document = preview.json() as RestoreResult;
+
+      expect(document.applied).toBe(false);
+      if (document.applied) throw new Error("unreachable");
+      expect(document.fromSchemaVersion).toBe(Math.max(...MIGRATIONS.map((m) => m.version)));
+      expect(document.toSchemaVersion).toBe(document.fromSchemaVersion);
+
+      const tasksEntry = document.tables.find((entry) => entry.table === "tasks");
+      expect(tasksEntry).toEqual({ table: "tasks", snapshot: 1, live: 2 });
+
+      // At least the deliberate other worktree — `createStoreFixture` itself
+      // opens once under its own fixed identity, which also legitimately
+      // counts as "another worktree" from the real CLI identity `runCli`
+      // resolves for `fixture.repo.dir`, so this asserts presence rather
+      // than an exact count coupled to that fixture-internal detail.
+      expect(
+        document.otherWorktrees.some(
+          (w) => w.worktree === OTHER_IDENTITY.worktree && w.branch === OTHER_IDENTITY.branch(),
+        ),
+      ).toBe(true);
+      // Never the caller's own (real) worktree.
+      expect(document.otherWorktrees.some((w) => w.worktree === fixture.repo.dir)).toBe(false);
+
+      // No swap: targeted reads, not mtime/byte-compare — the live store's
+      // own row count is exactly what it was right before the preview ran.
+      expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM tasks").get()).toEqual(tasksBefore);
+      expect(existsSync(`${dbPath}.tmp-restore`)).toBe(false);
+      expect(existsSync(`${dbPath}.bak`)).toBe(false);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("--apply refuses a store holding only surviving events without --force", async () => {
+    const fixture = createStoreFixture();
+    try {
+      const snapPath = join(fixture.repo.dir, "snap.jsonl");
+      const snap = await runCli(["snapshot", "--out", snapPath], { cwd: fixture.repo.dir });
+      expect(snap.exitCode).toBe(0);
+
+      // The katra-9aw.52 scenario, made real: a task created then deleted
+      // leaves zero rows in `tasks`, but its `created`/`deleted` events
+      // outlive it (ADR-008 — events carry no foreign key to the task they
+      // describe), so the store is not actually empty.
+      const added = await runCli(["add", "will be deleted"], { cwd: fixture.repo.dir });
+      expect(added.exitCode).toBe(0);
+      const taskId = added.stdout.trim();
+      const deleted = await runCli(["delete", taskId, "--force"], { cwd: fixture.repo.dir });
+      expect(deleted.exitCode).toBe(0);
+
+      const tasksLeft = fixture.store.db.prepare("SELECT COUNT(*) c FROM tasks").get() as {
+        c: number;
+      };
+      const eventsLeft = fixture.store.db.prepare("SELECT COUNT(*) c FROM events").get() as {
+        c: number;
+      };
+      expect(tasksLeft.c).toBe(0);
+      expect(eventsLeft.c).toBeGreaterThan(0);
+
+      const result = await runCli(["restore", snapPath, "--apply"], { cwd: fixture.repo.dir });
+
+      expect(result.exitCode).toBe(EXIT.conflict);
+      expect(result.stderr).toContain("already holds data");
+      expect(result.stderr).toContain("--force");
+
+      // Refused before touching anything.
+      const dbPath = fixture.store.dbPath;
+      expect(existsSync(`${dbPath}.tmp-restore`)).toBe(false);
+      expect(existsSync(`${dbPath}.bak`)).toBe(false);
+      expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM events").get()).toEqual(eventsLeft);
+    } finally {
+      fixture.cleanup();
+    }
+  });
+
+  it("--apply proceeds on a fresh-init store without --force", async () => {
+    const source = createStoreFixture();
+    const target = createStoreFixture();
+    try {
+      seedTask(source.store, { id: "kt-s00001", title: "from the source store" });
+      const snapPath = join(source.repo.dir, "snap.jsonl");
+      const snap = await runCli(["snapshot", "--out", snapPath], { cwd: source.repo.dir });
+      expect(snap.exitCode).toBe(0);
+
+      // A fresh-init target: presence only, nothing in any of the nine
+      // source-of-truth tables.
+      const result = await runCli(["restore", snapPath, "--apply"], { cwd: target.repo.dir });
+
+      expect(result.exitCode).toBe(0);
+
+      // A fresh connection, not target.store's own: the swap renamed the
+      // file out from under that handle's still-open file descriptor, which
+      // keeps reading the pre-swap (now-.bak) data rather than the new file
+      // now sitting at the same path.
+      const restored = openDatabase(target.store.dbPath);
+      try {
+        expect(restored.prepare("SELECT title FROM tasks WHERE id = 'kt-s00001'").get()).toEqual({
+          title: "from the source store",
+        });
+      } finally {
+        restored.close();
+      }
+    } finally {
+      source.cleanup();
+      target.cleanup();
+    }
+  });
+
+  it("--apply --force swaps, keeps the previous store as .bak, and the restored board answers", async () => {
+    const fixture = createStoreFixture();
+    const source = createStoreFixture();
+    try {
+      seedTask(fixture.store, { id: "kt-orig01", title: "original, pre-restore" });
+      const dbPath = fixture.store.dbPath;
+
+      seedTask(source.store, { id: "kt-s00001", title: "restored task" });
+      const snapPath = join(fixture.repo.dir, "snap.jsonl");
+      const snap = await runCli(["snapshot", "--out", snapPath], { cwd: source.repo.dir });
+      expect(snap.exitCode).toBe(0);
+
+      const result = await runCli(["restore", snapPath, "--apply", "--force", "--json"], {
+        cwd: fixture.repo.dir,
+      });
+      expect(result.exitCode).toBe(0);
+      const document = result.json() as RestoreResult;
+
+      expect(document.applied).toBe(true);
+      if (!document.applied) throw new Error("unreachable");
+      expect(document.bakPath).toBe(`${dbPath}.bak`);
+      const tasksEntry = document.tables.find((entry) => entry.table === "tasks");
+      expect(tasksEntry).toEqual({ table: "tasks", count: 1 });
+
+      // .bak is a real SQLite file (a rename, not a snapshot), so it is
+      // read directly — genuinely holding the pre-restore data.
+      expect(existsSync(document.bakPath)).toBe(true);
+      const bak = openDatabase(document.bakPath);
+      try {
+        expect(bak.prepare("SELECT title FROM tasks WHERE id = 'kt-orig01'").get()).toEqual({
+          title: "original, pre-restore",
+        });
+      } finally {
+        bak.close();
+      }
+
+      // The restored store is genuinely operational post-swap: board still
+      // answers successfully...
+      const board = await runCli(["board"], { cwd: fixture.repo.dir });
+      expect(board.exitCode).toBe(0);
+
+      // ...and holds the new content, not the old — checked precisely via
+      // list, since board's own text is summary counts and never prints an
+      // individual title.
+      const list = await runCli(["list", "--json"], { cwd: fixture.repo.dir });
+      expect(list.exitCode).toBe(0);
+      const tasks = (list.json() as { tasks: ReadonlyArray<{ title: string }> }).tasks;
+      expect(tasks.map((t) => t.title)).toEqual(["restored task"]);
+    } finally {
+      fixture.cleanup();
+      source.cleanup();
     }
   });
 });
