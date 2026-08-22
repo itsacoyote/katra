@@ -55,6 +55,7 @@ export type {
   Ref,
   RefResult,
   RefreshResult,
+  RestoreResult,
   SearchHit,
   SearchResult,
   SnapshotResult,

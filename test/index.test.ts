@@ -119,6 +119,12 @@ describe("the public barrel", () => {
       // own entry — it rides on SnapshotResult the same way ReconcileResult's
       // own item shapes ride on it above.
       katra.SnapshotResult,
+      // F10 T4: what `restore` prints — a discriminated union on `applied`,
+      // still one type reference here like every other entry.
+      // RestoreTableComparison/RestoreWorktreePresence do not get their own
+      // entries — they ride on RestoreResult the same way SnapshotTableCount
+      // rides on SnapshotResult without one.
+      katra.RestoreResult,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -127,8 +133,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 27;
-    expect(count).toBe(27);
+    const count: PublishedDocuments["length"] = 28;
+    expect(count).toBe(28);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {

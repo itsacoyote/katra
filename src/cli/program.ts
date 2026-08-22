@@ -34,7 +34,7 @@ import { registerRefresh } from "./commands/refresh.js";
 import { registerRelease } from "./commands/release.js";
 import { registerSearch } from "./commands/search.js";
 import { registerShow } from "./commands/show.js";
-import { registerSnapshot } from "./commands/snapshot.js";
+import { registerRestore, registerSnapshot } from "./commands/snapshot.js";
 import { registerStale } from "./commands/stale.js";
 import { registerUpdate } from "./commands/update.js";
 import type { OutputStreams } from "./output.js";
@@ -254,6 +254,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerRefresh(program, context);
   registerReconcile(program, context);
   registerSnapshot(program, context);
+  registerRestore(program, context);
 
   return program;
 }
