@@ -1,5 +1,11 @@
 # @itsacoyote/katra
 
+## 0.5.0
+
+### Minor Changes
+
+- [#25](https://github.com/itsacoyote/katra/pull/25) [`d5a0630`](https://github.com/itsacoyote/katra/commit/d5a063069b6ddc8d6582f91620a5f458d1ca7247) Thanks [@itsacoyote](https://github.com/itsacoyote)! - Add `katra snapshot` and `katra restore` — the store now outlives the machine. `snapshot` writes the whole store to one deterministic, git-diffable JSONL file (`.katra/snapshot.jsonl` by default) you commit; an unchanged store produces a byte-identical file, so a no-op session commits a clean diff. `restore` rebuilds a store from one — preview by default, `--apply` to execute, `--force` additionally required over a non-empty store, since restore replaces everything. It builds a fresh database at the snapshot's own recorded schema version and migrates it forward through the existing chain, so snapshots dug out of git history stay restorable after upgrades; the previous store is kept alongside as `katra.db.bak`. Snapshots carry every source-of-truth table (presence excluded as machine-local telemetry — ADR-017), round-trip stored bytes exactly (a backup never sanitizes), and are the answer to sharing a backlog, surviving a fresh clone, or undoing a bad write. Restore loads rows through raw, id-preserving inserts rather than the domain write seams (ADR-018), so a restored store reproduces the original exactly, event ids and all. No schema change.
+
 ## 0.4.0
 
 ### Minor Changes
