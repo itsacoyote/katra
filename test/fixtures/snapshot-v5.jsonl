@@ -1,0 +1,12 @@
+{"format":"katra-snapshot","formatVersion":1,"schemaVersion":5}
+{"id":"kt-epic01","level":"epic","kind":"feat","title":"v5 fixture epic","description":null,"lane":"Defined","priority":2,"assignee":null,"parent_id":null,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","closed_at":null,"close_reason":null}
+{"id":"kt-tsk001","level":"task","kind":"feat","title":"first task","description":null,"lane":"Defined","priority":2,"assignee":null,"parent_id":"kt-epic01","created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","closed_at":null,"close_reason":null}
+{"id":"kt-tsk002","level":"task","kind":"feat","title":"second task","description":null,"lane":"Defined","priority":2,"assignee":null,"parent_id":null,"created_at":"2026-01-01T00:00:00.000Z","updated_at":"2026-01-01T00:00:00.000Z","closed_at":null,"close_reason":null}
+{"task_id":"kt-tsk002","depends_on_id":"kt-tsk001","created_at":"2026-01-01T00:00:00.000Z"}
+{"a_id":"kt-tsk001","b_id":"kt-tsk002","created_at":"2026-01-01T00:00:00.000Z"}
+{"task_id":"kt-tsk001","tag":"alpha"}
+{"id":1,"type":"created","entity_id":"kt-tsk001","epic_id":null,"actor":"main @ /repo/seed","from_lane":null,"to_lane":null,"ref":null,"reason":null,"title":null,"prior_actor":null,"created_at":"2026-01-01T00:00:00.000Z"}
+{"id":"nt-fix001","task_id":"kt-tsk001","kind":"general","body":"a v5 note","actor":"main @ /repo/seed","created_at":"2026-01-01T00:00:00.000Z"}
+{"task_id":"kt-tsk001","holder":"/repo/wt-a","actor":"main @ /repo/seed","claimed_at":"2026-01-01T00:00:00.000Z"}
+{"id":1,"provider":"github","external_id":"owner/repo#1","url":"https://github.com/owner/repo/pull/1","cached_status":null,"cached_title":null,"synced_at":null}
+{"task_id":"kt-tsk001","ref_id":1}

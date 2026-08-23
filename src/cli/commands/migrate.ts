@@ -20,7 +20,6 @@
  * only `init` ever does).
  */
 
-import { readFileSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import type { Command } from "commander";
 import { actorFromIdentity } from "../../core/actor.js";
@@ -36,7 +35,7 @@ import type {
 } from "../../core/beads/types.js";
 import { nowIso } from "../../core/clock.js";
 import type { MigrationReport } from "../../core/contract.js";
-import { KatraException } from "../../core/errors.js";
+import { readBoundedExportFile } from "../../core/db/read-export.js";
 import { oneLine } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
@@ -72,89 +71,46 @@ interface MigrateBeadsOptions {
   readonly json?: boolean;
 }
 
-function mib(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
-}
-
 /**
  * Resolves `--from` against `context.cwd` — **never** against
  * `resolveStoreLocation`'s git common dir. That resolves to the WRONG root for
  * a relative `--from` inside a linked worktree (iteration-2 finding E), and
  * reaching for it here would mean touching store-resolution machinery from
  * the one path that must not open a store at all.
+ *
+ * Exported for `commands/snapshot.ts`'s `restore` (F10 T4), whose own file
+ * argument needs the identical cwd-relative resolution — `DEFAULT_FROM` never
+ * applies there, since restore's argument is required and so `from` is never
+ * `undefined` on that call path.
  */
-function resolveFromPath(context: CliContext, from: string | undefined): string {
+export function resolveFromPath(context: CliContext, from: string | undefined): string {
   const raw = from ?? DEFAULT_FROM;
   return isAbsolute(raw) ? raw : resolve(context.cwd, raw);
 }
 
 /**
- * Stats and reads the export, refusing a missing file, a non-regular file
+ * Stats and reads `--from`, refusing a missing file, a non-regular file
  * (fifo, device, directory — `--from /dev/zero`/a named pipe would otherwise
  * read forever or hang waiting on a writer, and a directory reaches
  * `readFileSync` as an opaque `EISDIR` `internal` fault), or one over
  * {@link MAX_FROM_BYTES}.
+ *
+ * Thin wrapper over {@link readBoundedExportFile} (F10 T3 lift,
+ * `core/db/read-export.ts`) carrying this command's own beads-flavoured
+ * wording — unchanged from before the lift, which is what keeps every test
+ * below green with no edits.
  */
 function readExportFile(path: string): string {
-  let stats: ReturnType<typeof statSync>;
-  try {
-    stats = statSync(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      throw new KatraException({
-        code: "not_found",
-        message:
-          `no beads export at ${path} — run \`bd export -o ${path}\` to create one, or point ` +
-          "--from at an existing export",
-        id: path,
-      });
-    }
-    // Anything other than "does not exist" — permission denied, a broken
-    // symlink, an I/O error — is a distinct refusal that names the errno
-    // rather than being folded into the same "go create one" hint.
-    throw new KatraException({
-      code: "validation",
-      message: `could not stat --from ${path}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
-      field: "from",
-      value: path,
-    });
-  }
-
-  if (!stats.isFile()) {
-    throw new KatraException({
-      code: "validation",
-      message: `${path} is not a regular file — --from needs a bd export written to disk`,
-      field: "from",
-      value: path,
-    });
-  }
-
-  if (stats.size > MAX_FROM_BYTES) {
-    throw new KatraException({
-      code: "validation",
-      message:
-        `${path} is ${mib(stats.size)} — over the ${mib(MAX_FROM_BYTES)} limit ` +
-        "katra migrate beads reads at once",
-      field: "from",
-      value: stats.size,
-    });
-  }
-
-  try {
-    return readFileSync(path, "utf8");
-  } catch (error) {
-    // Stat succeeding proves the path exists and is a regular file, but not
-    // that this process can read it — a mode-000 file (or a permission
-    // change between the stat and this read) would otherwise let an EACCES
-    // escape as an unhandled fault (exit 4, "katra broke") for what is really
-    // a user-fixable permissions problem.
-    throw new KatraException({
-      code: "validation",
-      message: `could not read --from ${path}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`,
-      field: "from",
-      value: path,
-    });
-  }
+  return readBoundedExportFile(path, {
+    field: "from",
+    maxBytes: MAX_FROM_BYTES,
+    notFoundHint: (p) =>
+      `beads export at ${p} — run \`bd export -o ${p}\` to create one, or point ` +
+      "--from at an existing export",
+    kindHint: "a bd export written to disk",
+    flagLabel: "--from",
+    readerHint: "katra migrate beads",
+  });
 }
 
 /** Merges a completed apply's write counts and minted ids into the plan's own report. */

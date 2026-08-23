@@ -301,6 +301,64 @@ export const RECONCILE_VERDICT_KINDS = [
 export type ReconcileVerdictKind = (typeof RECONCILE_VERDICT_KINDS)[number];
 
 /**
+ * The nine source-of-truth tables `katra snapshot` (F10) serializes, in the
+ * fixed order every snapshot file lists them — `snapshot/serialize.ts`'s
+ * `rowToLine`/`lineToRow` key their per-table field-order arrays
+ * (`snapshot/types.ts`) off this same union.
+ *
+ * Declared here rather than in `snapshot/types.ts`, for the reason
+ * {@link RefreshReason}/{@link ReconcileVerdictKind} give for their own
+ * placement: `enums.ts` is already in `src/index.ts`'s published-graph
+ * allowlist (`contract.ts`'s own module doc), so `contract.ts` importing
+ * `SnapshotTable` costs zero allowlist churn — declaring it beside
+ * `snapshot/types.ts` instead would put a fifth module on that list for one
+ * type.
+ *
+ * Unlike every DB-enforced set above, nothing here is `CHECK`-constrained —
+ * these are table *names*, not a column value SQLite validates — so, like
+ * {@link RefreshReason}/{@link ReconcileVerdictKind}, there is no `is*`
+ * predicate: nothing reads one back out of untrusted input needing narrowed.
+ *
+ * `tasks_fts`/`notes_fts` (migration 0004, ADR-013) are deliberately absent:
+ * derived indexes over `tasks`/`notes`, rebuilt by the migration chain's own
+ * triggers and one-time backfill on load, never a second source of the data
+ * they index (ADR-018).
+ *
+ * `presence` is deliberately absent too — amended out 2026-08-22 (ADR-017,
+ * "Full fidelity — amended"), after implementation proved it in real
+ * conflict with the format's own determinism guarantee: `openStore` rewrites
+ * `presence.last_seen` past its 30s freshness window (`PRESENCE_FRESH_MS`,
+ * `presence.ts`) on every command, snapshot's own read included, so a
+ * snapshot that serialized it could never be byte-identical across two real
+ * runs — and it would carry every worktree's absolute filesystem path into a
+ * file meant to be committed. Presence is derived operational telemetry:
+ * `openStore` repopulates it fresh on the first command after any restore,
+ * so nothing recoverable is lost by leaving it out.
+ */
+export const SNAPSHOT_TABLES = [
+  // Migration 0001: tasks and its two edge tables, then the tag join table.
+  // `tasks` first — every table below carries a foreign key back to it
+  // (`deps`/`links`/`tags`/`notes`/`claims` directly, `task_refs`
+  // indirectly through `refs`), so this order alone keeps a raw restore's
+  // inserts (T3, ADR-018) foreign-key-safe with no separate topological sort.
+  "tasks",
+  "deps",
+  "links",
+  "tags",
+  // Migration 0002: the event stream and typed notes.
+  "events",
+  "notes",
+  // Migration 0003: claims. `presence`, also introduced here, is excluded —
+  // see this array's own docstring for why.
+  "claims",
+  // Migration 0005: external refs and their join table (0004's FTS index
+  // sits between these two migrations and is excluded — see above).
+  "refs",
+  "task_refs",
+] as const;
+export type SnapshotTable = (typeof SNAPSHOT_TABLES)[number];
+
+/**
  * Renders a set as a SQL `IN`-list fragment: `'epic','task'`.
  *
  * Single quotes are doubled so a value can never terminate its own literal.

@@ -51,6 +51,8 @@ const EXPECTED_COMMANDS = [
   "stale",
   "refresh",
   "reconcile",
+  "snapshot",
+  "restore",
 ] as const;
 
 let repo: GitFixture;
@@ -65,7 +67,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all twenty-five commands on the program", () => {
+  it("registers all twenty-seven commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -74,7 +76,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(25);
+    expect(registered).toHaveLength(27);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -164,6 +166,11 @@ describe("--json across every command", () => {
       ["search", "another"],
       ["recent"],
       ["stale"],
+      ["snapshot"],
+      // Preview only (no --apply) — safe to run in the same shared flow as
+      // every other read here, and the file it previews is the one
+      // "snapshot" just wrote at its default path a moment above.
+      ["restore", join(repo.dir, ".katra", "snapshot.jsonl")],
     ];
 
     const invocations: ReadonlyArray<{

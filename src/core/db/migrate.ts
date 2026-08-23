@@ -27,7 +27,12 @@ export function readSchemaVersion(db: DatabaseHandle): number {
   return Number(db.pragma("user_version", { simple: true }));
 }
 
-function targetVersion(migrations: readonly Migration[]): number {
+/**
+ * The highest version among `migrations` — exported for restore (F10 T3),
+ * which needs it as `parseHeader`'s ceiling for a snapshot's own
+ * `schemaVersion` without duplicating this reduction.
+ */
+export function targetVersion(migrations: readonly Migration[]): number {
   return migrations.reduce((highest, m) => Math.max(highest, m.version), 0);
 }
 

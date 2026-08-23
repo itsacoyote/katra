@@ -48,7 +48,7 @@ export interface StoreOutcome<T> {
  * from this same `identity`, so passing both never spawns git twice for the
  * same worktree-and-branch pair.
  */
-function openContextStore(context: CliContext): OpenStoreResult {
+export function openContextStore(context: CliContext): OpenStoreResult {
   return openStore(context.cwd, {
     env: context.env,
     actor: context.actor,

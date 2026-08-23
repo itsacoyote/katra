@@ -35,6 +35,7 @@ import type {
   NoteKind,
   Priority,
   RefreshReason,
+  SnapshotTable,
   TerminalLane,
 } from "./enums.js";
 import type { LoggedEvent } from "./events/types.js";
@@ -822,6 +823,101 @@ export interface ReconcileResult {
   readonly conflict: RefreshSection<ReconcileConflictItem>;
   readonly skipClaimed: RefreshSection<ReconcileSkipClaimedItem>;
   readonly noOp: RefreshSection<ReconcileNoOpItem>;
+}
+
+/**
+ * One table's row count in a `katra snapshot` — always present, even when
+ * `count` is `0`: a snapshot serializes every source-of-truth table on every
+ * run (F10's own non-goal, "no partial/filtered snapshots"), so there is no
+ * "not attempted" state a missing entry could mean instead.
+ */
+export interface SnapshotTableCount {
+  readonly table: SnapshotTable;
+  readonly count: number;
+}
+
+/**
+ * What `katra snapshot` prints (F10 T2, spec requirements 1/10).
+ *
+ * Not a {@link RefreshSection} despite living in that family's neighborhood:
+ * `RefreshSection<T>`'s `{count, items, truncated}` shape exists for a
+ * *bounded* read that might cap what it lists — a snapshot caps nothing,
+ * ever (F10's non-goal above), so there is no `items` list to bound and no
+ * `truncated` flag that could ever be true. `tables` is the exhaustive,
+ * always-nine-entries analogue of `beads/types.ts`'s `ImportedCounts`: one row
+ * per {@link SnapshotTable}, in that union's own fixed order, `0` when a
+ * table is empty rather than the entry being absent.
+ */
+export interface SnapshotResult {
+  /** Where the file was written — the resolved absolute path, whether from the default or `--out`. */
+  readonly path: string;
+  /** `user_version` at export time — the same value the file's own header line carries. */
+  readonly schemaVersion: number;
+  readonly tables: readonly SnapshotTableCount[];
+}
+
+/**
+ * One table's row count in the snapshot file next to the live store's own —
+ * read before any swap, so "live" always describes what was there when
+ * `katra restore` was invoked, never a post-swap state.
+ */
+export interface RestoreTableComparison {
+  readonly table: SnapshotTable;
+  readonly snapshot: number;
+  readonly live: number;
+}
+
+/**
+ * One other worktree's presence, surfaced by a preview so a later forced
+ * swap is informed consent (ADR-018) rather than a guess about who else
+ * might be using the store right now. Never includes the calling worktree's
+ * own row — that one is not "another session".
+ */
+export interface RestoreWorktreePresence {
+  readonly worktree: string;
+  readonly branch: string;
+  readonly lastSeen: string;
+}
+
+/**
+ * What `katra restore` prints (F10 T4, spec requirements 5/6/8) — a
+ * discriminated union on `applied` rather than one shape with fields that
+ * are only sometimes meaningful, because preview and apply genuinely answer
+ * different questions: preview compares the snapshot against the live store
+ * without touching either; apply reports what actually landed. `--json`
+ * parity holds across both arms, not by forcing one shape to fit both.
+ */
+export type RestoreResult = RestorePreviewResult | RestoreApplyResult;
+
+/** `katra restore <file>` with no `--apply`: what would happen, changing nothing. */
+export interface RestorePreviewResult {
+  readonly applied: false;
+  /** The resolved absolute path of the file previewed. */
+  readonly file: string;
+  /** The snapshot's own recorded `schemaVersion`. */
+  readonly fromSchemaVersion: number;
+  /** The running build's own target version — where a restore would migrate forward to. */
+  readonly toSchemaVersion: number;
+  /** One entry per {@link SnapshotTable}, `SNAPSHOT_TABLES`' own order. */
+  readonly tables: readonly RestoreTableComparison[];
+  readonly otherWorktrees: readonly RestoreWorktreePresence[];
+}
+
+/** `katra restore <file> --apply`: what was actually loaded and swapped in. */
+export interface RestoreApplyResult {
+  readonly applied: true;
+  /** The resolved absolute path of the file that was applied. */
+  readonly file: string;
+  readonly fromSchemaVersion: number;
+  readonly toSchemaVersion: number;
+  /** Per-table counts of rows actually loaded — `restoreSnapshot`'s own return, passed through. */
+  readonly tables: readonly SnapshotTableCount[];
+  /**
+   * Where the previous store was preserved. A single-backup model: this path
+   * is overwritten by every restore, so only the most recent pre-restore
+   * store survives here, never a history of them.
+   */
+  readonly bakPath: string;
 }
 
 /** What `--help --json` prints: the usage screen, as data. */
