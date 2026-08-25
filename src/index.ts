@@ -42,6 +42,7 @@ export type {
   DeleteResult,
   DependencyResult,
   EventLog,
+  GuardResult,
   HelpDocument,
   InitResult,
   JsonDocument,

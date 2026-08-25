@@ -29,10 +29,19 @@
  * **Query shape: K+1 bounded, indexed reads, never a scan by actor.** `events`
  * has no index on `actor` (only `entity_id`/`epic_id`), so a "did I ever get
  * displaced" search cannot start from the event log. It starts from `claims`
- * instead: one read for every row held by another worktree — `claims` holds
- * only active claims, so this is tiny — then one indexed-by-`entity_id` read
- * per candidate task for its own displacement history. K+1 reads total,
- * whatever the store's total event count.
+ * instead: one read for every row held by another worktree
+ * ({@link claimsHeldElsewhere} — `claims` holds only active claims, so this
+ * is tiny) — then one indexed-by-`entity_id` read per candidate task for its
+ * own displacement history. K+1 reads total, whatever the store's total
+ * event count.
+ *
+ * **Deliberately not wrapped in one `readTx` snapshot.** The K+1 statements
+ * above are independent reads, not one consistent view: a release landing
+ * between two of them can make this call read stale state and return a
+ * spurious deny. Accepted for the hook's own sake — the <1s latency budget
+ * (spec §9) is the thing a held read snapshot would spend on the wrong side
+ * of, and a spurious deny is self-correcting, unlike a spurious allow: the
+ * very next `katra guard` re-reads current state and clears it.
  *
  * **Never writes.** `guardCheck` only reads `claims`/`events`/`presence`
  * through the store it is handed. The heartbeat every command pays
@@ -43,11 +52,11 @@
  */
 
 import { worktreeFromActor } from "../actor.js";
+import { toIso } from "../clock.js";
 import type { GuardResult } from "../contract.js";
 import { rowToEvent } from "../events/repo.js";
-import { narrowText } from "../narrow.js";
 import type { OpenStore } from "../store.js";
-import { assembleClaimInfo, claimsHeldBy } from "./repo.js";
+import { claimsHeldBy, claimsHeldElsewhere } from "./repo.js";
 import type { ClaimInfo } from "./types.js";
 
 export type { GuardResult };
@@ -79,6 +88,14 @@ export interface GuardOptions {
    * and its claim's `claimedAt`) is at or after this ISO instant — the same
    * shape `describeLiveness(claim, now)` already takes its `now` in.
    *
+   * **Must be katra's canonical, fixed-width UTC timestamp form**
+   * ({@link ../clock.js!toIso}, 24 characters, per `clock.ts`'s own
+   * `ISO_TIMESTAMP_LENGTH`) — the comparison against `lastSeen`/`claimedAt`
+   * is a plain lexical `>=`, which agrees with chronological order only for
+   * that exact width. A caller turning a user-facing duration or date into
+   * this value should produce it with {@link ../clock.js!parseWhen}, the one
+   * place katra already parses "how far back" into that form.
+   *
    * Defaults to `now - `{@link GUARD_LIVENESS_DEFAULT_MS}, computed inside
    * this call rather than by the caller, so a caller with no opinion on
    * staleness never has to compute one.
@@ -103,24 +120,6 @@ interface DisplacedTenure {
   readonly displacedAt: string;
 }
 
-/** The raw shape SQLite hands back for a `claims` row not held by this worktree, joined against `presence`. */
-interface ForeignClaimRow {
-  readonly task_id: unknown;
-  readonly holder: unknown;
-  readonly actor: unknown;
-  readonly claimed_at: unknown;
-  readonly branch: unknown;
-  readonly last_seen: unknown;
-}
-
-const SELECT_CLAIMS_HELD_ELSEWHERE = `
-  SELECT c.task_id, c.holder, c.actor, c.claimed_at, p.branch, p.last_seen
-    FROM claims c
-    LEFT JOIN presence p ON p.worktree = c.holder
-   WHERE c.holder != ?
-   ORDER BY c.claimed_at, c.task_id
-`;
-
 /**
  * The shape {@link rowToEvent} narrows — extracted from its own signature
  * rather than redeclared, so this file cannot drift from the row shape that
@@ -130,13 +129,18 @@ const SELECT_CLAIMS_HELD_ELSEWHERE = `
 type EventRow = Parameters<typeof rowToEvent>[0];
 
 /**
- * Every `released` event on `taskId` that names a `prior_actor` at all — the
- * only events a displacement could be — newest first via the `entity_id`
- * index.
+ * Every event on `taskId` that names a `prior_actor` at all — newest first
+ * via the `entity_id` index.
+ *
+ * No `type = 'released'` filter alongside it: `settleClaim` (`claims/repo.ts`)
+ * is the only place that ever writes `prior_actor`, and it does so only on a
+ * `released` event ({@link ../events/types.js!StoredEvent.priorActor}'s own
+ * docs). A non-null `prior_actor` already implies `type = 'released'`, so
+ * pinning both would filter on the same fact twice.
  */
 const SELECT_DISPLACEMENT_EVENTS = `
   SELECT * FROM events
-   WHERE entity_id = ? AND type = 'released' AND prior_actor IS NOT NULL
+   WHERE entity_id = ? AND prior_actor IS NOT NULL
    ORDER BY id DESC
 `;
 
@@ -162,21 +166,29 @@ function findDisplacement(
     // because rowToEvent's return type still admits null on every other type.
     if (event.priorActor === null) continue;
     if (worktreeFromActor(event.priorActor) !== worktree) continue;
-    if (worktreeFromActor(event.actor) === worktree) continue; // self-release: never counts
+    // Self-release never counts — belt-and-braces, not the only thing
+    // excluding it: settleClaim already nulls prior_actor on a self-release
+    // (claims/repo.ts), so a genuine self-release never even reaches this
+    // loop. This guards a row that violates that invariant, not the ordinary
+    // path.
+    if (worktreeFromActor(event.actor) === worktree) continue;
     return { eventId: event.id, displacedAt: event.createdAt };
   }
   return null;
 }
 
-/** The later of a claim's presence `lastSeen` and its own `claimedAt` — "never seen" reads as "as fresh as the claim itself", never as dead. */
-function rivalRecency(claim: ClaimInfo): string {
-  if (claim.lastSeen === null) return claim.claimedAt;
-  return claim.lastSeen > claim.claimedAt ? claim.lastSeen : claim.claimedAt;
-}
-
-/** Whether a rival's claim is live against `floor`, per {@link GuardOptions.livenessFloor}'s own docs. */
+/**
+ * Whether a rival's claim is live against `floor`, per
+ * {@link GuardOptions.livenessFloor}'s own docs.
+ *
+ * Recency is the later of the claim's presence `lastSeen` and its own
+ * `claimedAt` — "never seen" (`lastSeen === null`) reads as "as fresh as the
+ * claim itself," never as dead.
+ */
 function isLive(claim: ClaimInfo, floor: string): boolean {
-  return rivalRecency(claim) >= floor;
+  const recency =
+    claim.lastSeen !== null && claim.lastSeen > claim.claimedAt ? claim.lastSeen : claim.claimedAt;
+  return recency >= floor;
 }
 
 /** The candidate with the highest event id — the total order {@link DisplacedTenure.eventId}'s own docs explain. Callers only ever pass a non-empty list. */
@@ -187,7 +199,7 @@ function mostRecentTenure(tenures: readonly DisplacedTenure[]): DisplacedTenure 
 }
 
 function defaultLivenessFloor(): string {
-  return new Date(Date.now() - GUARD_LIVENESS_DEFAULT_MS).toISOString();
+  return toIso(new Date(Date.now() - GUARD_LIVENESS_DEFAULT_MS));
 }
 
 /**
@@ -202,20 +214,10 @@ export function guardCheck(store: OpenStore, options: GuardOptions = {}): GuardR
   const worktree = store.identity().worktree;
   const floor = options.livenessFloor ?? defaultLivenessFloor();
 
-  const rows = store.db.prepare(SELECT_CLAIMS_HELD_ELSEWHERE).all(worktree) as ForeignClaimRow[];
-
   const displaced: DisplacedTenure[] = [];
-  for (const row of rows) {
-    const taskId = narrowText(row.task_id, "task_id");
+  for (const { taskId, claim } of claimsHeldElsewhere(store, worktree)) {
     const displacement = findDisplacement(store, taskId, worktree);
     if (displacement === null) continue;
-    const claim = assembleClaimInfo(
-      row.holder,
-      row.actor,
-      row.claimed_at,
-      row.branch,
-      row.last_seen,
-    );
     displaced.push({
       taskId,
       claim,

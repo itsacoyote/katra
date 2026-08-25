@@ -311,4 +311,11 @@ describe("worktreeFromActor", () => {
   it("returns null for an actor string without the separator", () => {
     expect(worktreeFromActor("not-a-fused-actor-string")).toBeNull();
   });
+
+  it("keeps a worktree path that itself contains the separator, unsplit", () => {
+    // A branch name cannot contain " @ " (git's ref-format forbids a space),
+    // but the worktree path is an arbitrary filesystem path and can. Splitting
+    // on the *first* occurrence is what keeps this case correct.
+    expect(worktreeFromActor("main @ /repo/my @ dir/wt")).toBe("/repo/my @ dir/wt");
+  });
 });

@@ -130,6 +130,44 @@ describe("guardCheck", () => {
     expect(guardCheck(fixture.store)).toEqual({ verdict: "allow" });
   });
 
+  it("denies when the rival's claim is old but its presence was just bumped", () => {
+    const id = seedTask(fixture.store, { title: "taken over" });
+    claimTask(fixture.store, id);
+    takeOver(fixture.repo.dir, id, RIVAL_A);
+
+    // Recency is the LATER of the two signals — an old claim must not win
+    // over a presence row that was just bumped.
+    backdateClaim(fixture.store, id, minutesAgo(90));
+    seedPresence(fixture.store, {
+      worktree: RIVAL_A.worktree,
+      branch: RIVAL_A.branch(),
+      lastSeen: minutesAgo(5),
+    });
+
+    const result = guardCheck(fixture.store);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.taskId).toBe(id);
+  });
+
+  it("denies when the rival's presence is stale but its claim is recent", () => {
+    const id = seedTask(fixture.store, { title: "taken over" });
+    claimTask(fixture.store, id);
+    takeOver(fixture.repo.dir, id, RIVAL_A);
+    // claimedAt is left fresh, from the real takeover above.
+
+    // Recency is the LATER of the two signals — a stale presence row must not
+    // win over a claim that was just made.
+    seedPresence(fixture.store, {
+      worktree: RIVAL_A.worktree,
+      branch: RIVAL_A.branch(),
+      lastSeen: minutesAgo(90),
+    });
+
+    const result = guardCheck(fixture.store);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") expect(result.taskId).toBe(id);
+  });
+
   it("denies when the rival has no presence row but its claim is recent", () => {
     const id = seedTask(fixture.store, { title: "taken over" });
     claimTask(fixture.store, id);

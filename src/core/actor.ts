@@ -63,11 +63,15 @@ export const ACTOR_SEPARATOR = " @ ";
  * takeover the moment the branch differs; splitting the stored string back
  * apart and comparing worktree halves only does not.
  *
- * Splits on the **first** occurrence of {@link ACTOR_SEPARATOR}, since a
- * branch name is free to contain the literal `" @ "` sequence itself and the
- * worktree path is not. Returns `null` when the separator is absent —
- * treated as "no match" by every caller, never as a worktree that happens to
- * equal the empty string.
+ * Splits on the **first** occurrence of {@link ACTOR_SEPARATOR}. Git's own
+ * ref-format rules forbid an ASCII space in a branch name (`git
+ * check-ref-format` rejects one), so the branch half can never itself
+ * contain `" @ "` — but the worktree half is an arbitrary filesystem path,
+ * which can. Splitting on the first occurrence is therefore exactly right:
+ * it can never cut into the branch, and hands back everything after it —
+ * including any further `" @ "` substrings — as the worktree, unsplit.
+ * Returns `null` when the separator is absent — treated as "no match" by
+ * every caller, never as a worktree that happens to equal the empty string.
  */
 export function worktreeFromActor(actor: string): string | null {
   const index = actor.indexOf(ACTOR_SEPARATOR);

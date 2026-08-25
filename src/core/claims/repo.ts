@@ -453,6 +453,49 @@ export function claimsHeldBy(store: OpenStore, worktree: string): ClaimInfo[] {
   return rows.map(rowToClaimInfo);
 }
 
+/** `ClaimRow` plus the task id `claimsHeldBy`'s own query has no need of. */
+interface ForeignClaimRow extends ClaimRow {
+  readonly task_id: unknown;
+}
+
+/** One `claims` row {@link claimsHeldElsewhere} found — its task id alongside the same `ClaimInfo` shape `claimFor`/`claimsHeldBy` already hand back. */
+export interface ForeignClaim {
+  readonly taskId: string;
+  readonly claim: ClaimInfo;
+}
+
+const SELECT_CLAIMS_HELD_ELSEWHERE = `
+  SELECT c.task_id, c.holder, c.actor, c.claimed_at, p.branch, p.last_seen
+    FROM claims c
+    LEFT JOIN presence p ON p.worktree = c.holder
+   WHERE c.holder != ?
+`;
+
+/**
+ * Every claim held by some worktree **other than** `worktree` — the
+ * complement of {@link claimsHeldBy} above, with the task id `claimsHeldBy`
+ * has no need of and this does: `guard.ts`'s (F11 T1) tenure rule starts from
+ * exactly this set (bounded, since `claims` holds only active claims), then
+ * reads one task's own event history per row. This is the "K" half of that
+ * K+1 read; the caller supplies the "+1".
+ *
+ * No `ORDER BY`, unlike `claimsHeldBy`: that one orders because a stable
+ * listing reads better to a caller, but `guardCheck` ranks its candidates by
+ * event id, never by this query's row order, so sorting here would buy
+ * nothing but the temp b-tree it costs.
+ *
+ * Lives beside `claimsHeldBy` rather than in `guard.ts`, keeping every query
+ * against the `claims` table in the module that owns the table — `guard.ts`
+ * reads the result, never the SQL.
+ */
+export function claimsHeldElsewhere(store: OpenStore, worktree: string): ForeignClaim[] {
+  const rows = store.db.prepare(SELECT_CLAIMS_HELD_ELSEWHERE).all(worktree) as ForeignClaimRow[];
+  return rows.map((row) => ({
+    taskId: narrowText(row.task_id, "task_id"),
+    claim: rowToClaimInfo(row),
+  }));
+}
+
 const SELECT_TASK_IDS_HELD_BY = `
   SELECT task_id FROM claims WHERE holder = ? ORDER BY claimed_at, task_id
 `;
