@@ -143,8 +143,14 @@ export function writeAtomic(
   try {
     const fd = openSync(tempPath, "w");
     try {
-      writeFileSync(fd, content, "utf8");
+      // Set before the content write, not after: a restrictive preserved
+      // mode (e.g. 0o600) exists to keep the file's bytes from being
+      // world/group-readable at any point, and writeFileSync below is what
+      // actually puts bytes in it — chmodding afterward would leave that
+      // content sitting at the umask-default mode for the (however brief)
+      // window in between.
       if (desiredMode !== undefined) fchmodSync(fd, desiredMode);
+      writeFileSync(fd, content, "utf8");
       // fsync before rename, not after: the artifact's stated purpose is
       // surviving a dead machine, so its bytes must reach disk — not just
       // the OS's write cache — before the rename that makes them visible at

@@ -322,7 +322,14 @@ export function registerInstallHooks(program: Command, context: CliContext): voi
 
         mkdirSync(dirname(target), { recursive: true });
         assertContained(dirname(target), root);
-        writeAtomic(target, serializeSettings(merge.settings), { mode: 0o600 });
+        // No explicit mode: the file holds only hook command strings and the
+        // install report immediately tells the user to commit and share it
+        // — owner-only permissions would cost multi-uid setups (containers,
+        // shared build hosts) real usability for no secrecy this file needs,
+        // and git carries no mode bit anyway. A pre-existing file with
+        // tightened permissions still keeps them — writeAtomic's own
+        // preserve-existing-mode behavior, untouched.
+        writeAtomic(target, serializeSettings(merge.settings));
         action = removing ? "removed" : "installed";
       }
 

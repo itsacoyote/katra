@@ -14,6 +14,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -60,6 +61,27 @@ describe("katra install-hooks", () => {
     expect(dump).toContain("katra guard");
     expect(dump).toContain("katra release --mine");
   });
+
+  // Owner-only permissions cost multi-uid setups (containers, shared build
+  // hosts) real usability for zero secrecy benefit — this file holds only
+  // hook command strings and the install report tells the user to commit
+  // and share it. Compared against a sibling file written by a plain
+  // `writeFileSync` in the same process rather than a hardcoded literal
+  // (e.g. 0o644), since the actual bits depend on this process's umask.
+  it.runIf(onPosix)(
+    "creates a fresh settings file at the default (umask-derived) mode",
+    async () => {
+      const r = repo();
+      await runCli(["init"], { cwd: r.dir });
+
+      await runCli(["install-hooks", "claude"], { cwd: r.dir });
+
+      const sibling = join(r.dir, "sibling-for-mode-comparison.txt");
+      writeFileSync(sibling, "x");
+
+      expect(statSync(CLAUDE_SETTINGS(r.dir)).mode & 0o777).toBe(statSync(sibling).mode & 0o777);
+    },
+  );
 
   it("leaves the file byte-identical on a second run", async () => {
     const r = repo();
@@ -150,6 +172,27 @@ describe("katra install-hooks", () => {
     expect(settings.hooks.Notification).toEqual([
       { hooks: [{ type: "command", command: "./notify.sh" }] },
     ]);
+  });
+
+  it("--remove against a never-installed repo is a clean no-op", async () => {
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+
+    const result = await runCli(["install-hooks", "claude", "--remove", "--json"], {
+      cwd: r.dir,
+    });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(existsSync(CLAUDE_SETTINGS(r.dir))).toBe(false);
+    const payload = result.json() as { action: string; changed: boolean; mode: string };
+    expect(payload.action).toBe("unchanged");
+    expect(payload.changed).toBe(false);
+    expect(payload.mode).toBe("remove");
+
+    // The one sentence this scenario is the sole way to reach: "installed"
+    // and a plain --remove-with-something-to-strip both read differently.
+    const text = await runCli(["install-hooks", "claude", "--remove"], { cwd: r.dir });
+    expect(text.stdout).toMatch(/no katra hooks to remove/);
   });
 
   it("writes .codex/hooks.json with the same touchpoints for codex", async () => {
