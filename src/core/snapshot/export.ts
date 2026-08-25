@@ -40,7 +40,10 @@
  * by a prior run that was killed mid-write (`SIGKILL` reaches no `finally`)
  * is swept before this run's own write begins — `.katra/` is a tracked
  * directory, and a stray temp file sitting in it would otherwise get picked
- * up and committed by a later `git add -A`.
+ * up and committed by a later `git add -A`. The sweep and the atomic write
+ * itself are shared machinery ({@link ../fs.js writeAtomic}), moved out of
+ * this module into `core/fs.ts` so other writers (the CLI's `install-hooks`
+ * among them) can reuse the same primitive rather than forking a copy.
  *
  * **Canonical order.** Every table is read with an explicit column list
  * (`SNAPSHOT_ROW_FIELDS`, T1) and an explicit `ORDER BY` over its primary key
@@ -50,22 +53,12 @@
  * regardless of the order rows were originally inserted in.
  */
 
-import {
-  closeSync,
-  fsyncSync,
-  openSync,
-  readdirSync,
-  renameSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { basename, dirname, join } from "node:path";
 import type { SnapshotResult, SnapshotTableCount } from "../contract.js";
 import type { DatabaseHandle } from "../db/connection.js";
 import { readTx } from "../db/connection.js";
 import { readSchemaVersion } from "../db/migrate.js";
 import { SNAPSHOT_TABLES, type SnapshotTable } from "../enums.js";
+import { writeAtomic } from "../fs.js";
 import type { OpenStore } from "../store.js";
 import { buildHeader, rowToLine } from "./serialize.js";
 import type { SnapshotRowByTable } from "./types.js";
@@ -106,98 +99,6 @@ function selectRows<T extends SnapshotTable>(
   return db
     .prepare(`SELECT ${columns} FROM ${table} ORDER BY ${order}`)
     .all() as SnapshotRowByTable[T][];
-}
-
-/**
- * A temp file older than this is stranded, not in flight: no snapshot write
- * stays open for an hour.
- */
-const STALE_TEMP_AGE_MS = 60 * 60 * 1000;
-
-/**
- * Sweeps this target's own stale temp files before writing a new one — a
- * `SIGKILL`-stranded temp from a run that never reached its own cleanup
- * (nothing runs a `finally` across a kill signal). `.katra/` is a tracked
- * directory, so a name left behind here is one `git add -A` away from being
- * committed as noise the snapshot format never meant to produce.
- *
- * **Age-gated by `STALE_TEMP_AGE_MS`, not swept on name match alone.** A
- * concurrent writer's own in-flight temp matches the identical prefix, and
- * unlinking it out from under that writer would not stop its already-open
- * file descriptor from finishing the write — POSIX keeps the inode alive
- * past an `unlink` — but it removes the directory entry that writer's own
- * `renameSync` needs, so that writer's rename throws `ENOENT` for a file it
- * just finished writing (reviewer-reproduced probe). Skipping anything
- * young enough to plausibly still be in flight is what keeps this sweep
- * from being the exact bug it exists to prevent.
- *
- * Best-effort per entry: a name that matches but is gone by the time this
- * calls `statSync`/`unlinkSync` (another process racing the identical
- * cleanup, or the age check above simply losing a race with that writer's
- * own rename) is not this call's problem to report.
- */
-function sweepStaleTemp(dir: string, tempPrefix: string): void {
-  const cutoff = Date.now() - STALE_TEMP_AGE_MS;
-  for (const entry of readdirSync(dir)) {
-    if (!entry.startsWith(tempPrefix)) continue;
-    const entryPath = join(dir, entry);
-    try {
-      // Recent enough to plausibly still be in flight — unlinking it would
-      // strand that writer's own rename on ENOENT (function docs above).
-      if (statSync(entryPath).mtimeMs > cutoff) continue;
-      unlinkSync(entryPath);
-    } catch {
-      // Raced or already gone — see the function docs above.
-    }
-  }
-}
-
-/**
- * Writes `content` to `outPath` atomically: a temp file beside the target,
- * `fsync`ed, then `renameSync`. Assumes `outPath`'s directory already
- * exists — the caller (the CLI's `snapshot` command) owns creating
- * `.katra/`, the same division `openStore`/`store.ts` draws between "ensure
- * the directory" and "write the file".
- *
- * Every failure path — the open, the write, the `fsync`, or the rename —
- * removes the temp file before rethrowing, so nothing observable is ever
- * left behind except the target path in whatever state it was already in.
- */
-function writeAtomic(outPath: string, content: string): void {
-  const dir = dirname(outPath);
-  const tempPrefix = `.${basename(outPath)}.tmp-`;
-
-  sweepStaleTemp(dir, tempPrefix);
-
-  const tempPath = join(
-    dir,
-    `${tempPrefix}${String(process.pid)}-${String(Date.now())}-${Math.random().toString(36).slice(2)}`,
-  );
-
-  try {
-    const fd = openSync(tempPath, "w");
-    try {
-      writeFileSync(fd, content, "utf8");
-      // fsync before rename, not after: the artifact's stated purpose is
-      // surviving a dead machine, so its bytes must reach disk — not just
-      // the OS's write cache — before the rename that makes them visible at
-      // the target path.
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-    renameSync(tempPath, outPath);
-  } catch (error) {
-    try {
-      unlinkSync(tempPath);
-    } catch {
-      // Best-effort cleanup — openSync/writeFileSync themselves may have
-      // failed before the temp file ever existed, in which case
-      // unlinkSync's own ENOENT here is expected and not itself worth
-      // surfacing over the original error.
-    }
-    throw error;
-  }
 }
 
 /**
