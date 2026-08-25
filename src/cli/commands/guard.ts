@@ -22,7 +22,7 @@
  * agent-agnostic grounds, not because the JSON channel is somehow weaker or
  * overridable — it needs no per-agent stdout schema and takes no dependency
  * on the agent parsing katra's own output, where a JSON decision would. See
- * ADR-019's amendment for the full reasoning and its one known limit:
+ * ADR-019's amendment for the full reasoning and its known limits:
  * commander's own usage-error path also exits 2, for a genuinely malformed
  * invocation that never reaches this handler at all to be caught.
  */

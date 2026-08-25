@@ -44,5 +44,16 @@ the abstraction already anticipates.
 - The **session-end touchpoint requires `release --mine`** — `katra release` needs an explicit id
   and the hook has none to give, so a "release this worktree's claims" mode is a prerequisite of
   the touchpoint, not separate scope.
-- **Codex rides an experimental hooks flag** and an unpinned config location; its adapter is
-  best-effort against the shared schema, while Claude Code is the proven path.
+- **Amended 2026-08-25 — the experimental-flag framing is stale.** Codex hooks are
+  default-enabled since ~v0.133.0 (May 2026); `[features] hooks = true` / `codex_hooks` survive
+  only as accepted/deprecated config keys, and the config location is pinned (`.codex/hooks.json`,
+  project level — confirmed against the `openai/codex` Rust source itself, not a doc mirror, by
+  implementation task katra-9aw.70.10). What replaces the flag as the reason the adapter stays
+  best-effort is a verified **reliability** picture, not an unstable feature gate: the before-edit
+  matcher is the single tool `apply_patch` (Codex has no `Edit`/`Write`/`NotebookEdit`), the
+  `SessionEnd` hook's timeout is hard-capped at 3s server-side (Claude Code's is 10s), and open
+  upstream bugs hit katra's exact worktree-per-agent architecture — project `.codex/hooks.json`
+  can be silently misresolved when Codex runs inside a git worktree (openai/codex#27133, #23996),
+  and `PreToolUse` deny is not always reliably enforced for `apply_patch`, the before-edit
+  touchpoint itself (openai/codex#27833, #39872). Claude Code remains the proven path; Codex
+  remains best-effort — on sharper, source-confirmed grounds than the original flag framing gave.
