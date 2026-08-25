@@ -24,6 +24,8 @@ import {
   PRIORITIES,
 } from "./enums.js";
 import { isKatraException, KatraException } from "./errors.js";
+import type { Agent } from "./hooks/types.js";
+import { AGENTS } from "./hooks/types.js";
 
 function invalid(field: string, value: unknown, allowed: readonly (string | number)[]): never {
   throw new KatraException({
@@ -59,6 +61,33 @@ export function narrowEventType(value: unknown): EventType {
  */
 export function narrowNoteKind(value: unknown): NoteKind {
   return isNoteKind(value) ? value : invalid("note kind", value, NOTE_KINDS);
+}
+
+/** True when `value` is one of `hooks/types.ts`'s `AGENTS`. */
+function isAgent(value: unknown): value is Agent {
+  return typeof value === "string" && (AGENTS as readonly string[]).includes(value);
+}
+
+/**
+ * Narrows `install-hooks`'s `<agent>` argument against `core/hooks/types.ts`'s
+ * fixed `AGENTS` set — never an ad hoc switch, so a third adapter needs no
+ * second place taught the list.
+ *
+ * Refused as **usage**, not this file's usual `validation`: every other
+ * narrow* function here rejects a bad *value* for an otherwise well-shaped
+ * request (a `--kind` outside the enum is still a filter, just an empty
+ * one). `<agent>` instead selects which of two entirely different
+ * serialization targets `install-hooks` writes — closer to picking a
+ * subcommand than to filtering data — so an unrecognized one means the
+ * invocation itself doesn't make sense yet, the same category commander's
+ * own "missing required argument" refusals fall into.
+ */
+export function narrowAgent(value: unknown): Agent {
+  if (isAgent(value)) return value;
+  throw new KatraException({
+    code: "usage",
+    message: `agent must be one of ${AGENTS.join(", ")} — got ${JSON.stringify(value)}`,
+  });
 }
 
 export function narrowPriority(value: unknown): Priority {

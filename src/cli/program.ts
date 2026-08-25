@@ -21,6 +21,7 @@ import { registerDelete } from "./commands/delete.js";
 import { registerDep } from "./commands/dep.js";
 import { registerGuard } from "./commands/guard.js";
 import { registerInit } from "./commands/init.js";
+import { registerInstallHooks } from "./commands/install-hooks.js";
 import { registerLifecycle } from "./commands/lifecycle.js";
 import { registerLink } from "./commands/link.js";
 import { registerList } from "./commands/list.js";
@@ -249,6 +250,7 @@ export function createProgram(options: CreateProgramOptions = {}): Command {
   registerClaim(program, context);
   registerRelease(program, context);
   registerGuard(program, context);
+  registerInstallHooks(program, context);
   registerMigrate(program, context);
   registerSearch(program, context);
   registerRecent(program, context);

@@ -59,9 +59,17 @@ import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
  * `feature.test.ts`'s "--json across every command" test pins: every command
  * that returns data emits a parseable document, even on a path that would
  * otherwise have nothing to say).
+ *
+ * `"hooks-no-store"` (F11 T7, `katra-9aw.70.11`) is `install-hooks`'s own —
+ * installed hooks call `katra board --digest`/`katra guard`/`katra release
+ * --mine` at every session boundary, and every one of those errors with no
+ * explanation in a repository that was never `katra init`ed. `install-hooks`
+ * never opens the store itself (it only checks whether the database file
+ * exists), so this rides the same non-fatal channel `guard-failed-open`
+ * does rather than refusing the install outright.
  */
 export interface StoreWarning {
-  readonly code: "ambient-git-dir" | "guard-failed-open";
+  readonly code: "ambient-git-dir" | "guard-failed-open" | "hooks-no-store";
   readonly message: string;
 }
 
