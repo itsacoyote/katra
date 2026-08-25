@@ -18,10 +18,51 @@ worktrees silently own the same work.
 
 ## Decision
 
-`katra guard` enforces at the **task level**. It determines the caller worktree's in-progress
-task from claim/release event history, then denies the edit iff that task is currently held by a
-**different, live** worktree. It reuses `claims` + `events` + `presence`; **no schema change**.
-The check is a single cheap indexed read, well under the <1s hook budget, and never writes.
+`katra guard` enforces at the **task level**. It walks the caller worktree's claim/release event
+history to find every task it was ever displaced from that some other worktree still holds —
+**amended 2026-08-25: plural, not singular** — the original "the caller worktree's in-progress
+task" reading admits only one candidate task, when the real tenure rule tracks every displaced
+tenure and reports the most recent one whose current holder is still live. It denies the edit iff
+**any** such tenure remains live-held and the worktree has not claimed something else since being
+displaced from it (re-coordination); it allows in every other case, holding nothing included. It
+reuses `claims` + `events` + `presence`; **no schema change**. The check is **amended 2026-08-25:
+K indexed reads, bounded by the active foreign-claim count** — not the single read originally
+decided — one row read per task `claims` currently shows held by another worktree, each still
+well under the <1s hook budget. It **never mutates `claims`/`tasks`/`events`** — amended
+2026-08-25: not "never writes" outright. The ADR-011 presence heartbeat still rides along on
+every `openStore` a caller has to make before it can hand this function a store to read, bumped
+at most once per `PRESENCE_FRESH_MS` window; that is a property of opening the store, not of this
+check, which itself opens no transaction and appends no event.
+
+### Deny signalling — added 2026-08-25
+
+Deny is scoped to the confirmed-takeover arm only: a live displaced tenure, successfully read.
+Every failure — no store (`init` never ran), a locked or corrupt database, an in-handler usage
+refusal (a malformed `--liveness` value), any other exception — is caught by the CLI and reads as
+allow, never deny. This is fail-open by construction, within the binary, across every agent —
+safe even where a foreign agent treats any nonzero exit as blocking.
+
+The CLI signals a deny with **exit 2** plus a sanitized one-line reason on stderr — a deliberate,
+documented divergence from ADR-006 (`next` answers a legitimate negative with exit 0, the verdict
+carried entirely in its payload). Guard cannot follow that precedent: Claude Code's PreToolUse
+hook has exactly one signal that blocks a tool call **unconditionally**, in every permission mode
+including `bypassPermissions` — exit 2, with stderr fed back to the agent as the blocking reason.
+The grounds are **agent-agnosticism, not strength**: exit 2 needs no per-agent stdout shaping and
+takes no dependency on the agent parsing katra's own output, which is exactly what let an earlier
+draft's per-agent `--hook <agent>` flag go. (That earlier draft also justified exit 2 by claiming
+the alternative — a JSON `permissionDecision` on stdout — is "overridable" by permission
+allow-rules and permissive modes; that claim is wrong, current docs show a JSON deny blocks even
+under `bypassPermissions`. The correction does not change the conclusion: exit 2 is still
+preferred, because it is agent-agnostic and the JSON channel is not, not because the JSON channel
+is weak.)
+
+**Known limit.** Commander's own usage-error path also exits 2, for a genuinely malformed
+invocation (an unknown flag or command) — that path never reaches guard's handler at all, so it
+cannot be caught and turned into allow. A hand-edited hook line, or an older binary invoked
+before `guard` existed, therefore blocks loudly rather than failing open — the same
+self-correcting known limit version skew already carries elsewhere, distinguishable from a real
+deny only by stderr content. Deliberately not silenced by a shell `|| true` wrapper around the
+hook command, which would disarm every real deny along with it.
 
 ## Alternatives considered
 
@@ -35,9 +76,15 @@ The check is a single cheap indexed read, well under the <1s hook budget, and ne
 
 ## Consequences
 
-- Guard is a **no-op when the worktree holds no claim** — editing without having claimed anything
-  is not blocked. This is consistent with Tier-0 being advisory; claiming remains the agent's
-  discipline, and guard only enforces the *takeover* case.
+- **Amended 2026-08-25 — inverted.** The original claim here ("guard is a no-op when the
+  worktree holds no claim") is false under the bounded tenure rule above: a worktree displaced
+  from a task, holding nothing since, is exactly the case that must deny — "holds no claim" is
+  true of it and denial fires anyway. The real no-op condition is narrower: guard allows whenever
+  there is no live, un-re-coordinated displaced tenure — holding nothing with no history of ever
+  being displaced, holding exactly what was always held, having claimed something else *since*
+  the displacement (re-coordination), or the displacing worktree having gone stale. Claiming
+  remains the agent's own discipline for starting work; guard's only job is catching a takeover
+  the worktree never noticed, whether or not it currently holds anything at all.
 - Two agents on **different** tasks that happen to touch the same file are out of scope — that is
   a task-decomposition smell, not katra's to police.
 - Takeover detection reads the **event log**, which is idiomatic (the event stream is katra's
