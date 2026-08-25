@@ -12,6 +12,7 @@ import { isKatraException } from "../../src/core/errors.js";
 import { CLAUDE_HOOK_ENTRIES, claudeSettingsPath } from "../../src/core/hooks/adapters/claude.js";
 import { CODEX_HOOK_ENTRIES, codexHooksPath } from "../../src/core/hooks/adapters/codex.js";
 import { mergeHooks, removeHooks } from "../../src/core/hooks/merge.js";
+import type { HookEntry } from "../../src/core/hooks/types.js";
 
 describe("core hooks: merge/remove", () => {
   it("merges the three katra hook groups into an empty settings object", () => {
@@ -30,6 +31,12 @@ describe("core hooks: merge/remove", () => {
         hooks: [{ type: "command", command: "katra release --mine", timeout: 10 }],
       },
     ]);
+
+    // Two independent "build from empty" calls must be byte-identical, not
+    // merely deep-equal — key order included (module docs' determinism
+    // guarantee, which katra-9aw.70.11's "byte-identical file" criterion
+    // depends on).
+    expect(JSON.stringify(settings)).toBe(JSON.stringify(mergeHooks(undefined, "claude").settings));
   });
 
   it("preserves pre-existing user hooks and unrelated settings keys", () => {
@@ -62,6 +69,35 @@ describe("core hooks: merge/remove", () => {
 
     expect(second.changed).toBe(false);
     expect(second.settings).toEqual(first.settings);
+
+    // A coincidental matcher collision — a user hook already scoped to the
+    // exact same matcher text katra's own entry uses — folds into one
+    // group on the first merge, and must also settle to a stable,
+    // changed:false state on a second merge over its own output.
+    const collision = JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Edit|Write|NotebookEdit",
+            hooks: [{ type: "command", command: "./format.sh" }],
+          },
+        ],
+      },
+    });
+    const collisionFirst = mergeHooks(collision, "claude");
+    expect(collisionFirst.changed).toBe(true);
+    expect(collisionFirst.settings.hooks?.PreToolUse).toEqual([
+      {
+        matcher: "Edit|Write|NotebookEdit",
+        hooks: [
+          { type: "command", command: "./format.sh" },
+          { type: "command", command: "katra guard" },
+        ],
+      },
+    ]);
+    const collisionSecond = mergeHooks(JSON.stringify(collisionFirst.settings), "claude");
+    expect(collisionSecond.changed).toBe(false);
+    expect(collisionSecond.settings).toEqual(collisionFirst.settings);
   });
 
   it("normalizes a hand-edited katra entry back to canonical without duplicating it", () => {
@@ -87,6 +123,85 @@ describe("core hooks: merge/remove", () => {
     // was ever created alongside the normalized one.
     const again = mergeHooks(JSON.stringify(settings), "claude");
     expect(again.changed).toBe(false);
+  });
+
+  it("still normalizes a drifted variant of the entry's own subcommand", () => {
+    // Same drift-normalization property as above, on a different touchpoint
+    // (session-start / `board`, not before-edit / `guard`) — proving the
+    // subcommand-based recognition (not the touchpoint) is what does the
+    // work.
+    const drifted = JSON.stringify({
+      hooks: {
+        SessionStart: [
+          { hooks: [{ type: "command", command: "katra board --digest --legacy-flag" }] },
+        ],
+      },
+    });
+
+    const { settings, changed } = mergeHooks(drifted, "claude");
+
+    expect(changed).toBe(true);
+    expect(settings.hooks?.SessionStart).toEqual([
+      { hooks: [{ type: "command", command: "katra board --digest" }] },
+    ]);
+  });
+
+  it("preserves a user's unrelated katra-command hook at the same touchpoint", () => {
+    // "katra ready" is not one of the three entries this feature installs —
+    // a broad `command.startsWith("katra ")` recognition rule would delete
+    // it as if it were a drifted `katra guard`. Recognition is scoped to
+    // the entry's own subcommand, so it must survive untouched.
+    const existing = JSON.stringify({
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            hooks: [{ type: "command", command: "katra ready --json > audit.log" }],
+          },
+        ],
+      },
+    });
+
+    const { settings, changed } = mergeHooks(existing, "claude");
+
+    expect(changed).toBe(true);
+    expect(settings.hooks?.PreToolUse).toEqual([
+      { matcher: "Bash", hooks: [{ type: "command", command: "katra ready --json > audit.log" }] },
+      { matcher: "Edit|Write|NotebookEdit", hooks: [{ type: "command", command: "katra guard" }] },
+    ]);
+  });
+
+  it("preserves the user's group order when re-merging after a user appended their own group", () => {
+    // A fully-merged settings object (all three touchpoints already
+    // canonical) with a user's own group appended to PreToolUse afterward —
+    // re-merging must leave every touchpoint, PreToolUse's group order
+    // included, exactly as it was.
+    const alreadyMergedPlusUserGroup = JSON.stringify({
+      hooks: {
+        SessionStart: [{ hooks: [{ type: "command", command: "katra board --digest" }] }],
+        PreToolUse: [
+          {
+            matcher: "Edit|Write|NotebookEdit",
+            hooks: [{ type: "command", command: "katra guard" }],
+          },
+          { matcher: "Bash", hooks: [{ type: "command", command: "./lint.sh" }] },
+        ],
+        SessionEnd: [
+          {
+            matcher: "logout|prompt_input_exit|other",
+            hooks: [{ type: "command", command: "katra release --mine", timeout: 10 }],
+          },
+        ],
+      },
+    });
+
+    const { settings, changed } = mergeHooks(alreadyMergedPlusUserGroup, "claude");
+
+    expect(changed).toBe(false);
+    expect(settings.hooks?.PreToolUse).toEqual([
+      { matcher: "Edit|Write|NotebookEdit", hooks: [{ type: "command", command: "katra guard" }] },
+      { matcher: "Bash", hooks: [{ type: "command", command: "./lint.sh" }] },
+    ]);
   });
 
   it("removes only katra's entries and leaves user hooks intact", () => {
@@ -115,7 +230,14 @@ describe("core hooks: merge/remove", () => {
   it("remove changes nothing when no katra entries are present", () => {
     const withOtherHooks = JSON.stringify({
       hooks: {
-        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "./lint.sh" }] }],
+        PreToolUse: [
+          {
+            matcher: "Bash",
+            description: "runs the repo's own lint hook",
+            hooks: [{ type: "command", command: "./lint.sh" }],
+          },
+          { matcher: "AlreadyEmpty", hooks: [] },
+        ],
       },
     });
     const result = removeHooks(withOtherHooks, "claude");
@@ -146,6 +268,23 @@ describe("core hooks: merge/remove", () => {
     }
     expect(isKatraException(caughtOnRemove)).toBe(true);
   });
+
+  it("raises a typed error on a malformed hook handler", () => {
+    const malformedHandler = JSON.stringify({
+      hooks: {
+        PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command" }] }],
+      },
+    });
+
+    let caught: unknown;
+    try {
+      mergeHooks(malformedHandler, "claude");
+    } catch (error) {
+      caught = error;
+    }
+    expect(isKatraException(caught)).toBe(true);
+    expect(isKatraException(caught) && caught.detail.code).toBe("validation");
+  });
 });
 
 describe("core hooks: claude adapter", () => {
@@ -168,8 +307,15 @@ describe("core hooks: claude adapter", () => {
       handler: { type: "command", command: "katra release --mine" },
     });
 
-    expect(claudeSettingsPath("/repo", false)).toBe("/repo/.claude/settings.json");
-    expect(claudeSettingsPath("/repo", true)).toBe("/repo/.claude/settings.local.json");
+    // Windows renders `path.join` with `\` separators — normalize before
+    // comparing against the POSIX-style expectation (test/index.test.ts's
+    // own precedent).
+    expect(claudeSettingsPath("/repo", false).replaceAll("\\", "/")).toBe(
+      "/repo/.claude/settings.json",
+    );
+    expect(claudeSettingsPath("/repo", true).replaceAll("\\", "/")).toBe(
+      "/repo/.claude/settings.local.json",
+    );
   });
 
   it("restricts SessionEnd to the logout, prompt-input-exit, and other reasons", () => {
@@ -209,8 +355,15 @@ describe("core hooks: codex adapter", () => {
       event: "SessionEnd",
       handler: { type: "command", command: "katra release --mine", timeout: 3 },
     });
+    // Codex only ever reports SessionEnd's reason as "other" (no
+    // clear/resume/logout vocabulary) — a matcher naming values Codex never
+    // sends would be an inert alternative, so this entry installs none.
+    const codexSessionEnd: HookEntry | undefined = CODEX_HOOK_ENTRIES.find(
+      (entry) => entry.touchpoint === "session-end",
+    );
+    expect(codexSessionEnd?.matcher).toBeUndefined();
 
-    expect(codexHooksPath("/repo")).toBe("/repo/.codex/hooks.json");
+    expect(codexHooksPath("/repo").replaceAll("\\", "/")).toBe("/repo/.codex/hooks.json");
 
     // The merge/remove algorithm is generic over the agent — prove it here
     // rather than duplicating every claude-side merge test for codex too.

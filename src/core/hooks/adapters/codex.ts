@@ -47,19 +47,25 @@
  *
  * Two confirmed divergences from the Claude adapter, both load-bearing:
  *
- * 1. **SessionEnd's reason is always `"other"`.** Codex hardcodes it
+ * 1. **SessionEnd's reason is always `"other"`, so this block installs no
+ *    matcher at all.** Codex hardcodes it
  *    (`codex-rs/hooks/src/events/session_end.rs`'s
  *    `SESSION_END_REASON: &str = "other"`) — there is no per-cause
- *    `clear`/`resume`/`logout` vocabulary at all. This block reuses the
- *    Claude adapter's allow-list matcher text
- *    (`logout|prompt_input_exit|other`) for schema parity and because it
- *    is harmless — `"other"` is one of its alternatives, so it always
- *    matches — but the `clear`/`resume` exclusion it encodes protects
- *    against nothing on Codex: `SessionEnd` fires on genuine session
- *    teardown (process exit, or an app-server thread unloading after 30
- *    idle minutes per `codex-rs/app-server/README.md`), never on an
- *    in-session reset, so the ADR-012 resume-after-clear hazard the
- *    exclusion exists for has no Codex analogue to begin with.
+ *    `clear`/`resume`/`logout` vocabulary to filter on. Reusing the Claude
+ *    adapter's allow-list matcher text (`logout|prompt_input_exit|other`)
+ *    would name three values Codex never sends alongside the one it always
+ *    does — exactly the kind of inert alternative this module drops
+ *    `MultiEdit` for on the Claude side (`adapters/claude.ts`'s own
+ *    docs), so it is dropped here too rather than kept for schema parity.
+ *    Omitting the matcher matches every `SessionEnd` firing, which is
+ *    functionally identical to matching `"other"` explicitly since that
+ *    is the only value Codex ever sends. The `clear`/`resume` exclusion
+ *    the Claude adapter's matcher encodes protects against nothing here
+ *    either way: `SessionEnd` fires on genuine session teardown (process
+ *    exit, or an app-server thread unloading after 30 idle minutes per
+ *    `codex-rs/app-server/README.md`), never on an in-session reset, so
+ *    the ADR-012 resume-after-clear hazard has no Codex analogue to begin
+ *    with.
  * 2. **SessionEnd's timeout is hard-capped at 3s, not 10s.** Codex clamps
  *    every `SessionEnd` hook's `timeout` to `[1, 3]` seconds
  *    (`codex-rs/hooks/src/engine/discovery.rs`'s `normalize_command_hook`,
@@ -106,7 +112,6 @@ export const CODEX_HOOK_ENTRIES = [
   {
     touchpoint: "session-end",
     event: "SessionEnd",
-    matcher: "logout|prompt_input_exit|other",
     handler: { type: "command", command: "katra release --mine", timeout: 3 },
   },
 ] as const satisfies readonly HookEntry[];

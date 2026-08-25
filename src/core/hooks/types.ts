@@ -91,11 +91,23 @@ export interface HookEntry {
 }
 
 /**
- * The prefix `merge.ts` recognizes a hook handler as katra's own by —
- * checked against a handler's `command` string, never a metadata key:
- * neither agent's schema reliably tolerates a foreign key riding along on a
- * handler object (epic Research synthesis, reuse map: "katra's entries are
- * recognized by their command string ... agent settings schemas don't
- * reliably tolerate foreign metadata keys").
+ * The first whitespace-separated token of every command katra installs.
+ * `merge.ts` recognizes a hook handler as katra's own **for a given
+ * entry** by comparing this token plus the *second* token (the
+ * subcommand — `guard`, `board`, `release`) against the entry's own
+ * canonical command — never a metadata key (neither agent's schema
+ * reliably tolerates a foreign key riding along on a handler object), and
+ * deliberately not a broad `command.startsWith("katra ")` prefix either: a
+ * user's own hook that happens to invoke a *different* katra subcommand at
+ * the same touchpoint (e.g. `katra ready --json > audit.log` wired to
+ * `SessionStart`, where katra's own entry runs `katra board --digest`)
+ * must survive untouched, which a bare prefix match would have destroyed
+ * (senior review on `katra-9aw.70.10`'s first commit, confirmed
+ * empirically). A user hook that happens to share the *same* subcommand
+ * as katra's own entry at the same touchpoint is still recognized and
+ * normalized to canonical — deliberate, not a gap: two `katra guard`
+ * invocations wired to the identical touchpoint cannot be told apart from
+ * a drifted katra entry, and treating the second one as "someone else's
+ * hook" would leave both running redundantly forever.
  */
-export const KATRA_COMMAND_PREFIX = "katra ";
+export const KATRA_COMMAND_TOKEN = "katra";
