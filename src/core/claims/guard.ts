@@ -15,6 +15,12 @@
  *    string — see that function's docs for why) names this worktree, and
  *    whose own `actor` names a *different* one. A self-release is voluntary
  *    and never counts, whatever displaced this worktree from other tasks.
+ *    The scan walks this worktree's **full** event history on the task, not
+ *    only its displacements: a `claimed` or a self-`released` event this
+ *    worktree authored *after* a displacement settles that tenure — it took
+ *    the task back and gave it up on its own — so a still-older displacement
+ *    is what counts, or none at all if nothing displaced it since. See
+ *    {@link findDisplacement}'s own docs for the scan and the bug this fixed.
  * 2. **Re-coordination gate.** If this worktree currently holds *any* claim
  *    ({@link claimsHeldBy}) whose `claimedAt` is at or after the most recent
  *    displaced tenure's event time, it has re-coordinated since — allow. A
@@ -129,49 +135,74 @@ interface DisplacedTenure {
 type EventRow = Parameters<typeof rowToEvent>[0];
 
 /**
- * Every event on `taskId` that names a `prior_actor` at all — newest first
- * via the `entity_id` index.
+ * Every event ever recorded against `taskId` — newest first via the
+ * `entity_id` index.
  *
- * No `type = 'released'` filter alongside it: `settleClaim` (`claims/repo.ts`)
- * is the only place that ever writes `prior_actor`, and it does so only on a
- * `released` event ({@link ../events/types.js!StoredEvent.priorActor}'s own
- * docs). A non-null `prior_actor` already implies `type = 'released'`, so
- * pinning both would filter on the same fact twice.
+ * **Widened from a `prior_actor IS NOT NULL` filter (fixed: an earlier
+ * revision missed the caller's own later events).** That filter finds only
+ * events naming a displaced actor, so it never sees this worktree's own
+ * *later* `claimed`/self-`released` events on the same task — a real
+ * sequence this missed: A claims X, B force-takes X, A force-takes X back,
+ * A releases X voluntarily, B claims X. A's own history shows it re-acquired
+ * X and gave it up on its own, but the filtered query only ever found the
+ * old B-took-X-from-A displacement and reported A as still displaced.
+ * {@link findDisplacement} needs the full history to tell "displaced and
+ * never returned" apart from "took it back and gave it up voluntarily."
  */
-const SELECT_DISPLACEMENT_EVENTS = `
+const SELECT_TASK_EVENTS = `
   SELECT * FROM events
-   WHERE entity_id = ? AND prior_actor IS NOT NULL
+   WHERE entity_id = ?
    ORDER BY id DESC
 `;
 
 /**
- * The most recent event on `taskId` that displaced `worktree` — a `released`
- * event whose `prior_actor` names `worktree` and whose own `actor` names a
- * different one — or `null` when `worktree` was never displaced from this
- * task.
+ * The most recent event on `taskId` that settles `worktree`'s tenure one way
+ * or the other, or `null` when neither ever happened:
  *
- * Rows arrive newest-first (`ORDER BY id DESC`), so the first match found is
- * already the most recent — no separate ranking step needed for the
- * single-task case; {@link mostRecentTenure} ranks *across* tasks.
+ * - a **displacement** — a `released` event whose `prior_actor` names
+ *   `worktree` and whose own `actor` names someone else — reported back so
+ *   the caller can weigh its rival's liveness; or
+ * - a **settlement** — a `claimed` event, or a self-`released` event (one
+ *   with no `prior_actor` — {@link ../claims/repo.js!settleClaim} only ever
+ *   omits it on a self-release), authored by `worktree` itself — which
+ *   means `worktree` re-acquired the task after being displaced and then
+ *   gave it up on its own; it is not currently a displaced tenant of it even
+ *   though `claims` now shows someone else holding it.
+ *
+ * Rows arrive newest-first (`ORDER BY id DESC`); this walks them and stops
+ * at the first match of *either* kind, which is equivalent to computing "the
+ * newest displacement naming `worktree`" and "the newest settlement authored
+ * by `worktree`" separately and taking whichever is more recent — the scan
+ * meets the more recent one first, by construction. No separate ranking step
+ * needed for the single-task case; {@link mostRecentTenure} ranks *across*
+ * tasks, over whatever this returns.
  */
 function findDisplacement(
   store: OpenStore,
   taskId: string,
   worktree: string,
 ): { readonly eventId: number; readonly displacedAt: string } | null {
-  const rows = store.db.prepare(SELECT_DISPLACEMENT_EVENTS).all(taskId) as EventRow[];
+  const rows = store.db.prepare(SELECT_TASK_EVENTS).all(taskId) as EventRow[];
   for (const row of rows) {
     const event = rowToEvent(row);
-    // prior_actor is non-null by the WHERE clause; narrowed again here
-    // because rowToEvent's return type still admits null on every other type.
+
+    if (worktreeFromActor(event.actor) === worktree) {
+      // An event this worktree authored itself: a claim, or a voluntary
+      // release of its own claim, settles its tenure on this task — see
+      // this function's own docs.
+      if (event.type === "claimed" || (event.type === "released" && event.priorActor === null)) {
+        return null;
+      }
+      continue;
+    }
+
+    // Someone else's event: only a `released` event that displaced
+    // `worktree` is relevant. A non-null `prior_actor` already implies
+    // `type = 'released'` (settleClaim is the only place that ever writes
+    // it, and only on a `released` event), so pinning both would filter on
+    // the same fact twice.
     if (event.priorActor === null) continue;
     if (worktreeFromActor(event.priorActor) !== worktree) continue;
-    // Self-release never counts — belt-and-braces, not the only thing
-    // excluding it: settleClaim already nulls prior_actor on a self-release
-    // (claims/repo.ts), so a genuine self-release never even reaches this
-    // loop. This guards a row that violates that invariant, not the ordinary
-    // path.
-    if (worktreeFromActor(event.actor) === worktree) continue;
     return { eventId: event.id, displacedAt: event.createdAt };
   }
   return null;

@@ -120,10 +120,8 @@ the epic (unlike F10's).
 - **`writeAtomic` gained mode preservation this cycle** (`src/core/fs.ts`, extracted from
   `snapshot/export.ts` under task `.9`, mode preservation landing under task `.11`'s security
   review rather than `.9` itself): a rewrite now preserves an existing target's permission
-  bits instead of silently loosening them to the umask-default create mode; the optional
-  `{ mode }` option applies only when the target does not exist yet. This is a behavior change
-  that also affects the pre-existing `snapshot` caller — a user-tightened `.katra/snapshot.jsonl`
-  mode now survives a re-snapshot; a fresh file's mode is unaffected. Covered by
-  `fs.test.ts` (core) — "preserves the target file's mode across a rewrite",
-  "applies options.mode only when the target does not exist yet" (both POSIX-gated: exact
-  permission bits are meaningless on Windows).
+  bits instead of silently loosening them to the umask-default create mode. This is a behavior
+  change that also affects the pre-existing `snapshot` caller — a user-tightened
+  `.katra/snapshot.jsonl` mode now survives a re-snapshot; a fresh file's mode is unaffected.
+  Covered by `fs.test.ts` (core) — "preserves the target file's mode across a rewrite"
+  (POSIX-gated: exact permission bits are meaningless on Windows).

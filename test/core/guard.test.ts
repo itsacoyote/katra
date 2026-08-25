@@ -321,6 +321,34 @@ describe("guardCheck", () => {
     }
   });
 
+  it("allows after the worktree re-takes the task back and releases it voluntarily", () => {
+    const id = seedTask(fixture.store, { title: "round trip" });
+    claimTask(fixture.store, id); // A claims X
+
+    const rival = openAs(fixture.repo.dir, RIVAL_A);
+    try {
+      releaseTask(rival, id, { force: true }); // B force-takes X from A
+      claimTask(rival, id);
+    } finally {
+      rival.close();
+    }
+
+    releaseTask(fixture.store, id, { force: true }); // A force-takes X back from B
+    claimTask(fixture.store, id);
+    releaseTask(fixture.store, id); // A releases X voluntarily
+
+    const rival2 = openAs(fixture.repo.dir, RIVAL_A);
+    try {
+      claimTask(rival2, id); // B claims X, ordinarily — it is unclaimed
+    } finally {
+      rival2.close();
+    }
+
+    // A's own history shows it re-acquired X and gave it up on its own — the
+    // old, never-notices displacement by B is settled, not still live.
+    expect(guardCheck(fixture.store)).toEqual({ verdict: "allow" });
+  });
+
   it("honors a caller-supplied liveness floor", () => {
     const id = seedTask(fixture.store, { title: "taken over" });
     claimTask(fixture.store, id);

@@ -41,6 +41,17 @@ the abstraction already anticipates.
 - `install-hooks` **must merge, not overwrite**, and must **tag its own entries** so a re-run is a
   no-op and `--remove` strips only katra's hooks. That merge/identify logic is the real work of
   the install command and is fully unit-testable.
+  **Amended 2026-08-25 — "tag" is not a metadata field.** Implementation task
+  `katra-9aw.70.10` deliberately rejected a marker riding along on the handler object: neither
+  Claude Code's nor Codex's hook schema reliably tolerates one surviving a round-trip.
+  Recognition is instead the canonical command token pair — a handler is katra's own for a given
+  touchpoint iff its command's first two whitespace-separated tokens are `katra`
+  (`KATRA_COMMAND_TOKEN`) and that touchpoint's own subcommand (`core/hooks/merge.ts`'s
+  `isKatraHandlerForEntry`). Correct-by-construction for anything `install-hooks` itself ever
+  writes, but it creates a limit no metadata tag would have: a hand-edited command like
+  `/usr/local/bin/katra guard` or `npx katra guard` is not recognized as katra's own, so the next
+  `install-hooks` run adds a duplicate canonical entry beside it instead of normalizing it, and
+  `--remove` leaves the hand-edited one behind — documented in `AGENTS.md`'s Tier-1 caveats.
 - The **session-end touchpoint requires `release --mine`** — `katra release` needs an explicit id
   and the hook has none to give, so a "release this worktree's claims" mode is a prerequisite of
   the touchpoint, not separate scope.
@@ -51,7 +62,8 @@ the abstraction already anticipates.
   implementation task katra-9aw.70.10). What replaces the flag as the reason the adapter stays
   best-effort is a verified **reliability** picture, not an unstable feature gate: the before-edit
   matcher is the single tool `apply_patch` (Codex has no `Edit`/`Write`/`NotebookEdit`), the
-  `SessionEnd` hook's timeout is hard-capped at 3s server-side (Claude Code's is 10s), and open
+  `SessionEnd` hook's timeout is hard-capped at 3s server-side (katra writes 10s for Claude Code,
+  whose command-handler default is 600s), and open
   upstream bugs hit katra's exact worktree-per-agent architecture — project `.codex/hooks.json`
   can be silently misresolved when Codex runs inside a git worktree (openai/codex#27133, #23996),
   and `PreToolUse` deny is not always reliably enforced for `apply_patch`, the before-edit

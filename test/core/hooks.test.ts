@@ -248,6 +248,22 @@ describe("core hooks: merge/remove", () => {
     const result2 = removeHooks(noHooksAtAll, "claude");
     expect(result2.changed).toBe(false);
     expect(result2.settings).toEqual({ model: "opus" });
+
+    // An empty `hooks` object katra never wrote — the pre-fix bug deleted
+    // `hooks` entirely here, reporting a change that never happened.
+    const emptyHooksObject = JSON.stringify({ hooks: {} });
+    const result3 = removeHooks(emptyHooksObject, "claude");
+    expect(result3.changed).toBe(false);
+    expect(result3.settings).toEqual({ hooks: {} });
+
+    // An empty array under one of katra's own event keys, also never
+    // written by katra — the pre-fix bug deleted this key too, on the same
+    // "ended up empty" conflation `pruneKatraHandlers`'s own `removedAny`
+    // now distinguishes from a genuine prune.
+    const emptyEventContainer = JSON.stringify({ hooks: { SessionStart: [] } });
+    const result4 = removeHooks(emptyEventContainer, "claude");
+    expect(result4.changed).toBe(false);
+    expect(result4.settings).toEqual({ hooks: { SessionStart: [] } });
   });
 
   it("raises a typed error on malformed settings JSON", () => {

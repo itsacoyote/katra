@@ -213,12 +213,23 @@ interface PruneResult {
    * produces on its own.
    */
   readonly emptiedAt: number | undefined;
+  /**
+   * Whether any handler was actually filtered out of any group — `false`
+   * when `groups` held nothing `isKatraHandlerForEntry` recognized,
+   * including when `groups` was already empty or already all
+   * already-empty containers. {@link applyRemove} uses this to leave a
+   * no-katra event untouched rather than "cleaning up" an empty container
+   * katra never wrote — see that function's own docs for the bug this
+   * fixed.
+   */
+  readonly removedAny: boolean;
 }
 
 /** Strips every handler `isKatraHandlerForEntry` recognizes for `entry` out of `groups`. Never mutates its input. */
 function pruneKatraHandlers(groups: readonly HookMatcherGroup[], entry: HookEntry): PruneResult {
   const pruned: HookMatcherGroup[] = [];
   let emptiedAt: number | undefined;
+  let removedAny = false;
   for (const group of groups) {
     const keptHooks = group.hooks.filter((hook) => !isKatraHandlerForEntry(hook, entry));
     if (keptHooks.length === group.hooks.length) {
@@ -227,6 +238,7 @@ function pruneKatraHandlers(groups: readonly HookMatcherGroup[], entry: HookEntr
       pruned.push(group);
       continue;
     }
+    removedAny = true;
     if (keptHooks.length === 0) {
       // Everything in this group was katra's own handler for `entry` — the
       // group is now empty, so it is dropped, and its position recorded so
@@ -238,7 +250,7 @@ function pruneKatraHandlers(groups: readonly HookMatcherGroup[], entry: HookEntr
     }
     pruned.push({ ...group, hooks: keptHooks });
   }
-  return { groups: pruned, emptiedAt };
+  return { groups: pruned, emptiedAt, removedAny };
 }
 
 // ---------------------------------------------------------------------------
@@ -313,40 +325,70 @@ export function mergeHooks(existing: string | undefined, agent: Agent): HookMerg
 // Remove
 // ---------------------------------------------------------------------------
 
-/** Prunes katra's entries out of every one of `agent`'s three events; an event or the whole `hooks` object that ends up empty is deleted rather than left as inert clutter. Untouched groups and events (nothing of `agent`'s ever present) pass through unchanged. */
+/** What {@link applyRemove} hands back. */
+interface RemoveResult {
+  /** `existingHooks` with `agent`'s katra entries stripped — `undefined` when `existingHooks` itself was. */
+  readonly hooks: HookEventMap | undefined;
+  /** Whether any of `agent`'s katra handlers were actually found and removed anywhere. */
+  readonly removedAny: boolean;
+}
+
+/**
+ * Prunes katra's entries out of every one of `agent`'s three events; an
+ * event that ends up with zero groups is deleted rather than left as inert
+ * clutter. Untouched groups and events — nothing of `agent`'s ever present,
+ * **including an event key already holding an empty array** (`{"hooks":
+ * {"SessionStart": []}}`, a container katra never wrote) — pass through
+ * unchanged, by reference: {@link pruneKatraHandlers}'s own `removedAny`
+ * flag is what tells "genuinely pruned something" apart from "there was
+ * nothing here to prune," which the pre-fix version conflated — an event
+ * key holding zero groups looked the same as one just pruned down to zero,
+ * and both got deleted, turning an untouched empty container into a
+ * reported change. {@link removeHooks} uses the aggregate `removedAny` the
+ * same way, one level up, for `hooks` itself.
+ */
 function applyRemove(
   existingHooks: HookEventMap | undefined,
   entries: readonly HookEntry[],
-): HookEventMap | undefined {
-  if (!existingHooks) return undefined;
+): RemoveResult {
+  if (!existingHooks) return { hooks: undefined, removedAny: false };
   const result: Record<string, readonly HookMatcherGroup[]> = { ...existingHooks };
+  let removedAny = false;
   for (const entry of entries) {
     const groups = result[entry.event];
     if (!groups) continue;
-    const { groups: pruned } = pruneKatraHandlers(groups, entry);
+    const { groups: pruned, removedAny: prunedThisEvent } = pruneKatraHandlers(groups, entry);
+    if (!prunedThisEvent) continue;
+    removedAny = true;
     if (pruned.length === 0) {
       delete result[entry.event];
     } else {
       result[entry.event] = pruned;
     }
   }
-  return result;
+  return { hooks: result, removedAny };
 }
 
 /**
  * Removes `agent`'s katra entries from `existing` settings text, leaving
  * every other hook and every unrelated top-level key untouched. A settings
  * object that never had `hooks` at all, or whose `hooks` never held any
- * katra entry for `agent`, round-trips to a deep-equal result — `changed`
- * is `false`, the same "prove it by content" rule {@link mergeHooks} uses.
+ * katra entry for `agent` — however that "never held any" is spelled: absent
+ * entirely, an empty `{}`, or an empty array under one of katra's own event
+ * keys — round-trips to a deep-equal result — `changed` is `false`, the same
+ * "prove it by content" rule {@link mergeHooks} uses. `settings.hooks` is
+ * only ever deleted when a katra entry was genuinely found and removed and
+ * nothing of `hooks` is left afterward — never merely because the result
+ * happens to have zero keys, which an already-empty `hooks` object produces
+ * without this function having changed anything at all.
  */
 export function removeHooks(existing: string | undefined, agent: Agent): HookMergeResult {
   const original = parseSettings(existing);
-  const newHooks = applyRemove(original.hooks, ENTRIES_BY_AGENT[agent]);
+  const { hooks: newHooks, removedAny } = applyRemove(original.hooks, ENTRIES_BY_AGENT[agent]);
   const settings: Record<string, unknown> = { ...original };
-  if (newHooks === undefined || Object.keys(newHooks).length === 0) {
+  if (removedAny && (newHooks === undefined || Object.keys(newHooks).length === 0)) {
     delete settings.hooks;
-  } else {
+  } else if (newHooks !== undefined) {
     settings.hooks = newHooks;
   }
   return { settings: settings as HookSettings, changed: !isDeepStrictEqual(original, settings) };

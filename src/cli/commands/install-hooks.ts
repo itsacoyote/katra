@@ -262,6 +262,13 @@ export function registerInstallHooks(program: Command, context: CliContext): voi
       const json = options.json === true;
       const removing = options.remove === true;
 
+      if (options.print === true && removing) {
+        throw new KatraException({
+          code: "usage",
+          message: "--print shows the block that would be installed; it has no remove form",
+        });
+      }
+
       if (options.local === true && agent === "codex") {
         throw new KatraException({
           code: "usage",

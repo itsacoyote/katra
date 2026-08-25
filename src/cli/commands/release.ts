@@ -45,6 +45,13 @@ export function registerRelease(program: Command, context: CliContext): void {
                 "release --mine releases every claim this worktree holds — pass an id, or --mine, not both",
             });
           }
+          if (options.force === true) {
+            throw new KatraException({
+              code: "usage",
+              message:
+                "--mine only ever releases this worktree's own claims — --force has nothing to force",
+            });
+          }
 
           const { result, warnings } = withStore(context, (store) => releaseMine(store));
           emit(result, { ...emitOptions, warnings }, formatReleaseMine);

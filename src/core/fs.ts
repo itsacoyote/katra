@@ -84,18 +84,6 @@ function sweepStaleTemp(dir: string, tempPrefix: string): void {
   }
 }
 
-/** {@link writeAtomic}'s options. */
-export interface WriteAtomicOptions {
-  /**
-   * Permission bits for a **newly created** file — ignored whenever
-   * `outPath` already exists, whose own mode is preserved instead (this
-   * function's own docs below). Omit to fall back to the OS's ordinary
-   * create mode (0o666 minus umask), unchanged from every caller's behavior
-   * before this option existed.
-   */
-  readonly mode?: number;
-}
-
 /**
  * Writes `content` to `outPath` atomically: a temp file beside the target,
  * `fsync`ed, then `renameSync`. Assumes `outPath`'s directory already
@@ -106,22 +94,19 @@ export interface WriteAtomicOptions {
  * create mode (0o666 minus umask) would otherwise silently loosen whatever a
  * caller or its user had deliberately narrowed — probed real: a 0o600 file
  * rewritten through the old, mode-blind version of this function came back
- * 0o664. `outPath`'s current mode (if it has one) always wins; `options.mode`
- * only ever applies to a target that does not exist yet. Set via
- * `fchmodSync` on the open temp descriptor rather than `openSync`'s own
- * `mode` argument, because that argument is still filtered through the
- * process umask at the OS level and cannot reliably reproduce an exact,
- * narrower-than-default mode the way an explicit `fchmodSync` can.
+ * 0o664. `outPath`'s current mode (if it has one) always wins; a target that
+ * does not exist yet falls back to the OS's ordinary create mode (0o666
+ * minus umask) — no caller has ever needed to choose a mode for a brand-new
+ * file. Set via `fchmodSync` on the open temp descriptor rather than
+ * `openSync`'s own `mode` argument, because that argument is still filtered
+ * through the process umask at the OS level and cannot reliably reproduce an
+ * exact, narrower-than-default mode the way an explicit `fchmodSync` can.
  *
  * Every failure path — the open, the write, the `fsync`, or the rename —
  * removes the temp file before rethrowing, so nothing observable is ever
  * left behind except the target path in whatever state it was already in.
  */
-export function writeAtomic(
-  outPath: string,
-  content: string,
-  options: WriteAtomicOptions = {},
-): void {
+export function writeAtomic(outPath: string, content: string): void {
   const dir = dirname(outPath);
   const tempPrefix = `.${basename(outPath)}.tmp-`;
 
@@ -136,8 +121,8 @@ export function writeAtomic(
   try {
     desiredMode = statSync(outPath).mode & 0o777;
   } catch {
-    // No existing target to inherit from — the caller's own mode, if any.
-    desiredMode = options.mode;
+    // No existing target to inherit from — fall back to the OS default.
+    desiredMode = undefined;
   }
 
   try {

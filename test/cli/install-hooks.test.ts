@@ -174,6 +174,19 @@ describe("katra install-hooks", () => {
     ]);
   });
 
+  it("refuses --print combined with --remove", async () => {
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+
+    const result = await runCli(["install-hooks", "claude", "--print", "--remove"], {
+      cwd: r.dir,
+    });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+    expect(result.stderr).toMatch(/--print/);
+    expect(existsSync(join(r.dir, ".claude"))).toBe(false);
+  });
+
   it("--remove against a never-installed repo is a clean no-op", async () => {
     const r = repo();
     await runCli(["init"], { cwd: r.dir });

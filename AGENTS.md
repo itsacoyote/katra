@@ -38,7 +38,7 @@ katra install-hooks claude    # or: codex
 | session-end | `SessionEnd`, allow-list `logout\|prompt_input_exit\|other`, timeout 10s | `SessionEnd` (reason is always `other`; no matcher), timeout 3s (Codex hard-caps it) | `katra release --mine` |
 
 - **session-start** injects the board digest into agent context with no manual call.
-- **before-edit** runs `katra guard` before every file edit: it denies the edit iff the caller worktree was displaced from a task that a *different, live* worktree still holds, and allows otherwise (holds the task, holds nothing, or the rival is stale). Fail-open by construction — a locked/missing/corrupt store, or any other error, allows; only a successfully-read live takeover ever denies.
+- **before-edit** runs `katra guard` before every file edit: it denies iff the caller worktree was displaced from a task that a different, *live* worktree still holds **and** it has not claimed anything else since that displacement; it allows otherwise — holds the task, was never displaced, re-coordinated onto other work since the displacement, or the rival went stale. Holding nothing is *not* by itself an allow: a worktree displaced from a task and holding nothing since is exactly the case that must deny. Fail-open by construction — a locked/missing/corrupt store, or any other error, allows; only a successfully-read live takeover ever denies.
 - **session-end** releases every claim the worktree holds (`release --mine`) on a real exit, and is a clean no-op when it holds none.
 
 ### Caveats — read before relying on this

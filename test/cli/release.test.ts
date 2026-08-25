@@ -149,4 +149,14 @@ describe("katra release", () => {
 
     expect(result.exitCode).toBe(EXIT.usage);
   });
+
+  it("release --mine --force is a usage error", async () => {
+    const task = await add("do the thing");
+    await runCli(["claim", task], { cwd: repo.dir });
+
+    const result = await runCli(["release", "--mine", "--force"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+    expect(result.stderr).toMatch(/--force/);
+  });
 });

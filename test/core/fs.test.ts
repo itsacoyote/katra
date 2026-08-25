@@ -108,20 +108,4 @@ describe("writeAtomic", () => {
 
     rmSync(dir, { recursive: true, force: true });
   });
-
-  it.runIf(onPosix)("applies options.mode only when the target does not exist yet", () => {
-    const dir = makeTempDir();
-    const target = join(dir, "fresh.txt");
-
-    writeAtomic(target, "brand new", { mode: 0o600 });
-    expect(statSync(target).mode & 0o777).toBe(0o600);
-
-    // A second write over the now-existing file preserves ITS mode (0o600),
-    // ignoring a different options.mode passed this time — existing-mode
-    // preservation always wins over the option, per this function's docs.
-    writeAtomic(target, "rewritten", { mode: 0o644 });
-    expect(statSync(target).mode & 0o777).toBe(0o600);
-
-    rmSync(dir, { recursive: true, force: true });
-  });
 });
