@@ -45,6 +45,7 @@ export type {
   GuardResult,
   HelpDocument,
   InitResult,
+  InstallHooksResult,
   JsonDocument,
   LifecycleResult,
   LinkResult,

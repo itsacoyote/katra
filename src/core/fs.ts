@@ -28,6 +28,7 @@
 
 import {
   closeSync,
+  fchmodSync,
   fsyncSync,
   openSync,
   readdirSync,
@@ -83,17 +84,44 @@ function sweepStaleTemp(dir: string, tempPrefix: string): void {
   }
 }
 
+/** {@link writeAtomic}'s options. */
+export interface WriteAtomicOptions {
+  /**
+   * Permission bits for a **newly created** file — ignored whenever
+   * `outPath` already exists, whose own mode is preserved instead (this
+   * function's own docs below). Omit to fall back to the OS's ordinary
+   * create mode (0o666 minus umask), unchanged from every caller's behavior
+   * before this option existed.
+   */
+  readonly mode?: number;
+}
+
 /**
  * Writes `content` to `outPath` atomically: a temp file beside the target,
  * `fsync`ed, then `renameSync`. Assumes `outPath`'s directory already
  * exists — the caller owns creating it, the same division `openStore`/
  * `store.ts` draws between "ensure the directory" and "write the file".
  *
+ * **Preserves an existing target's permission bits.** `openSync`'s own
+ * create mode (0o666 minus umask) would otherwise silently loosen whatever a
+ * caller or its user had deliberately narrowed — probed real: a 0o600 file
+ * rewritten through the old, mode-blind version of this function came back
+ * 0o664. `outPath`'s current mode (if it has one) always wins; `options.mode`
+ * only ever applies to a target that does not exist yet. Set via
+ * `fchmodSync` on the open temp descriptor rather than `openSync`'s own
+ * `mode` argument, because that argument is still filtered through the
+ * process umask at the OS level and cannot reliably reproduce an exact,
+ * narrower-than-default mode the way an explicit `fchmodSync` can.
+ *
  * Every failure path — the open, the write, the `fsync`, or the rename —
  * removes the temp file before rethrowing, so nothing observable is ever
  * left behind except the target path in whatever state it was already in.
  */
-export function writeAtomic(outPath: string, content: string): void {
+export function writeAtomic(
+  outPath: string,
+  content: string,
+  options: WriteAtomicOptions = {},
+): void {
   const dir = dirname(outPath);
   const tempPrefix = `.${basename(outPath)}.tmp-`;
 
@@ -104,10 +132,19 @@ export function writeAtomic(outPath: string, content: string): void {
     `${tempPrefix}${String(process.pid)}-${String(Date.now())}-${Math.random().toString(36).slice(2)}`,
   );
 
+  let desiredMode: number | undefined;
+  try {
+    desiredMode = statSync(outPath).mode & 0o777;
+  } catch {
+    // No existing target to inherit from — the caller's own mode, if any.
+    desiredMode = options.mode;
+  }
+
   try {
     const fd = openSync(tempPath, "w");
     try {
       writeFileSync(fd, content, "utf8");
+      if (desiredMode !== undefined) fchmodSync(fd, desiredMode);
       // fsync before rename, not after: the artifact's stated purpose is
       // surviving a dead machine, so its bytes must reach disk — not just
       // the OS's write cache — before the rename that makes them visible at

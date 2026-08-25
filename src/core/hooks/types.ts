@@ -19,6 +19,11 @@
 export const AGENTS = ["claude", "codex"] as const;
 export type Agent = (typeof AGENTS)[number];
 
+/** True when `value` is one of `AGENTS` — `enums.ts`'s own `isLevel`/`isKind` pattern, beside the const it narrows rather than in `enums.ts` itself, since this module's touchpoint model is `install-hooks`'-only and does not belong among katra's storage-level enums. */
+export function isAgent(value: unknown): value is Agent {
+  return typeof value === "string" && (AGENTS as readonly string[]).includes(value);
+}
+
 /**
  * The three abstract delivery points this feature wires (epic Summary).
  * Named for what an agent experiences, not for either agent's own event

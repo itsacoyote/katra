@@ -6,7 +6,15 @@
  * leaves no temp file behind.
  */
 
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -38,6 +46,9 @@ vi.mock("node:fs", async (importOriginal) => {
 function makeTempDir(): string {
   return mkdtempSync(join(tmpdir(), "katra-fs-test-"));
 }
+
+/** `chmodSync`/exact-mode assertions are meaningless on Windows, which has no POSIX permission bits. */
+const onPosix = process.platform !== "win32";
 
 describe("writeAtomic", () => {
   it("replaces the target file's content atomically", () => {
@@ -76,6 +87,40 @@ describe("writeAtomic", () => {
     // The target is untouched, and no temp file survives beside it.
     expect(readFileSync(target, "utf8")).toBe("original content");
     expect(readdirSync(dir)).toEqual(["target.txt"]);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.runIf(onPosix)("preserves the target file's mode across a rewrite", () => {
+    const dir = makeTempDir();
+    const target = join(dir, "target.txt");
+    writeFileSync(target, "original content", "utf8");
+    // Deliberately narrower than the umask-default create mode this
+    // process's `openSync` calls would otherwise produce (typically
+    // 0o644/0o664) — the shape a caller narrowing a sensitive file's
+    // permissions ahead of time would leave behind.
+    chmodSync(target, 0o600);
+
+    writeAtomic(target, "replaced content");
+
+    expect(readFileSync(target, "utf8")).toBe("replaced content");
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.runIf(onPosix)("applies options.mode only when the target does not exist yet", () => {
+    const dir = makeTempDir();
+    const target = join(dir, "fresh.txt");
+
+    writeAtomic(target, "brand new", { mode: 0o600 });
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+
+    // A second write over the now-existing file preserves ITS mode (0o600),
+    // ignoring a different options.mode passed this time — existing-mode
+    // preservation always wins over the option, per this function's docs.
+    writeAtomic(target, "rewritten", { mode: 0o644 });
+    expect(statSync(target).mode & 0o777).toBe(0o600);
 
     rmSync(dir, { recursive: true, force: true });
   });

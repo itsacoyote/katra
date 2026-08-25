@@ -25,7 +25,7 @@ import {
 } from "./enums.js";
 import { isKatraException, KatraException } from "./errors.js";
 import type { Agent } from "./hooks/types.js";
-import { AGENTS } from "./hooks/types.js";
+import { AGENTS, isAgent } from "./hooks/types.js";
 
 function invalid(field: string, value: unknown, allowed: readonly (string | number)[]): never {
   throw new KatraException({
@@ -61,11 +61,6 @@ export function narrowEventType(value: unknown): EventType {
  */
 export function narrowNoteKind(value: unknown): NoteKind {
   return isNoteKind(value) ? value : invalid("note kind", value, NOTE_KINDS);
-}
-
-/** True when `value` is one of `hooks/types.ts`'s `AGENTS`. */
-function isAgent(value: unknown): value is Agent {
-  return typeof value === "string" && (AGENTS as readonly string[]).includes(value);
 }
 
 /**

@@ -965,6 +965,57 @@ export type GuardResult =
       readonly lastSeen: string | null;
     };
 
+/**
+ * One of the two agents `install-hooks` (F11 T7, `katra-9aw.70.11`) ships an
+ * adapter for — redeclared from `hooks/types.ts`'s own `Agent`/`AGENTS`
+ * rather than imported, the same reason {@link ReconcileConflictTarget}
+ * redeclares `reconcile/types.ts`'s `ConflictTarget` (this file's own module
+ * doc): that module is pure but sits outside this file's fixed
+ * permitted-dependency list, and duplicating a two-value union costs less
+ * than widening it.
+ */
+export type InstallHooksAgent = "claude" | "codex";
+
+/**
+ * A hook settings/config file's shape, as far as this contract needs to say
+ * — redeclared from `hooks/types.ts`'s own `HookSettings`, structurally
+ * compatible with it (a real `HookSettings`'s `hooks` value always narrows
+ * into `Record<string, unknown>`) so `install-hooks.ts` can hand one
+ * straight to an {@link InstallHooksResult} with no cast.
+ */
+export interface InstallHooksSettings {
+  readonly hooks?: Record<string, unknown>;
+  readonly [key: string]: unknown;
+}
+
+/**
+ * What `install-hooks` (F11 T7, `katra-9aw.70.11`) reports.
+ *
+ * `--print` never touches a file, so its `printed` arm carries the settings
+ * object it rendered instead of a `changed` a file write never happened for
+ * — the exact block a fresh install would write, since nothing else in this
+ * result would let `--json` show it. The other three actions share one arm:
+ * `mode` names which of `install`/`remove` was requested, needed because
+ * `action: "unchanged"` alone cannot say whether nothing changed because the
+ * hooks were already installed, or because there was nothing to remove —
+ * `install-hooks.ts`'s own text rendering reads different sentences off it.
+ */
+export type InstallHooksResult =
+  | {
+      readonly agent: InstallHooksAgent;
+      readonly target: string;
+      readonly action: "printed";
+      readonly changed: false;
+      readonly settings: InstallHooksSettings;
+    }
+  | {
+      readonly agent: InstallHooksAgent;
+      readonly target: string;
+      readonly action: "installed" | "unchanged" | "removed";
+      readonly changed: boolean;
+      readonly mode: "install" | "remove";
+    };
+
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {
   readonly help: string;

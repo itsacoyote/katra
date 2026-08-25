@@ -8,12 +8,24 @@
  * merge.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
 import { runCli } from "../helpers/cli.js";
-import { createGitRepo } from "../helpers/fixture.js";
+import { createGitRepo, createNonRepoDir } from "../helpers/fixture.js";
+
+/** `symlinkSync` needs real symlink support; unreliable on Windows CI without elevation. */
+const onPosix = process.platform !== "win32";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -55,6 +67,7 @@ describe("katra install-hooks", () => {
     await runCli(["install-hooks", "claude"], { cwd: r.dir });
     const target = CLAUDE_SETTINGS(r.dir);
     const first = readFileSync(target, "utf8");
+    expect(first.endsWith("\n")).toBe(true);
 
     const second = await runCli(["install-hooks", "claude", "--json"], { cwd: r.dir });
 
@@ -63,6 +76,14 @@ describe("katra install-hooks", () => {
     const payload = second.json() as { action: string; changed: boolean };
     expect(payload.action).toBe("unchanged");
     expect(payload.changed).toBe(false);
+
+    // A second, independent clone must not fight the first: two fresh repos
+    // installing the identical agent produce byte-identical files, not just
+    // a stable file within one repo's own history.
+    const r2 = repo();
+    await runCli(["init"], { cwd: r2.dir });
+    await runCli(["install-hooks", "claude"], { cwd: r2.dir });
+    expect(readFileSync(CLAUDE_SETTINGS(r2.dir), "utf8")).toBe(first);
   });
 
   it("preserves pre-existing hooks and unrelated settings on install", async () => {
@@ -221,10 +242,63 @@ describe("katra install-hooks", () => {
 
     const shared = await runCli(["install-hooks", "claude"], { cwd: r.dir });
     expect(shared.stdout).toContain(join(".claude", "settings.json"));
-    expect(shared.stdout).toMatch(/commit/i);
+    // Distinguishing phrases, not a bare /commit/i or /local/i — the local
+    // note itself says "not committed" (would match /commit/i) and the
+    // shared filename above contains "settings.json" (would match /local/i
+    // by coincidence with "settings.local.json" if it weren't asserted
+    // precisely), so either loose regex would pass even if the two messages
+    // were swapped.
+    expect(shared.stdout).toMatch(/shared with your team/);
+    expect(shared.stdout).not.toMatch(/not committed/);
 
     const local = await runCli(["install-hooks", "claude", "--local"], { cwd: r.dir });
     expect(local.stdout).toContain(join(".claude", "settings.local.json"));
-    expect(local.stdout).toMatch(/local/i);
+    expect(local.stdout).toMatch(/not committed, not shared/);
+  });
+
+  it.runIf(onPosix)("refuses a symlinked .claude directory", async () => {
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+    const outside = mkdtempSync(join(tmpdir(), "katra-outside-"));
+    cleanups.push(() => rmSync(outside, { recursive: true, force: true }));
+    symlinkSync(outside, join(r.dir, ".claude"));
+
+    const result = await runCli(["install-hooks", "claude"], { cwd: r.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/symlink/i);
+    // The install never followed the link: nothing was written outside the
+    // worktree, and the symlink itself was never replaced.
+    expect(existsSync(join(outside, "settings.json"))).toBe(false);
+  });
+
+  it.runIf(onPosix)("refuses a symlinked settings file", async () => {
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+    mkdirSync(join(r.dir, ".claude"), { recursive: true });
+    const outside = mkdtempSync(join(tmpdir(), "katra-outside-"));
+    cleanups.push(() => rmSync(outside, { recursive: true, force: true }));
+    const secrets = join(outside, "credentials.json");
+    writeFileSync(secrets, JSON.stringify({ aws_secret_access_key: "leaked-if-this-fails" }));
+    symlinkSync(secrets, CLAUDE_SETTINGS(r.dir));
+
+    const result = await runCli(["install-hooks", "claude"], { cwd: r.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(result.stderr).toMatch(/symlink/i);
+    // The secret file was never read into a merge, and the link was never
+    // replaced by a real file that would have exposed its contents.
+    expect(readFileSync(secrets, "utf8")).not.toContain("katra");
+  });
+
+  it("refuses to write anything outside a git repository", async () => {
+    const plain = createNonRepoDir();
+    cleanups.push(() => plain.cleanup());
+
+    const result = await runCli(["install-hooks", "claude"], { cwd: plain.dir });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+    expect(result.stderr).toMatch(/git repository/i);
+    expect(existsSync(join(plain.dir, ".claude"))).toBe(false);
   });
 });
