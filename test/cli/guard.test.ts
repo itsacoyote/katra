@@ -11,7 +11,6 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EXIT } from "../../src/cli/output.js";
-import { createProgram } from "../../src/cli/program.js";
 import type { GuardResult } from "../../src/core/contract.js";
 import { openStore } from "../../src/core/store.js";
 import { runCli } from "../helpers/cli.js";
@@ -48,12 +47,11 @@ async function takeOverViaCli(taskId: string, rivalCwd: string): Promise<void> {
   await runCli(["claim", taskId], { cwd: rivalCwd });
 }
 
+// Registration itself is covered strictly more strongly by
+// `feature.test.ts`'s whole-command-list gate (every command's name, exactly
+// once, with no drift from a hand-maintained list) — no need to duplicate
+// that assertion here.
 describe("katra guard", () => {
-  it("is registered on the program", () => {
-    const names = createProgram({ cwd: repo.dir }).commands.map((command) => command.name());
-    expect(names).toContain("guard");
-  });
-
   it("exits 0 and reports allow when the worktree holds its task", async () => {
     const task = await add("do the thing");
     await runCli(["claim", task], { cwd: repo.dir });
@@ -108,8 +106,32 @@ describe("katra guard", () => {
       const result = await runCli(["guard"], { cwd: uninit.dir });
 
       expect(result.exitCode).toBe(EXIT.ok);
-      expect(result.stderr).not.toBe("");
+      // The fail-open verdict still goes through the normal emit() path: an
+      // "allow" document on stdout, the failure riding the warnings channel
+      // as a `warning:` line on stderr — not a bare stderr write with an
+      // empty stdout.
+      expect(result.stdout).toContain("allow");
+      expect(result.stderr).toContain("warning");
       expect(result.stdout).not.toContain("deny");
+    } finally {
+      uninit.cleanup();
+    }
+  });
+
+  it("emits a parseable allow document with empty stderr under --json when katra was never initialized", async () => {
+    const uninit = createGitRepo();
+    try {
+      const result = await runCli(["guard", "--json"], { cwd: uninit.dir });
+
+      expect(result.exitCode).toBe(EXIT.ok);
+      // Under --json the failure rides inside the document's own `warnings`
+      // array (the same shape every other command's non-fatal findings use)
+      // rather than a separate stderr write — a `--json` caller must never
+      // see an empty stdout on a command that returns data.
+      expect(result.stderr).toBe("");
+      const document = result.json() as { verdict: string; warnings?: Array<{ code: string }> };
+      expect(document.verdict).toBe("allow");
+      expect(document.warnings?.[0]?.code).toBe("guard-failed-open");
     } finally {
       uninit.cleanup();
     }
@@ -206,7 +228,8 @@ describe("katra guard", () => {
     const result = await runCli(["guard", "--liveness", "not-a-real-value"], { cwd: repo.dir });
 
     expect(result.exitCode).toBe(EXIT.ok);
-    expect(result.stderr).not.toBe("");
+    expect(result.stdout).toContain("allow");
+    expect(result.stderr).toContain("warning");
     expect(result.stdout).not.toContain("deny");
   });
 

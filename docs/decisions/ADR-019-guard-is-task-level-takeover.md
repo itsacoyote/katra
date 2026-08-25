@@ -26,8 +26,10 @@ tenure and reports the most recent one whose current holder is still live. It de
 **any** such tenure remains live-held and the worktree has not claimed something else since being
 displaced from it (re-coordination); it allows in every other case, holding nothing included. It
 reuses `claims` + `events` + `presence`; **no schema change**. The check is **amended 2026-08-25:
-K indexed reads, bounded by the active foreign-claim count** — not the single read originally
-decided — one row read per task `claims` currently shows held by another worktree, each still
+K+1 indexed reads, bounded by the active foreign-claim count** — not the single read originally
+decided — one `claims` read for every foreign holder (a single query, returning all K rows), one
+`events` read per candidate task it returns, plus one further `claimsHeldBy` read when the
+re-coordination gate runs at all (only once at least one displaced tenure exists), each still
 well under the <1s hook budget. It **never mutates `claims`/`tasks`/`events`** — amended
 2026-08-25: not "never writes" outright. The ADR-011 presence heartbeat still rides along on
 every `openStore` a caller has to make before it can hand this function a store to read, bumped
@@ -44,25 +46,31 @@ safe even where a foreign agent treats any nonzero exit as blocking.
 
 The CLI signals a deny with **exit 2** plus a sanitized one-line reason on stderr — a deliberate,
 documented divergence from ADR-006 (`next` answers a legitimate negative with exit 0, the verdict
-carried entirely in its payload). Guard cannot follow that precedent: Claude Code's PreToolUse
-hook has exactly one signal that blocks a tool call **unconditionally**, in every permission mode
-including `bypassPermissions` — exit 2, with stderr fed back to the agent as the blocking reason.
-The grounds are **agent-agnosticism, not strength**: exit 2 needs no per-agent stdout shaping and
-takes no dependency on the agent parsing katra's own output, which is exactly what let an earlier
-draft's per-agent `--hook <agent>` flag go. (That earlier draft also justified exit 2 by claiming
-the alternative — a JSON `permissionDecision` on stdout — is "overridable" by permission
-allow-rules and permissive modes; that claim is wrong, current docs show a JSON deny blocks even
-under `bypassPermissions`. The correction does not change the conclusion: exit 2 is still
-preferred, because it is agent-agnostic and the JSON channel is not, not because the JSON channel
-is weak.)
+carried entirely in its payload). Claude Code's PreToolUse hook actually has **two** signals that
+block a tool call unconditionally, in every permission mode including `bypassPermissions`: exit 2
+with a stderr reason, and exit 0 with a JSON `permissionDecision: "deny"` on stdout. (An earlier
+draft of this reasoning claimed the JSON channel is "overridable" by permission allow-rules and
+permissive modes; that claim is wrong and is retracted here, not merely qualified — current docs
+show a JSON deny blocks exactly as unconditionally as exit 2 does.) katra picks exit 2 anyway, on
+the surviving, correct grounds: **agent-agnosticism, not strength**. Exit 2 needs no per-agent
+stdout schema and takes no dependency on the agent parsing katra's own output — exactly what let
+an earlier draft's per-agent `--hook <agent>` flag go — where a JSON decision would tie katra's
+stdout shape to Claude Code's own schema, and would need a different shape again for any other
+agent guard ever runs under.
 
-**Known limit.** Commander's own usage-error path also exits 2, for a genuinely malformed
+**Known limits.** Commander's own usage-error path also exits 2, for a genuinely malformed
 invocation (an unknown flag or command) — that path never reaches guard's handler at all, so it
 cannot be caught and turned into allow. A hand-edited hook line, or an older binary invoked
 before `guard` existed, therefore blocks loudly rather than failing open — the same
 self-correcting known limit version skew already carries elsewhere, distinguishable from a real
 deny only by stderr content. Deliberately not silenced by a shell `|| true` wrapper around the
-hook command, which would disarm every real deny along with it.
+hook command, which would disarm every real deny along with it. Separately, the <1s hook budget
+this ADR cites throughout is a target, not an enforced deadline: guard sets no timeout of its own
+around the store open or its reads, so a `git` subprocess resolving identity, or SQLite's
+`busy_timeout` retrying a held write lock under real contention, can in principle run past it —
+the same way any other katra command's identity resolution can. This does not weaken fail-open:
+a slow verdict still resolves to allow or deny correctly once it returns, it is only latency, not
+correctness, that the budget is unenforced for.
 
 ## Alternatives considered
 

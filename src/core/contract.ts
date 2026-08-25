@@ -50,9 +50,18 @@ import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
  * reason as the rest of this file: `locate.ts` types its options with
  * `NodeJS.ProcessEnv`, so publishing anything from that module would put
  * `@types/node` into every consumer's required type graph.
+ *
+ * `"guard-failed-open"` (F11 T2) is not raised by `locate.ts` at all — `katra
+ * guard` constructs one itself when it catches a failure and reports allow
+ * instead of propagating to `emitError`, so the failure still rides the same
+ * `warnings` channel every other command's non-fatal findings use, rather
+ * than an empty `--json` stdout for that one command (the repo-wide contract
+ * `feature.test.ts`'s "--json across every command" test pins: every command
+ * that returns data emits a parseable document, even on a path that would
+ * otherwise have nothing to say).
  */
 export interface StoreWarning {
-  readonly code: "ambient-git-dir";
+  readonly code: "ambient-git-dir" | "guard-failed-open";
   readonly message: string;
 }
 
