@@ -920,6 +920,34 @@ export interface RestoreApplyResult {
   readonly bakPath: string;
 }
 
+/**
+ * What `guardCheck` (`claims/guard.ts`, F11 T1) returns — ADR-019's takeover
+ * verdict, as data.
+ *
+ * A discriminated union on `verdict`, the same shape {@link NextResult}
+ * already uses for "yes, here it is" vs "no, and here is why": `allow`
+ * carries nothing further to say, and `deny` names exactly the live claim
+ * that displaced the caller — `taskId` plus the same four fields
+ * {@link ClaimInfo} already carries (`holder`/`actor`/`claimedAt`/
+ * `lastSeen`), so a reader who already knows how to read a claim conflict
+ * reads a guard denial the same way, not a fifth spelling of it.
+ *
+ * **Data only — no preformatted reason.** Rendering it into a sentence and
+ * sanitizing the actor string for an agent-visible surface (`oneLine()`,
+ * ADR-010) is the CLI edge's job (F11 T2), not core's; core only ever hands
+ * back facts a caller can act on or format for itself.
+ */
+export type GuardResult =
+  | { readonly verdict: "allow" }
+  | {
+      readonly verdict: "deny";
+      readonly taskId: string;
+      readonly holder: string;
+      readonly actor: string;
+      readonly claimedAt: string;
+      readonly lastSeen: string | null;
+    };
+
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {
   readonly help: string;
