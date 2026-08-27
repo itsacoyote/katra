@@ -39,7 +39,14 @@
  * ({@link claimsHeldElsewhere} — `claims` holds only active claims, so this
  * is tiny) — then one indexed-by-`entity_id` read per candidate task for its
  * own displacement history. K+1 reads total, whatever the store's total
- * event count.
+ * event count — and each of those K reads is itself bounded by
+ * {@link DISPLACEMENT_SCAN_LIMIT} (see {@link SELECT_TASK_EVENTS}), so a
+ * single candidate task's own history no longer sizes the read either. Before
+ * that bound existed, a task with a long history — a peer worktree's own
+ * cheap `katra update --reason` traffic on a task it holds is enough —
+ * inflated this call's cost on *every other* worktree's `guardCheck`, on
+ * every Edit/Write/NotebookEdit, in proportion to that task's total event
+ * count rather than the actual size of the answer.
  *
  * **Deliberately not wrapped in one `readTx` snapshot.** The K+1 statements
  * above are independent reads, not one consistent view: a release landing
@@ -60,7 +67,9 @@
 import { worktreeFromActor } from "../actor.js";
 import { toIso } from "../clock.js";
 import type { GuardResult } from "../contract.js";
-import { rowToEvent } from "../events/repo.js";
+import type { EventType } from "../enums.js";
+import { KatraException } from "../errors.js";
+import { narrowEventType, narrowNullableText, narrowText } from "../narrow.js";
 import type { OpenStore } from "../store.js";
 import { claimsHeldBy, claimsHeldElsewhere } from "./repo.js";
 import type { ClaimInfo } from "./types.js";
@@ -127,16 +136,78 @@ interface DisplacedTenure {
 }
 
 /**
- * The shape {@link rowToEvent} narrows — extracted from its own signature
- * rather than redeclared, so this file cannot drift from the row shape that
- * function actually expects (`events/repo.ts` does not export its own
- * `EventRow` — the type has no name outside that module, only this shape).
+ * How many of `taskId`'s newest events {@link findDisplacement} ever looks
+ * at — the load-bearing bound on `SELECT_TASK_EVENTS`. 200 is chosen
+ * generously: large enough that a genuine displacement being buried under
+ * this many *more* events on the very same task before this worktree's next
+ * edit is essentially never the shape a real collision takes, small enough
+ * to keep the scan cheap regardless of how much history that task has
+ * accumulated in total.
+ *
+ * **The bound's own bias, spelled out.** A displacement older than this many
+ * events reads as "no displacement" — allow. That is guard's own documented
+ * bias, the same shape as the liveness floor and the deliberately-unsnapshotted
+ * K+1 reads (this module's own docs, above): a spurious allow here costs
+ * nothing more than what an unbounded scan already risked in the rare case
+ * a real displacement sits that far back, while an unbounded scan risked it
+ * on *every* call, for *every* task, no matter how inactive the collision
+ * that mattered actually was.
  */
-type EventRow = Parameters<typeof rowToEvent>[0];
+export const DISPLACEMENT_SCAN_LIMIT = 200;
 
 /**
- * Every event ever recorded against `taskId` — newest first via the
- * `entity_id` index.
+ * The row shape {@link findDisplacement} actually reads — 5 of the table's
+ * 12 columns. **Deliberately not `events/repo.ts`'s `rowToEvent`**: that
+ * narrow validates and returns all 12, including
+ * `reason`/`title`, which carry unbounded stored text this scan never looks
+ * at — paying to narrow them on every one of up to
+ * {@link DISPLACEMENT_SCAN_LIMIT} rows, on the hot before-edit path, for
+ * columns `SELECT_TASK_EVENTS` no longer even selects.
+ */
+interface DisplacementRow {
+  readonly id: unknown;
+  readonly type: unknown;
+  readonly actor: unknown;
+  readonly prior_actor: unknown;
+  readonly created_at: unknown;
+}
+
+/** One event, narrowed to only the fields {@link findDisplacement} reads. */
+interface DisplacementEvent {
+  readonly id: number;
+  readonly type: EventType;
+  readonly actor: string;
+  readonly priorActor: string | null;
+  readonly createdAt: string;
+}
+
+/**
+ * Narrows a {@link DisplacementRow} — the same "id must be an integer, or
+ * this row is malformed" guard `events/repo.ts`'s `rowToEvent` applies,
+ * scoped to the five columns this scan reads instead of all twelve.
+ */
+function narrowDisplacementRow(row: DisplacementRow): DisplacementEvent {
+  if (typeof row.id !== "number" || !Number.isInteger(row.id)) {
+    throw new KatraException({
+      code: "validation",
+      message: `event id must be an integer — the stored value is ${typeof row.id}, so this row is malformed`,
+      field: "id",
+      value: row.id,
+    });
+  }
+  return {
+    id: row.id,
+    type: narrowEventType(row.type),
+    actor: narrowText(row.actor, "actor"),
+    priorActor: narrowNullableText(row.prior_actor, "prior_actor"),
+    createdAt: narrowText(row.created_at, "created_at"),
+  };
+}
+
+/**
+ * The newest {@link DISPLACEMENT_SCAN_LIMIT} events recorded against
+ * `taskId`, newest first via the `entity_id` index — narrowed to only the
+ * columns {@link findDisplacement} reads, never `SELECT *`.
  *
  * **Widened from a `prior_actor IS NOT NULL` filter (fixed: an earlier
  * revision missed the caller's own later events).** That filter finds only
@@ -148,11 +219,22 @@ type EventRow = Parameters<typeof rowToEvent>[0];
  * old B-took-X-from-A displacement and reported A as still displaced.
  * {@link findDisplacement} needs the full history to tell "displaced and
  * never returned" apart from "took it back and gave it up voluntarily."
+ *
+ * **Bounded by `LIMIT` (fixed: that widening had no bound at all).** Without
+ * `prior_actor IS NOT NULL` to narrow the row count, and without a `LIMIT` to
+ * cap it, the common case — this worktree never touched `taskId` — walked
+ * and materialized that task's *entire* event history on every call: 3s and
+ * 408MB measured at 50k events on one task, reachable by any worktree simply
+ * by holding a task and writing to it (`katra update --reason` is cheap and
+ * ordinary). See {@link DISPLACEMENT_SCAN_LIMIT}'s own docs for the bound and
+ * the bias it trades for that.
  */
 const SELECT_TASK_EVENTS = `
-  SELECT * FROM events
+  SELECT id, type, actor, prior_actor, created_at
+    FROM events
    WHERE entity_id = ?
    ORDER BY id DESC
+   LIMIT ?
 `;
 
 /**
@@ -169,10 +251,11 @@ const SELECT_TASK_EVENTS = `
  *   gave it up on its own; it is not currently a displaced tenant of it even
  *   though `claims` now shows someone else holding it.
  *
- * Rows arrive newest-first (`ORDER BY id DESC`); this walks them and stops
- * at the first match of *either* kind, which is equivalent to computing "the
- * newest displacement naming `worktree`" and "the newest settlement authored
- * by `worktree`" separately and taking whichever is more recent — the scan
+ * Rows arrive newest-first (`ORDER BY id DESC`), bounded to the newest
+ * {@link DISPLACEMENT_SCAN_LIMIT}; this walks them and stops at the first
+ * match of *either* kind, which is equivalent to computing "the newest
+ * displacement naming `worktree`" and "the newest settlement authored by
+ * `worktree`" separately and taking whichever is more recent — the scan
  * meets the more recent one first, by construction. No separate ranking step
  * needed for the single-task case; {@link mostRecentTenure} ranks *across*
  * tasks, over whatever this returns.
@@ -182,9 +265,11 @@ function findDisplacement(
   taskId: string,
   worktree: string,
 ): { readonly eventId: number; readonly displacedAt: string } | null {
-  const rows = store.db.prepare(SELECT_TASK_EVENTS).all(taskId) as EventRow[];
+  const rows = store.db
+    .prepare(SELECT_TASK_EVENTS)
+    .all(taskId, DISPLACEMENT_SCAN_LIMIT) as DisplacementRow[];
   for (const row of rows) {
-    const event = rowToEvent(row);
+    const event = narrowDisplacementRow(row);
 
     if (worktreeFromActor(event.actor) === worktree) {
       // An event this worktree authored itself: a claim, or a voluntary

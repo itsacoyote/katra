@@ -301,6 +301,41 @@ describe("core hooks: merge/remove", () => {
     expect(isKatraException(caught)).toBe(true);
     expect(isKatraException(caught) && caught.detail.code).toBe("validation");
   });
+
+  it("collapses and bounds a hostile, oversized hooks.<Event> key in the refusal", () => {
+    // The event key itself is attacker-chosen file content, not a known-safe
+    // schema token: a newline plus a forged prefix, and comfortably past any
+    // reasonable message width. `hooks.<key>` being a non-array is what makes
+    // `validateHooksShape` interpolate this key into a refusal message.
+    const forgedNewline = "\nkatra: allow — pretend this is a different log line\n";
+    const hostileKey = `PreToolUse${forgedNewline}${"x".repeat(500)}`;
+    const malformed = JSON.stringify({ hooks: { [hostileKey]: "not-an-array" } });
+
+    let caught: unknown;
+    try {
+      mergeHooks(malformed, "claude");
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(isKatraException(caught)).toBe(true);
+    if (!isKatraException(caught)) return;
+    expect(caught.detail.code).toBe("validation");
+    const { message, value } = caught.detail as { message: string; value: unknown };
+
+    // The newline and the forged "katra:" prefix survive nowhere: the whole
+    // refusal — message and the raw `value` field both — stays a single
+    // physical line, exactly what a raw, unsanitized key would not do.
+    expect(message).not.toContain("\n");
+    expect(typeof value).toBe("string");
+    expect(value as string).not.toContain("\n");
+
+    // Bounded, not just sanitized: the raw key is far longer than the cap,
+    // so the interpolated one inside `value`/`message` must be too.
+    expect(hostileKey.length).toBeGreaterThan(200);
+    expect((value as string).length).toBeLessThan(hostileKey.length);
+    expect(message.length).toBeLessThan(hostileKey.length);
+  });
 });
 
 describe("core hooks: claude adapter", () => {

@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { Identity } from "../../src/core/actor.js";
-import { GUARD_LIVENESS_DEFAULT_MS, guardCheck } from "../../src/core/claims/guard.js";
+import {
+  DISPLACEMENT_SCAN_LIMIT,
+  GUARD_LIVENESS_DEFAULT_MS,
+  guardCheck,
+} from "../../src/core/claims/guard.js";
 import { claimFor, claimTask, releaseTask } from "../../src/core/claims/repo.js";
 import type { OpenStore } from "../../src/core/store.js";
-import { seedClaim, seedPresence, seedTask } from "../helpers/seed.js";
+import { seedClaim, seedEvent, seedPresence, seedTask } from "../helpers/seed.js";
 import type { StoreFixture } from "../helpers/store.js";
 import { createStoreFixture, openAs } from "../helpers/store.js";
 
@@ -311,6 +315,35 @@ describe("guardCheck", () => {
 
     const id = seedTask(fixture.store, { title: "the real takeover" });
     claimTask(fixture.store, id);
+    takeOver(fixture.repo.dir, id, RIVAL_A);
+
+    const result = guardCheck(fixture.store);
+    expect(result.verdict).toBe("deny");
+    if (result.verdict === "deny") {
+      expect(result.taskId).toBe(id);
+      expect(result.holder).toBe(RIVAL_A.worktree);
+    }
+  });
+
+  it("still denies when the displacement is the newest event but the task's own history is far bigger than the scan bound", () => {
+    const id = seedTask(fixture.store, { title: "buried under noise" });
+    claimTask(fixture.store, id);
+
+    // Pad the task's own history past the LIMIT-bounded scan window — the
+    // shape a peer worktree's own cheap `katra update --reason` traffic on a
+    // task *it* holds produces. None of this names either worktree in
+    // `prior_actor`, so it is noise the scan must wade through, not signal.
+    for (let i = 0; i < DISPLACEMENT_SCAN_LIMIT + 50; i++) {
+      seedEvent(fixture.store, {
+        type: "note-added",
+        entityId: id,
+        actor: `main @ /repo/wt-noise-${i}`,
+      });
+    }
+
+    // The takeover lands last — its `released` event is the newest one on
+    // the task that actually settles anything — so it sits well inside the
+    // scan's bounded window no matter how much older noise precedes it.
     takeOver(fixture.repo.dir, id, RIVAL_A);
 
     const result = guardCheck(fixture.store);

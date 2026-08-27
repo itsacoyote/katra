@@ -74,6 +74,7 @@
 import { isDeepStrictEqual } from "node:util";
 import { KatraException } from "../errors.js";
 import { isPlainObject } from "../snapshot/serialize.js";
+import { CONTROL_CHARS_SOURCE, capText } from "../text.js";
 import { CLAUDE_HOOK_ENTRIES } from "./adapters/claude.js";
 import { CODEX_HOOK_ENTRIES } from "./adapters/codex.js";
 import type {
@@ -103,10 +104,48 @@ export interface HookMergeResult {
 // ---------------------------------------------------------------------------
 
 /**
+ * Control characters collapsed to a space, built once at module load from
+ * the imported {@link CONTROL_CHARS_SOURCE}, `/g`-flagged for `replaceAll` —
+ * the same construction `core/providers/shared.ts`'s title sanitizer and
+ * `refs/repo.ts`'s cached-title screen use, per `text.ts`'s own docs on why a
+ * consumer needing `replaceAll` builds its own flagged copy rather than
+ * flagging the shared, unflagged `CONTROL_CHARS_PATTERN` export.
+ */
+const EVENT_KEY_CONTROL_CHARS_PATTERN = new RegExp(`[${CONTROL_CHARS_SOURCE}]`, "g");
+
+/**
+ * How much of a malformed `hooks.<Event>` key a refusal message shows —
+ * {@link sanitizeEventKey}'s own bound.
+ */
+const MAX_EVENT_KEY_LENGTH = 200;
+
+/**
+ * Bounds an untrusted `hooks.<Event>` key before it is interpolated into a
+ * refusal message: every control character (including a newline, which
+ * would otherwise let a hostile key forge a second line that reads as its
+ * own log entry) collapsed to a space, then capped to
+ * {@link MAX_EVENT_KEY_LENGTH} code points with `capText` — mirrors
+ * `core/providers/shared.ts`'s `sanitizeProviderTitle` and `refs/repo.ts`'s
+ * `sanitizeCachedTitle`, the two existing "sanitize untrusted text before it
+ * reaches a rendered field" seams in `core/`. See {@link malformedSettings}'s
+ * own docs for why this key needs it at all.
+ */
+function sanitizeEventKey(event: string): string {
+  const collapsed = event.replaceAll(EVENT_KEY_CONTROL_CHARS_PATTERN, " ");
+  return capText(collapsed, MAX_EVENT_KEY_LENGTH).text;
+}
+
+/**
  * `reason` is always one of this module's own fixed strings, or a
- * known-safe schema token (a `hooks.<Event>` key) — never raw file content
- * — mirroring `snapshot/serialize.ts`'s `malformedLine` precedent for a
- * refusal that must reference untrusted input.
+ * `hooks.<Event>` key from the parsed settings file — and that key **is**
+ * raw file content, not a known-safe schema token: `validateHooksShape`
+ * walks `Object.keys(hooks)` as written, so a hand-edited (or maliciously
+ * crafted) settings file controls it entirely, newline and forged log-prefix
+ * included. Every call site that interpolates one runs it through
+ * {@link sanitizeEventKey} first — mirroring `snapshot/serialize.ts`'s
+ * `malformedLine` precedent for a refusal that must reference untrusted
+ * input, the same way that precedent's own `lineNo` is a trusted integer but
+ * whatever text it names is not.
  */
 function malformedSettings(reason: string): never {
   throw new KatraException({
@@ -136,16 +175,19 @@ function validateHooksShape(hooks: unknown): asserts hooks is HookEventMap {
     malformedSettings('"hooks" is not a JSON object');
   }
   for (const [event, groups] of Object.entries(hooks)) {
+    // `event` is a JSON object key straight out of the parsed file — see
+    // `malformedSettings`'s own docs — so every interpolation below goes
+    // through `sanitizeEventKey` first, never the raw key.
     if (!Array.isArray(groups)) {
-      malformedSettings(`"hooks.${event}" is not an array`);
+      malformedSettings(`"hooks.${sanitizeEventKey(event)}" is not an array`);
     }
     for (const group of groups) {
       if (!isPlainObject(group) || !Array.isArray(group.hooks)) {
-        malformedSettings(`"hooks.${event}" contains a malformed matcher group`);
+        malformedSettings(`"hooks.${sanitizeEventKey(event)}" contains a malformed matcher group`);
       }
       for (const handler of group.hooks) {
         if (!isPlainObject(handler) || typeof handler.command !== "string") {
-          malformedSettings(`"hooks.${event}" contains a malformed hook handler`);
+          malformedSettings(`"hooks.${sanitizeEventKey(event)}" contains a malformed hook handler`);
         }
       }
     }
