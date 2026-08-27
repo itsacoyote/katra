@@ -54,12 +54,20 @@ describe("katra install-hooks", () => {
     const target = CLAUDE_SETTINGS(r.dir);
     expect(existsSync(target)).toBe(true);
     const settings = JSON.parse(readFileSync(target, "utf8")) as {
-      hooks: { SessionStart: unknown; PreToolUse: unknown; SessionEnd: unknown };
+      hooks: {
+        SessionStart: unknown;
+        PreToolUse: ReadonlyArray<{ matcher?: string }>;
+        SessionEnd: unknown;
+      };
     };
     const dump = JSON.stringify(settings.hooks);
     expect(dump).toContain("katra board --digest");
     expect(dump).toContain("katra guard");
     expect(dump).toContain("katra release --mine");
+    // Symmetric with the codex test's own matcher assertion below — the
+    // dump-based `toContain` checks above prove the string is present
+    // somewhere, not that it landed on the right field.
+    expect(settings.hooks.PreToolUse[0]?.matcher).toBe("Edit|Write|NotebookEdit");
   });
 
   // Owner-only permissions cost multi-uid setups (containers, shared build
@@ -225,6 +233,127 @@ describe("katra install-hooks", () => {
     expect(dump).toContain("katra guard");
     expect(dump).toContain("katra release --mine");
     expect(settings.hooks.PreToolUse[0]?.matcher).toBe("apply_patch");
+  });
+
+  it("leaves .codex/hooks.json byte-identical on a second run", async () => {
+    // Mirrors "leaves the file byte-identical on a second run" above,
+    // codex-side: a second install is a no-op, and two independent repos
+    // installing the identical agent produce byte-identical files.
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+    await runCli(["install-hooks", "codex"], { cwd: r.dir });
+    const target = CODEX_HOOKS(r.dir);
+    const first = readFileSync(target, "utf8");
+    expect(first.endsWith("\n")).toBe(true);
+
+    const second = await runCli(["install-hooks", "codex", "--json"], { cwd: r.dir });
+
+    expect(second.exitCode).toBe(EXIT.ok);
+    expect(readFileSync(target, "utf8")).toBe(first);
+    const payload = second.json() as { action: string; changed: boolean };
+    expect(payload.action).toBe("unchanged");
+    expect(payload.changed).toBe(false);
+
+    const r2 = repo();
+    await runCli(["init"], { cwd: r2.dir });
+    await runCli(["install-hooks", "codex"], { cwd: r2.dir });
+    expect(readFileSync(CODEX_HOOKS(r2.dir), "utf8")).toBe(first);
+  });
+
+  it("--print emits the codex hook block and leaves the filesystem untouched", async () => {
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+
+    const result = await runCli(["install-hooks", "codex", "--print"], { cwd: r.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).toContain("katra board --digest");
+    expect(result.stdout).toContain("katra guard");
+    expect(result.stdout).toContain("katra release --mine");
+    expect(existsSync(join(r.dir, ".codex"))).toBe(false);
+  });
+
+  it("--remove strips katra's entries and keeps a pre-existing user entry in .codex/hooks.json intact", async () => {
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+    await runCli(["install-hooks", "codex"], { cwd: r.dir });
+    const target = CODEX_HOOKS(r.dir);
+    const installed = JSON.parse(readFileSync(target, "utf8")) as {
+      hooks: Record<string, unknown>;
+    };
+    installed.hooks.Notification = [{ hooks: [{ type: "command", command: "./notify.sh" }] }];
+    writeFileSync(target, JSON.stringify(installed, null, 2));
+
+    const result = await runCli(["install-hooks", "codex", "--remove"], { cwd: r.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    const settings = JSON.parse(readFileSync(target, "utf8")) as {
+      hooks: { Notification: unknown; PreToolUse?: unknown };
+    };
+    expect(JSON.stringify(settings)).not.toContain("katra guard");
+    expect(settings.hooks.Notification).toEqual([
+      { hooks: [{ type: "command", command: "./notify.sh" }] },
+    ]);
+  });
+
+  it("preserves a pre-existing unrelated hook and setting in .codex/hooks.json on install", async () => {
+    // Mirrors "preserves pre-existing hooks and unrelated settings on
+    // install" above: an unrelated top-level key, plus a PreToolUse group
+    // on a different matcher than katra's own ("shell" vs "apply_patch") so
+    // the two do not collide.
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+    const dir = join(r.dir, ".codex");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      CODEX_HOOKS(r.dir),
+      JSON.stringify({
+        someUnrelatedSetting: true,
+        hooks: {
+          PreToolUse: [{ matcher: "shell", hooks: [{ type: "command", command: "./lint.sh" }] }],
+        },
+      }),
+    );
+
+    const result = await runCli(["install-hooks", "codex"], { cwd: r.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    const settings = JSON.parse(readFileSync(CODEX_HOOKS(r.dir), "utf8")) as {
+      someUnrelatedSetting: boolean;
+      hooks: { PreToolUse: ReadonlyArray<{ matcher?: string; hooks: unknown[] }> };
+    };
+    expect(settings.someUnrelatedSetting).toBe(true);
+    expect(settings.hooks.PreToolUse).toContainEqual({
+      matcher: "shell",
+      hooks: [{ type: "command", command: "./lint.sh" }],
+    });
+    expect(JSON.stringify(settings.hooks.PreToolUse)).toContain("katra guard");
+  });
+
+  it("refuses to modify a malformed .codex/hooks.json", async () => {
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+    const dir = join(r.dir, ".codex");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(CODEX_HOOKS(r.dir), "{not valid json");
+
+    const result = await runCli(["install-hooks", "codex"], { cwd: r.dir });
+
+    expect(result.exitCode).toBe(EXIT.user);
+    expect(readFileSync(CODEX_HOOKS(r.dir), "utf8")).toBe("{not valid json");
+  });
+
+  it("refuses --local for codex with a usage error and writes nothing", async () => {
+    // codex has no shared/local split (one file, .codex/hooks.json) — see
+    // install-hooks.ts:272-279.
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+
+    const result = await runCli(["install-hooks", "codex", "--local"], { cwd: r.dir });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+    expect(result.stderr).toMatch(/--local has no target for codex/);
+    expect(existsSync(join(r.dir, ".codex"))).toBe(false);
   });
 
   it("refuses an unknown agent with a usage error", async () => {
