@@ -382,6 +382,34 @@ describe("guardCheck", () => {
     expect(guardCheck(fixture.store)).toEqual({ verdict: "allow" });
   });
 
+  it("never mutates claims, tasks, or events while producing a deny", () => {
+    // Pins ADR-019's "never writes" scope (this module's own docs, above)
+    // against a future accidental write: a live takeover is exactly the
+    // deny-producing scenario, and guardCheck's own docs say it only ever
+    // reads claims/events/presence through the store it is handed.
+    const id = seedTask(fixture.store, { title: "taken over" });
+    claimTask(fixture.store, id);
+    takeOver(fixture.repo.dir, id, RIVAL_A);
+
+    const countOf = (table: "claims" | "events" | "tasks"): number => {
+      const row = fixture.store.db.prepare(`SELECT COUNT(*) c FROM ${table}`).get() as {
+        c: number;
+      };
+      return row.c;
+    };
+    const before = {
+      claims: countOf("claims"),
+      events: countOf("events"),
+      tasks: countOf("tasks"),
+    };
+
+    const result = guardCheck(fixture.store);
+    expect(result.verdict).toBe("deny");
+
+    const after = { claims: countOf("claims"), events: countOf("events"), tasks: countOf("tasks") };
+    expect(after).toEqual(before);
+  });
+
   it("honors a caller-supplied liveness floor", () => {
     const id = seedTask(fixture.store, { title: "taken over" });
     claimTask(fixture.store, id);
