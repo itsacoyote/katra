@@ -45,6 +45,8 @@ const EXPECTED_COMMANDS = [
   "board",
   "claim",
   "release",
+  "guard",
+  "install-hooks",
   "migrate",
   "search",
   "recent",
@@ -67,7 +69,7 @@ async function add(args: readonly string[]): Promise<string> {
 }
 
 describe("command registration", () => {
-  it("registers all twenty-seven commands on the program", () => {
+  it("registers all twenty-nine commands on the program", () => {
     // Iterating the program rather than asserting against a hand-written list
     // is the point: a command built and never wired up would pass any test
     // that only checked the list.
@@ -76,7 +78,7 @@ describe("command registration", () => {
       .sort();
 
     expect(registered).toEqual([...EXPECTED_COMMANDS].sort());
-    expect(registered).toHaveLength(27);
+    expect(registered).toHaveLength(29);
   });
 
   it("gives every command a description and a --json flag where it returns data", () => {
@@ -145,6 +147,15 @@ describe("--json across every command", () => {
       ["show", blocker],
       ["claim", blocker],
       ["release", blocker],
+      // No live takeover in this flow — every guard invocation here reports
+      // allow, so it belongs in this clean-run list rather than needing its
+      // own scenario.
+      ["guard"],
+      // install-hooks writes, unlike everything else in this list — --print
+      // is its safe sweep form: it touches no file, so it belongs here the
+      // same way `restore`'s own preview-only invocation does two entries
+      // below.
+      ["install-hooks", "claude", "--print"],
       ["list"],
       ["update", blocker, "--priority", "1"],
       ["dep", dependent, "--blocked-by", blocker],

@@ -125,6 +125,13 @@ describe("the public barrel", () => {
       // entries — they ride on RestoreResult the same way SnapshotTableCount
       // rides on SnapshotResult without one.
       katra.RestoreResult,
+      // F11 T7: what `install-hooks` prints. InstallHooksAgent/
+      // InstallHooksSettings do not get their own entries — they ride on
+      // InstallHooksResult the same way RestoreResult's own item shapes ride
+      // on it above.
+      katra.InstallHooksResult,
+      // F11 T2: what `guard` prints — ADR-019's takeover verdict.
+      katra.GuardResult,
     ];
 
     // The indexed access keeps the alias used: a bare `type` declaration trips
@@ -133,8 +140,8 @@ describe("the public barrel", () => {
     // nothing, so this test cannot fail under `pnpm test`. The real gate is
     // `tsc --noEmit` over this file, which `pnpm typecheck` runs: dropping a
     // document type from the barrel is a compile error at the tuple above.
-    const count: PublishedDocuments["length"] = 28;
-    expect(count).toBe(28);
+    const count: PublishedDocuments["length"] = 30;
+    expect(count).toBe(30);
   });
 
   it("keeps the storage handle out of the runtime surface", () => {

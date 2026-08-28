@@ -306,6 +306,23 @@ applied .katra/snapshot.jsonl: loaded 954 row(s) across 9 table(s) (schema v6 ->
 
 An unchanged store snapshots to a **byte-identical** file, so a no-op session commits a clean diff. `restore` **previews by default** — `--apply` executes, and `--force` is additionally required over a non-empty store, since restore replaces everything. It rebuilds a fresh database at the snapshot's own recorded schema version and migrates it forward, so a snapshot dug out of git history stays restorable after upgrades; the previous store is kept alongside as `katra.db.bak`. Snapshots carry every source-of-truth table (claims included; presence, machine-local telemetry, is not), round-trip stored bytes exactly (a backup never sanitizes), and are how a backlog is shared, survives a fresh clone, or a bad write is undone ([ADR-017](docs/decisions/ADR-017-snapshot-jsonl-and-worktree-artifact.md), [ADR-018](docs/decisions/ADR-018-restore-bypasses-the-write-seams.md)).
 
+### Enforcing coordination inside the agent
+
+Everything above is **pull**: an agent (or its human) has to remember to check the board, claim before working, and release after. The specific failure that bites is a silent one — worktree A claims a task and edits it, worktree B runs `release --force` to take it over, and A never notices and keeps editing. Two live worktrees now own the same work, and nothing catches it at the moment of the edit.
+
+`katra install-hooks <agent>` wires katra into an agent's own native hooks so the coordination happens on its own, no convention required. It merges three touchpoints into the agent's settings — for Claude Code and Codex today:
+
+```console
+$ katra install-hooks claude
+installed claude hooks into .claude/settings.json — review and commit it; shared with your team
+```
+
+- **session start** injects `katra board --digest`, so the agent orients on the current board without being told to.
+- **before edit** runs `katra guard`, which denies the edit — exit 2, with the reason fed back to the agent — when the caller worktree's in-progress task has been force-taken by a *different, live* worktree, and allows it otherwise (it still holds the task, it re-coordinated onto other work since, or the rival went stale). Enforcement is task-level: katra's claims are task↔worktree with no file scope, so guard catches the takeover, not which file you touch ([ADR-019](docs/decisions/ADR-019-guard-is-task-level-takeover.md)). Any infrastructure problem — no store, a locked database — **fails open**: a hook that can't read the store must never block every edit in the session.
+- **session end** runs `katra release --mine`, releasing every claim this worktree holds so the next session sees them free. It fires only on a real exit — a `/clear` or a resume keeps your claims, so the session picks its work back up.
+
+The merge is idempotent and reversible: re-running makes no further change, `--print` shows the exact block without writing, `--remove` strips only katra's entries and leaves the rest of your settings untouched, and `--local` targets `.claude/settings.local.json` for a personal trial before you commit. The adapter contract is one thin per-agent mapping over shared touchpoints, so adding an agent needs no core change ([ADR-020](docs/decisions/ADR-020-tier1-adapters-over-abstract-touchpoints.md)). Claude Code is the proven path; the Codex adapter is best-effort against an evolving hooks surface. See [`AGENTS.md`](AGENTS.md#tier-1-setup-hook-adapters) for the full setup, the trust step each agent requires, and the caveats.
+
 ## Still to come
 
 External provider discovery. The [spec](docs/katra-spec.md) describes it.

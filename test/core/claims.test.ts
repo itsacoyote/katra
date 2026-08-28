@@ -1,6 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import Database from "better-sqlite3";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Identity } from "../../src/core/actor.js";
-import { claimFor, claimTask, releaseTask } from "../../src/core/claims/repo.js";
+import {
+  claimFor,
+  claimsHeldBy,
+  claimTask,
+  releaseMine,
+  releaseTask,
+} from "../../src/core/claims/repo.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { listEvents } from "../../src/core/events/repo.js";
 import type { OpenStore } from "../../src/core/store.js";
@@ -264,6 +271,148 @@ describe("releaseTask", () => {
       if (!isKatraException(error)) throw error;
       expect(error.detail.code).toBe("not_found");
     }
+  });
+});
+
+describe("claimsHeldBy", () => {
+  it("lists only the caller worktree's claims", () => {
+    const mine1 = seedTask(fixture.store, { title: "mine one" });
+    const mine2 = seedTask(fixture.store, { title: "mine two" });
+    const theirs = seedTask(fixture.store, { title: "theirs" });
+    const releasedAlready = seedTask(fixture.store, { title: "closed after claim" });
+
+    claimTask(fixture.store, mine1);
+    claimTask(fixture.store, mine2);
+    seedClaim(fixture.store, {
+      taskId: theirs,
+      holder: OTHER_IDENTITY.worktree,
+      actor: `${OTHER_IDENTITY.branch()} @ ${OTHER_IDENTITY.worktree}`,
+    });
+
+    // A claim closed via the task lifecycle is gone from `claims` by the time
+    // claimsHeldBy reads it — the read reflects live state, not a cached
+    // view, so this must not surface a phantom holder for a task that is no
+    // longer in play (module docs' "already gone via lifecycle" note).
+    claimTask(fixture.store, releasedAlready);
+    closeTask(fixture.store, releasedAlready);
+
+    const held = claimsHeldBy(fixture.store, HOLDER_IDENTITY.worktree);
+
+    expect(held).toHaveLength(2);
+    expect(held.every((claim) => claim.holder === HOLDER_IDENTITY.worktree)).toBe(true);
+    expect(held.every((claim) => claim.actor === HOLDER_ACTOR)).toBe(true);
+  });
+
+  it("is empty when the worktree holds nothing", () => {
+    expect(claimsHeldBy(fixture.store, HOLDER_IDENTITY.worktree)).toEqual([]);
+  });
+});
+
+describe("releaseMine", () => {
+  it("releases every claim the worktree holds and emits one release event per claim", () => {
+    const first = seedTask(fixture.store, { title: "first" });
+    const second = seedTask(fixture.store, { title: "second" });
+    claimTask(fixture.store, first);
+    claimTask(fixture.store, second);
+
+    const { released } = releaseMine(fixture.store);
+
+    expect(released).toHaveLength(2);
+    const releasedIds = released.map((r) => r.task.id).sort();
+    expect(releasedIds).toEqual([first, second].sort());
+    for (const { task, claim } of released) {
+      expect(claim.holder).toBe(HOLDER_IDENTITY.worktree);
+      expect(claimFor(fixture.store, task.id)).toBeNull();
+
+      const events = listEvents(fixture.store, { entityId: task.id }).events;
+      expect(events.map((e) => e.type)).toEqual(["released", "claimed"]);
+      expect(events[0]?.priorActor).toBeNull();
+    }
+
+    expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM claims").get()).toEqual({ c: 0 });
+  });
+
+  it("is a clean no-op when the worktree holds nothing", () => {
+    const { released } = releaseMine(fixture.store);
+
+    expect(released).toEqual([]);
+    expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM events").get()).toEqual({ c: 0 });
+  });
+
+  it("leaves other worktrees' claims untouched", () => {
+    const mine = seedTask(fixture.store, { title: "mine" });
+    const theirs = seedTask(fixture.store, { title: "theirs" });
+    claimTask(fixture.store, mine);
+    const theirActor = `${OTHER_IDENTITY.branch()} @ ${OTHER_IDENTITY.worktree}`;
+    seedClaim(fixture.store, {
+      taskId: theirs,
+      holder: OTHER_IDENTITY.worktree,
+      actor: theirActor,
+    });
+
+    const { released } = releaseMine(fixture.store);
+
+    expect(released).toHaveLength(1);
+    expect(released[0]?.task.id).toBe(mine);
+    expect(claimFor(fixture.store, mine)).toBeNull();
+
+    const theirClaim = claimFor(fixture.store, theirs);
+    expect(theirClaim).not.toBeNull();
+    expect(theirClaim?.holder).toBe(OTHER_IDENTITY.worktree);
+    expect(listEvents(fixture.store, { entityId: theirs }).events).toEqual([]);
+  });
+
+  it("rolls back every release when a later claim's settle throws mid-loop", () => {
+    // repo.ts's own docs claim releaseMine is all-or-nothing: one writeTx for
+    // every claim, not one per claim, so a failure partway through the loop
+    // must leave every claim exactly as it stood before the call — no claim
+    // released, no released event partially written. Forced realistically:
+    // the second `DELETE FROM claims` statement settleClaim issues (the same
+    // SQL text repo.ts's own settleClaim runs) is made to throw, simulating
+    // the underlying database rejecting that particular write rather than
+    // stubbing out releaseMine's own logic.
+    const first = seedTask(fixture.store, { title: "first" });
+    const second = seedTask(fixture.store, { title: "second" });
+    claimTask(fixture.store, first);
+    claimTask(fixture.store, second);
+
+    const DELETE_CLAIM_SQL = "DELETE FROM claims WHERE task_id = ?";
+    const originalPrepare = Database.prototype.prepare;
+    let deleteCalls = 0;
+    const prepareSpy = vi.spyOn(Database.prototype, "prepare").mockImplementation(function (
+      this: Database.Database,
+      sql: string,
+    ) {
+      const stmt = originalPrepare.call(this, sql) as ReturnType<typeof originalPrepare>;
+      if (sql === DELETE_CLAIM_SQL) {
+        deleteCalls += 1;
+        if (deleteCalls === 2) {
+          vi.spyOn(stmt, "run").mockImplementation(() => {
+            throw new Error("simulated mid-loop failure");
+          });
+        }
+      }
+      return stmt;
+    });
+
+    try {
+      expect(() => releaseMine(fixture.store)).toThrow("simulated mid-loop failure");
+    } finally {
+      prepareSpy.mockRestore();
+    }
+
+    // All-or-nothing: BOTH claims survive, whichever of the two the second
+    // DELETE happened to land on — the first claim's own delete+event, run
+    // earlier in the same transaction, must have been rolled back too.
+    expect(fixture.store.db.prepare("SELECT COUNT(*) c FROM claims").get()).toEqual({ c: 2 });
+    expect(claimFor(fixture.store, first)).not.toBeNull();
+    expect(claimFor(fixture.store, second)).not.toBeNull();
+    expect(listEvents(fixture.store, { entityId: first }).events.map((e) => e.type)).toEqual([
+      "claimed",
+    ]);
+    expect(listEvents(fixture.store, { entityId: second }).events.map((e) => e.type)).toEqual([
+      "claimed",
+    ]);
   });
 });
 

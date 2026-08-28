@@ -419,3 +419,160 @@ export function releaseTask(
     return { task, claim };
   });
 }
+
+const SELECT_CLAIMS_HELD_BY = `
+  SELECT c.holder, c.actor, c.claimed_at, p.branch, p.last_seen
+    FROM claims c
+    LEFT JOIN presence p ON p.worktree = c.holder
+   WHERE c.holder = ?
+   ORDER BY c.claimed_at, c.task_id
+`;
+
+/**
+ * Every claim `worktree` currently holds, live off `claims`/`presence` the
+ * same way `claimFor` reads one — this is the same query with `holder`
+ * substituted for `task_id` in the `WHERE`, not a second spelling of the
+ * assembly (`rowToClaimInfo` is shared).
+ *
+ * A claim settled by any path — `releaseTask`, `releaseMine` below, or a
+ * lifecycle move that calls `settleClaim` as a side effect (close/cancel/
+ * delete) — is gone from `claims` by the time this runs, so a task that was
+ * claimed and has since been released, closed, or deleted simply does not
+ * appear: there is no cached or stale view to filter out.
+ *
+ * `releaseMine` does not build its release list from this: it needs the
+ * `task_id` each claim belongs to, and `ClaimInfo` (the published `--json`
+ * contract shape, see `claims/types.ts`) carries no `task_id` field to give
+ * it one. What this *is* for: `guard.ts`'s (F11 T1) re-coordination gate,
+ * which only needs the caller's own `claimedAt` values, and any future `--json`
+ * "claims I hold" read — both read-only uses `ClaimInfo`'s existing shape
+ * already fits.
+ */
+export function claimsHeldBy(store: OpenStore, worktree: string): ClaimInfo[] {
+  const rows = store.db.prepare(SELECT_CLAIMS_HELD_BY).all(worktree) as ClaimRow[];
+  return rows.map(rowToClaimInfo);
+}
+
+/** `ClaimRow` plus the task id `claimsHeldBy`'s own query has no need of. */
+interface ForeignClaimRow extends ClaimRow {
+  readonly task_id: unknown;
+}
+
+/** One `claims` row {@link claimsHeldElsewhere} found — its task id alongside the same `ClaimInfo` shape `claimFor`/`claimsHeldBy` already hand back. */
+export interface ForeignClaim {
+  readonly taskId: string;
+  readonly claim: ClaimInfo;
+}
+
+const SELECT_CLAIMS_HELD_ELSEWHERE = `
+  SELECT c.task_id, c.holder, c.actor, c.claimed_at, p.branch, p.last_seen
+    FROM claims c
+    LEFT JOIN presence p ON p.worktree = c.holder
+   WHERE c.holder != ?
+`;
+
+/**
+ * Every claim held by some worktree **other than** `worktree` — the
+ * complement of {@link claimsHeldBy} above, with the task id `claimsHeldBy`
+ * has no need of and this does: `guard.ts`'s (F11 T1) tenure rule starts from
+ * exactly this set (bounded, since `claims` holds only active claims), then
+ * reads one task's own event history per row. This is the "K" half of that
+ * K+1 read; the caller supplies the "+1".
+ *
+ * No `ORDER BY`, unlike `claimsHeldBy`: that one orders because a stable
+ * listing reads better to a caller, but `guardCheck` ranks its candidates by
+ * event id, never by this query's row order, so sorting here would buy
+ * nothing but the temp b-tree it costs.
+ *
+ * Lives beside `claimsHeldBy` rather than in `guard.ts`, keeping every query
+ * against the `claims` table in the module that owns the table — `guard.ts`
+ * reads the result, never the SQL.
+ */
+export function claimsHeldElsewhere(store: OpenStore, worktree: string): ForeignClaim[] {
+  const rows = store.db.prepare(SELECT_CLAIMS_HELD_ELSEWHERE).all(worktree) as ForeignClaimRow[];
+  return rows.map((row) => ({
+    taskId: narrowText(row.task_id, "task_id"),
+    claim: rowToClaimInfo(row),
+  }));
+}
+
+const SELECT_TASK_IDS_HELD_BY = `
+  SELECT task_id FROM claims WHERE holder = ? ORDER BY claimed_at, task_id
+`;
+
+/** What releasing every claim a worktree holds hands back. */
+export interface ReleaseMineResult {
+  /** One entry per claim released, in the same shape a single `releaseTask` returns. */
+  readonly released: readonly ReleaseResult[];
+}
+
+/**
+ * Releases every claim the caller's worktree holds — the session-end
+ * touchpoint's `release --mine` (F11 spec req 3), so an agent's claims don't
+ * dangle when its session ends without an explicit `release <id>` per task.
+ *
+ * **One `writeTx` for every claim, not one per claim.** `actor`/`worktree`
+ * resolve before it opens, exactly like `claimTask`/`releaseTask` (the module
+ * docs' rule). Settling all of them inside a single `BEGIN IMMEDIATE` makes
+ * the release all-or-nothing: there is no partial-failure state to report
+ * back to a hook that already has a tight time budget, and claim counts per
+ * worktree are tiny, so one transaction covering all of them is cheap.
+ *
+ * **Reuses `settleClaim` per claim** — the same delete-plus-`released`-event
+ * `releaseTask` calls, so a self-release through here is byte-identical in
+ * the event stream to one through `releaseTask` with no `--force`: this
+ * worktree is always the claim's own holder (`WHERE holder = ?` guarantees
+ * it), so `priorActor` is always `null`.
+ *
+ * **Zero claims held**: `released` comes back empty, nothing is written —
+ * no delete, no event — the same clean no-op shape `settleClaim`'s own
+ * `null` return gives a single unclaimed task.
+ *
+ * The claim-holding task ids are read fresh inside this transaction (not via
+ * `claimsHeldBy`, which is `ClaimInfo`-shaped and carries no `task_id` — see
+ * that function's docs), so nothing else can insert or release a claim on
+ * this worktree between that read and the settles below.
+ */
+export function releaseMine(store: OpenStore): ReleaseMineResult {
+  // Before the transaction, for the same reason as claimTask/releaseTask.
+  const actor = store.actor();
+  const worktree = store.identity().worktree;
+
+  return writeTx(store.db, (now) => {
+    const rows = store.db.prepare(SELECT_TASK_IDS_HELD_BY).all(worktree) as {
+      readonly task_id: unknown;
+    }[];
+
+    const released: ReleaseResult[] = [];
+    for (const row of rows) {
+      const id = narrowText(row.task_id, "task_id");
+      const task = getTask(store, id);
+      if (task === undefined) {
+        // Unreachable in practice: `claims.task_id` carries its own foreign
+        // key with `ON DELETE CASCADE` and every connection runs with
+        // `foreign_keys = ON` (`db/connection.ts`, restated from
+        // `settleClaim`'s own docs) — a claims row read inside this very
+        // transaction cannot outlive its task.
+        throw new KatraException({
+          code: "internal",
+          message: `claims row for ${id} has no task — this is a katra bug`,
+        });
+      }
+
+      const claim = settleClaim(store, task, actor, worktree, now);
+      if (claim === null) {
+        // Unreachable for the same reason `claimTask`'s own impossible-state
+        // guard is: `row` above was read inside this same IMMEDIATE
+        // transaction, so nothing else could have released it in between.
+        throw new KatraException({
+          code: "internal",
+          message: `claim on ${id} disappeared inside its own transaction — this is a katra bug`,
+        });
+      }
+
+      released.push({ task, claim });
+    }
+
+    return { released };
+  });
+}

@@ -48,6 +48,38 @@ export interface ActorOptions {
 export const ACTOR_SEPARATOR = " @ ";
 
 /**
+ * Splits the worktree half back out of a fused actor string.
+ *
+ * **The deliberate exception to this file's own "never re-parse" note
+ * (lines 32-34 above).** Every other consumer of an actor string reads it as
+ * one opaque value precisely because {@link actorFromIdentity} already fused
+ * `worktree`/`branch` once and re-parsing would be a second, driftable
+ * spelling of the same fact. Guard (F11 T1, `claims/guard.ts`) breaks that
+ * rule on purpose: it compares an *event's* `prior_actor` — frozen at claim
+ * time, branch and all — against the caller's *current* worktree, and the
+ * caller's branch may have changed since (or the claim may have been made on
+ * a detached HEAD, whose "branch" is a short SHA that never repeats). Fusing
+ * a fresh actor string and comparing it to the stored one would miss a
+ * takeover the moment the branch differs; splitting the stored string back
+ * apart and comparing worktree halves only does not.
+ *
+ * Splits on the **first** occurrence of {@link ACTOR_SEPARATOR}. Git's own
+ * ref-format rules forbid an ASCII space in a branch name (`git
+ * check-ref-format` rejects one), so the branch half can never itself
+ * contain `" @ "` — but the worktree half is an arbitrary filesystem path,
+ * which can. Splitting on the first occurrence is therefore exactly right:
+ * it can never cut into the branch, and hands back everything after it —
+ * including any further `" @ "` substrings — as the worktree, unsplit.
+ * Returns `null` when the separator is absent — treated as "no match" by
+ * every caller, never as a worktree that happens to equal the empty string.
+ */
+export function worktreeFromActor(actor: string): string | null {
+  const index = actor.indexOf(ACTOR_SEPARATOR);
+  if (index === -1) return null;
+  return actor.slice(index + ACTOR_SEPARATOR.length);
+}
+
+/**
  * The branch, or the short SHA when HEAD is detached.
  *
  * `symbolic-ref --quiet --short HEAD`, **not** `rev-parse --abbrev-ref HEAD`,

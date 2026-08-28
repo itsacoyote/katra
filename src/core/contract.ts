@@ -50,9 +50,26 @@ import type { Blocker, Task, TaskDetail, TaskSummary } from "./tasks/types.js";
  * reason as the rest of this file: `locate.ts` types its options with
  * `NodeJS.ProcessEnv`, so publishing anything from that module would put
  * `@types/node` into every consumer's required type graph.
+ *
+ * `"guard-failed-open"` (F11 T2) is not raised by `locate.ts` at all — `katra
+ * guard` constructs one itself when it catches a failure and reports allow
+ * instead of propagating to `emitError`, so the failure still rides the same
+ * `warnings` channel every other command's non-fatal findings use, rather
+ * than an empty `--json` stdout for that one command (the repo-wide contract
+ * `feature.test.ts`'s "--json across every command" test pins: every command
+ * that returns data emits a parseable document, even on a path that would
+ * otherwise have nothing to say).
+ *
+ * `"hooks-no-store"` (F11 T7, `katra-9aw.70.11`) is `install-hooks`'s own —
+ * installed hooks call `katra board --digest`/`katra guard`/`katra release
+ * --mine` at every session boundary, and every one of those errors with no
+ * explanation in a repository that was never `katra init`ed. `install-hooks`
+ * never opens the store itself (it only checks whether the database file
+ * exists), so this rides the same non-fatal channel `guard-failed-open`
+ * does rather than refusing the install outright.
  */
 export interface StoreWarning {
-  readonly code: "ambient-git-dir";
+  readonly code: "ambient-git-dir" | "guard-failed-open" | "hooks-no-store";
   readonly message: string;
 }
 
@@ -919,6 +936,85 @@ export interface RestoreApplyResult {
    */
   readonly bakPath: string;
 }
+
+/**
+ * What `guardCheck` (`claims/guard.ts`, F11 T1) returns — ADR-019's takeover
+ * verdict, as data.
+ *
+ * A discriminated union on `verdict`, the same shape {@link NextResult}
+ * already uses for "yes, here it is" vs "no, and here is why": `allow`
+ * carries nothing further to say, and `deny` names exactly the live claim
+ * that displaced the caller — `taskId` plus the same four fields
+ * {@link ClaimInfo} already carries (`holder`/`actor`/`claimedAt`/
+ * `lastSeen`), so a reader who already knows how to read a claim conflict
+ * reads a guard denial the same way, not a fifth spelling of it.
+ *
+ * **Data only — no preformatted reason.** Rendering it into a sentence and
+ * sanitizing the actor string for an agent-visible surface (`oneLine()`,
+ * ADR-010) is the CLI edge's job (F11 T2), not core's; core only ever hands
+ * back facts a caller can act on or format for itself.
+ */
+export type GuardResult =
+  | { readonly verdict: "allow" }
+  | {
+      readonly verdict: "deny";
+      readonly taskId: string;
+      readonly holder: string;
+      readonly actor: string;
+      readonly claimedAt: string;
+      readonly lastSeen: string | null;
+    };
+
+/**
+ * One of the two agents `install-hooks` (F11 T7, `katra-9aw.70.11`) ships an
+ * adapter for — redeclared from `hooks/types.ts`'s own `Agent`/`AGENTS`
+ * rather than imported, the same reason {@link ReconcileConflictTarget}
+ * redeclares `reconcile/types.ts`'s `ConflictTarget` (this file's own module
+ * doc): that module is pure but sits outside this file's fixed
+ * permitted-dependency list, and duplicating a two-value union costs less
+ * than widening it.
+ */
+export type InstallHooksAgent = "claude" | "codex";
+
+/**
+ * A hook settings/config file's shape, as far as this contract needs to say
+ * — redeclared from `hooks/types.ts`'s own `HookSettings`, structurally
+ * compatible with it (a real `HookSettings`'s `hooks` value always narrows
+ * into `Record<string, unknown>`) so `install-hooks.ts` can hand one
+ * straight to an {@link InstallHooksResult} with no cast.
+ */
+export interface InstallHooksSettings {
+  readonly hooks?: Record<string, unknown>;
+  readonly [key: string]: unknown;
+}
+
+/**
+ * What `install-hooks` (F11 T7, `katra-9aw.70.11`) reports.
+ *
+ * `--print` never touches a file, so its `printed` arm carries the settings
+ * object it rendered instead of a `changed` a file write never happened for
+ * — the exact block a fresh install would write, since nothing else in this
+ * result would let `--json` show it. The other three actions share one arm:
+ * `mode` names which of `install`/`remove` was requested, needed because
+ * `action: "unchanged"` alone cannot say whether nothing changed because the
+ * hooks were already installed, or because there was nothing to remove —
+ * `install-hooks.ts`'s own text rendering reads different sentences off it.
+ */
+export type InstallHooksResult =
+  | {
+      readonly agent: InstallHooksAgent;
+      readonly target: string;
+      readonly action: "printed";
+      readonly changed: false;
+      readonly settings: InstallHooksSettings;
+    }
+  | {
+      readonly agent: InstallHooksAgent;
+      readonly target: string;
+      readonly action: "installed" | "unchanged" | "removed";
+      readonly changed: boolean;
+      readonly mode: "install" | "remove";
+    };
 
 /** What `--help --json` prints: the usage screen, as data. */
 export interface HelpDocument {

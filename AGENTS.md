@@ -12,6 +12,45 @@ A local, git-native, agent-first project manager and coordination layer for AI c
 
 Eight decisions in the spec were superseded or refined during implementation; the ADRs in `docs/decisions/` win where they disagree.
 
+## Tier-1 setup: hook adapters
+
+katra's Tier-0 baseline (spec §9) is pure pull: an agent runs `katra board --digest`, `claim`, and `release` by convention, from `AGENTS.md` instructions alone. Tier-1 makes three of those touchpoints automatic and *enforced*, inside Claude Code and Codex, over each agent's own native hook mechanism — see [ADR-019](docs/decisions/ADR-019-guard-is-task-level-takeover.md) (what guard enforces) and [ADR-020](docs/decisions/ADR-020-tier1-adapters-over-abstract-touchpoints.md) (the adapter architecture).
+
+### Install
+
+```
+katra init                    # once per repo — see the caveat below
+katra install-hooks claude    # or: codex
+```
+
+`install-hooks <agent>` idempotently merges katra's three hook entries into the agent's own settings file: a second run is a byte-identical no-op, and pre-existing hooks and unrelated settings are preserved untouched. Flags:
+
+- `--print` — emit the exact block that would be written; touches nothing.
+- `--remove` — strip only katra's entries, leaving every other hook and setting intact.
+- `--local` — target `.claude/settings.local.json` (trial-before-commit) instead of the default shared, committed `.claude/settings.json`. Codex has no local/shared split (one file, `.codex/hooks.json`); `--local` with `codex` is a usage refusal.
+
+### What each hook does
+
+| Touchpoint | Claude Code | Codex | Command |
+|---|---|---|---|
+| session-start | `SessionStart` | `SessionStart` | `katra board --digest` |
+| before-edit | `PreToolUse`, matcher `Edit\|Write\|NotebookEdit` | `PreToolUse`, matcher `apply_patch` | `katra guard` |
+| session-end | `SessionEnd`, allow-list `logout\|prompt_input_exit\|other`, timeout 10s | `SessionEnd` (reason is always `other`; no matcher), timeout 3s (Codex hard-caps it) | `katra release --mine` |
+
+- **session-start** injects the board digest into agent context with no manual call.
+- **before-edit** runs `katra guard` before every file edit: it denies iff the caller worktree was displaced from a task that a different, *live* worktree still holds **and** it has not claimed anything else since that displacement; it allows otherwise — holds the task, was never displaced, re-coordinated onto other work since the displacement, or the rival went stale. Holding nothing is *not* by itself an allow: a worktree displaced from a task and holding nothing since is exactly the case that must deny. Fail-open by construction — a locked/missing/corrupt store, or any other error, allows; only a successfully-read live takeover ever denies.
+- **session-end** releases every claim the worktree holds (`release --mine`) on a real exit, and is a clean no-op when it holds none.
+
+### Caveats — read before relying on this
+
+- **Folder trust.** Claude Code requires each teammate to approve project hooks once, per folder, before they fire — a committed `.claude/settings.json` does not bypass that. A freshly cloned repo's hooks sit inert until that session approves the folder.
+- **SessionEnd deliberately excludes `clear` AND `resume`, not just `clear`.** Claims survive both a `/clear` and a `resume` so the session picks its work back up where it left off ([ADR-012](docs/decisions/ADR-012-claims-steer-not-move.md); own-claim-first ranking in `tasks/next.ts:83`). An auto-release on either would let a rival's later, ordinary claim look like a voluntary self-release and permanently disarm guard for that tenure.
+- **`guard` blocks by exiting 2 — a hard block in every permission mode, including `bypassPermissions`.** A deny is unconditional (ADR-019). The same exit code is also commander's own usage-error path: a hand-edited hook line, or an older `katra` binary invoked before `guard` existed, exits 2 too and blocks just as loudly on version skew — self-correcting (update `katra`, or fix the hook line) and distinguishable from a real deny only by the stderr text. See the exit-code bullet under "Code conventions" below.
+- **Run `katra init` before installing hooks.** `install-hooks` warns rather than refuses when no store exists yet, but the installed SessionStart/SessionEnd hooks will error at every session boundary in a store-less repo until `init` runs.
+- **Codex is best-effort; Claude Code is the proven path.** The wire schema is confirmed against Codex's own source, but open upstream bugs bite katra's exact use case: project `.codex/hooks.json` can be silently misresolved when Codex runs inside a git worktree — katra's whole architecture (openai/codex#27133, #23996) — and `PreToolUse` deny is not always reliably enforced for `apply_patch`, the before-edit touchpoint itself (openai/codex#27833, #39872).
+- **Windows: hook command strings assume `katra` resolves on `PATH`.** A local (non-global) install may not resolve in whatever shell the agent spawns the hook command in.
+- **Recognition requires the command's first token to be exactly `katra`.** A hand-edited command like `/usr/local/bin/katra guard` or `npx katra guard` is not recognized as katra's own — the next `install-hooks` run adds a duplicate canonical entry beside it instead of normalizing it, and `--remove` leaves the hand-edited one behind. Correct-by-design (katra only ever reclaims what it wrote), but worth knowing before hand-editing a hook line.
+
 ## Project layout
 
 ```
@@ -90,7 +129,7 @@ These come from the spec and are not open for re-litigation in a PR:
 
 - **Library core, thin CLI wrapper.** Logic in the core; `cli.ts` only parses args, calls the core, and formats output.
 - **`--json` on every read command.** Agents are the primary reader; parsing formatted text is where silent misreads happen.
-- **Exit codes distinguish a refusal from a fault.** 0 ok · 1 refused · 2 malformed invocation · 3 state conflict · 4 katra broke ([ADR-005](docs/decisions/ADR-005-internal-fault-exit-code.md)). An agent branches on these, so 1 must never mean "retry later" — which is why `next` exits 0 even when nothing is ready ([ADR-006](docs/decisions/ADR-006-next-exits-zero.md)) and puts the answer in the payload.
+- **Exit codes distinguish a refusal from a fault.** 0 ok · 1 refused · 2 malformed invocation · 3 state conflict · 4 katra broke ([ADR-005](docs/decisions/ADR-005-internal-fault-exit-code.md)). An agent branches on these, so 1 must never mean "retry later" — which is why `next` exits 0 even when nothing is ready ([ADR-006](docs/decisions/ADR-006-next-exits-zero.md)) and puts the answer in the payload. **One deliberate exception: `guard` also uses exit 2 for a deny** ([ADR-019](docs/decisions/ADR-019-guard-is-task-level-takeover.md)), not a malformed invocation — chosen for agent-agnosticism (no per-agent stdout schema to parse) over ADR-006's own precedent. Reading every exit-2 as "malformed invocation" misreads a real deny as a usage error; the known limit runs the other way too — commander's own usage-error path also exits 2, so version skew (an older binary invoked before `guard` existed) or a hand-edited hook line blocks loudly and is distinguishable from a real deny only by the stderr text.
 - **Nothing published from `src/index.ts` may reach the storage engine.** Declarations are emitted per file, so a type re-exported there drags its whole import graph into the shipped `.d.ts` — and `@types/better-sqlite3` is a devDependency. `core/contract.ts` and `core/id-format.ts` exist to hold the store-free half, and `core/{enums,errors}.ts`, `core/{tasks,events,notes}/types.ts` are store-free for the same reason; `test/index.test.ts` walks the graph and fails on a regression.
 - **Bodies via `--body-file`**, never inline args; `--body-file -` reads stdin. Bare stdin is *not* consulted — consuming whatever sits on fd 0 made every shell redirect a silent overwrite.
 - **`src/core/git.ts` is the only module that spawns a process.** `findGit` resolves the binary to an *absolute* path and skips relative `PATH` entries: on Windows libuv resolves a bare program name from the current directory before `PATH`, so a repository shipping `git.exe` would otherwise be executed by every command. `test/core/git.test.ts` fails if a second spawn site appears anywhere under `src/`.

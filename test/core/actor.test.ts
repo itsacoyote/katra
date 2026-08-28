@@ -1,7 +1,7 @@
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { createIdentityResolver, resolveActor } from "../../src/core/actor.js";
+import { createIdentityResolver, resolveActor, worktreeFromActor } from "../../src/core/actor.js";
 import { isKatraException } from "../../src/core/errors.js";
 import { findGit } from "../../src/core/git.js";
 import { openStore } from "../../src/core/store.js";
@@ -292,5 +292,30 @@ describe("composing the actor string from identity", () => {
     cleanups.push(() => store.close());
 
     expect(store.actor()).toBe(`main @ ${r.dir}`);
+  });
+});
+
+describe("worktreeFromActor", () => {
+  it("splits the worktree half from a fused actor string", () => {
+    expect(worktreeFromActor("feature/x @ /repo/wt-a")).toBe("/repo/wt-a");
+  });
+
+  it("splits the worktree half when the branch is a detached-HEAD short sha", () => {
+    // A detached-HEAD "branch" is a short SHA (actor.ts's own resolveBranch
+    // docs) — it must split apart exactly like a real branch name, since
+    // guard cannot tell the two apart from the string alone and does not
+    // need to: only the worktree half matters to it.
+    expect(worktreeFromActor("a1b2c3d @ /repo/wt-detached")).toBe("/repo/wt-detached");
+  });
+
+  it("returns null for an actor string without the separator", () => {
+    expect(worktreeFromActor("not-a-fused-actor-string")).toBeNull();
+  });
+
+  it("keeps a worktree path that itself contains the separator, unsplit", () => {
+    // A branch name cannot contain " @ " (git's ref-format forbids a space),
+    // but the worktree path is an arbitrary filesystem path and can. Splitting
+    // on the *first* occurrence is what keeps this case correct.
+    expect(worktreeFromActor("main @ /repo/my @ dir/wt")).toBe("/repo/my @ dir/wt");
   });
 });

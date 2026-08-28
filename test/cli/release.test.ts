@@ -106,4 +106,57 @@ describe("katra release", () => {
     expect(payload.task.id).toBe(task);
     expect(payload.claim.holder).not.toBe("");
   });
+
+  it("release --mine reports each claim it released", async () => {
+    const first = await add("first thing");
+    const second = await add("second thing");
+    await runCli(["claim", first], { cwd: repo.dir });
+    await runCli(["claim", second], { cwd: repo.dir });
+
+    const result = await runCli(["release", "--mine"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toContain(first);
+    expect(result.stdout).toContain(second);
+  });
+
+  it("release --mine exits 0 and reports nothing held when the worktree has no claims", async () => {
+    await add("never claimed");
+
+    const result = await runCli(["release", "--mine"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stderr).toBe("");
+  });
+
+  it("release --mine --json lists the released claim ids", async () => {
+    const task = await add("do the thing");
+    await runCli(["claim", task], { cwd: repo.dir });
+
+    const result = await runCli(["release", "--mine", "--json"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stderr).toBe("");
+    const payload = result.json() as { released: readonly { task: { id: string } }[] };
+    expect(payload.released.map((entry) => entry.task.id)).toEqual([task]);
+  });
+
+  it("release --mine with an explicit id is a usage error", async () => {
+    const task = await add("do the thing");
+
+    const result = await runCli(["release", task, "--mine"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+  });
+
+  it("release --mine --force is a usage error", async () => {
+    const task = await add("do the thing");
+    await runCli(["claim", task], { cwd: repo.dir });
+
+    const result = await runCli(["release", "--mine", "--force"], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.usage);
+    expect(result.stderr).toMatch(/--force/);
+  });
 });
