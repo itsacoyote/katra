@@ -1014,6 +1014,15 @@ export type InstallHooksResult =
       readonly action: "installed" | "unchanged" | "removed";
       readonly changed: boolean;
       readonly mode: "install" | "remove";
+      /**
+       * Whether git ignores `target` in this repo. A shared `settings.json` /
+       * `hooks.json` the install report would otherwise call "shared with your
+       * team" is a hollow claim when `.claude/` (or `.codex/`) is gitignored —
+       * the hooks still fire locally, but nothing is committed or shared. Named
+       * here so the text rendering can tell the truth and a `--json` consumer
+       * can read the real visibility.
+       */
+      readonly ignored: boolean;
     };
 
 /** What `--help --json` prints: the usage screen, as data. */

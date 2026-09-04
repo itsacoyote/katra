@@ -81,6 +81,15 @@ the epic (unlike F10's).
   (update `katra`, fix the hook line) and distinguishable from a real deny only by the stderr
   text; deliberately not silenced with a shell `|| true` wrapper, which would disarm every
   real deny along with it.
+- **Guard covers the file-editing tools, not Bash-routed edits.** The `PreToolUse` matcher is
+  `Edit|Write|NotebookEdit` (Claude Code) / `apply_patch` (Codex), so a file change made
+  through the Bash tool (`echo > file`, `sed -i`, `tee`, a script) never triggers guard — the
+  before-edit takeover check is bypassed for that path. Inherent to tool-matched enforcement:
+  matching all Bash would fire guard on every non-edit shell call and blow the sub-second
+  budget, and detecting a write inside an arbitrary shell command is unreliable. Documented as
+  the practical guidance (make file changes through Edit/Write in a guarded repo) rather than
+  worked around. Codex is unaffected in shape — everything routes through `apply_patch`.
+  Surfaced by a live post-merge smoke test (katra-9aw.77).
 - **Store-less repo hook banners — the install-time warning is the mitigation, not a fix.**
   `install-hooks` warns rather than refuses when no store exists yet, but the installed
   SessionStart/SessionEnd hooks still error at every session boundary until `katra init` runs.

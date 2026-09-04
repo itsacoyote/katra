@@ -15,7 +15,7 @@ import type { InstallHooksResult, StoreWarning } from "../../core/contract.js";
 import { resolveStoreLocation } from "../../core/db/locate.js";
 import { isKatraException, KatraException } from "../../core/errors.js";
 import { writeAtomic } from "../../core/fs.js";
-import { runGit } from "../../core/git.js";
+import { isPathIgnored, runGit } from "../../core/git.js";
 import { claudeSettingsPath } from "../../core/hooks/adapters/claude.js";
 import { codexHooksPath } from "../../core/hooks/adapters/codex.js";
 import { mergeHooks, removeHooks } from "../../core/hooks/merge.js";
@@ -204,12 +204,18 @@ function relativeDisplay(target: string): string {
  * without noticing. `settings.local.json` is Claude Code's own
  * trial-before-commit file (`adapters/claude.ts`'s docs); every other target
  * `install-hooks` ever writes (the shared `settings.json`, Codex's single
- * `hooks.json`) is the committed, team-wide one. Says nothing about the path
- * itself — the caller already named it once.
+ * `hooks.json`) is *meant* to be the committed, team-wide one — but a repo
+ * that gitignores `.claude/` (or `.codex/`) makes "shared with your team" a
+ * hollow claim: the hooks fire locally, nothing is committed. `ignored` tells
+ * those apart so the report never promises sharing git won't allow. Says
+ * nothing about the path itself — the caller already named it once.
  */
-function visibilityNote(target: string): string {
-  return basename(target) === "settings.local.json"
-    ? "local only — not committed, not shared"
+function visibilityNote(target: string, ignored: boolean): string {
+  if (basename(target) === "settings.local.json") {
+    return "local only — not committed, not shared";
+  }
+  return ignored
+    ? "gitignored here — it works locally, but stays local until you unignore it"
     : "review and commit it — shared with your team";
 }
 
@@ -224,9 +230,9 @@ function formatInstallHooks(result: InstallHooksResult): string {
     case "printed":
       return JSON.stringify(result.settings, null, 2);
     case "installed":
-      return `installed ${result.agent} hooks into ${rel} — ${visibilityNote(result.target)}`;
+      return `installed ${result.agent} hooks into ${rel} — ${visibilityNote(result.target, result.ignored)}`;
     case "removed":
-      return `removed katra's ${result.agent} hooks from ${rel} — ${visibilityNote(result.target)}`;
+      return `removed katra's ${result.agent} hooks from ${rel} — ${visibilityNote(result.target, result.ignored)}`;
     case "unchanged":
       // Nothing was written this run, so no "review and commit"/visibility
       // note — that would misdescribe a run that touched no file. `mode`
@@ -340,7 +346,19 @@ export function registerInstallHooks(program: Command, context: CliContext): voi
         action = removing ? "removed" : "installed";
       }
 
-      const result: InstallHooksResult = { agent, target, action, changed: merge.changed, mode };
+      // Best-effort, drives only the visibility wording: a shared target a
+      // gitignored `.claude/`/`.codex/` makes local-only must not be reported
+      // as "shared with your team". Resolved from `root` (the proven worktree
+      // toplevel), never `context.cwd`.
+      const ignored = isPathIgnored(root, context.env, target);
+      const result: InstallHooksResult = {
+        agent,
+        target,
+        action,
+        changed: merge.changed,
+        mode,
+        ignored,
+      };
       emit(result, { json, warnings, streams: context.streams }, formatInstallHooks);
     });
 }
