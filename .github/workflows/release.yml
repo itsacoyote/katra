@@ -41,7 +41,7 @@ jobs:
       # and publishes to npm when that PR is merged. Publishing authenticates
       # via OIDC (id-token: write above + the trusted publisher configured on
       # npmjs.com for this repo and workflow) — no NPM_TOKEN secret.
-      - uses: changesets/action@v1
+      - uses: changesets/action@v2
         with:
           version: pnpm changeset version
           publish: pnpm release
