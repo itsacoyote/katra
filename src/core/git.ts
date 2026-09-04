@@ -165,6 +165,28 @@ export function runGit(cwd: string, env: NodeJS.ProcessEnv, args: string[]): str
   }
 }
 
+/**
+ * Whether `path` is ignored by git — **best-effort, never throws.** It drives
+ * only user-facing message wording (whether `install-hooks` can honestly call
+ * a target "shared with your team"), never a security or correctness decision,
+ * so it answers a plain boolean rather than following {@link runGit}'s
+ * throw-on-failure contract. `git check-ignore -q` exits 0 when the path is
+ * ignored and 1 when it is not; this treats anything that is not a clean
+ * "ignored" — a non-ignored path, git missing, or an unexpected fault in a repo
+ * the caller already proved resolves — as **not ignored**, the answer that
+ * preserves the pre-existing (assume-committed) message.
+ */
+export function isPathIgnored(cwd: string, env: NodeJS.ProcessEnv, path: string): boolean {
+  const git = findGit(env);
+  if (git === undefined) return false;
+  try {
+    execFileSync(git, ["check-ignore", "-q", "--", path], { cwd, env, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function readFailure(error: unknown, args: readonly string[]): GitFailure {
   const err = error as { stderr?: unknown; code?: unknown };
   const stderr = typeof err.stderr === "string" ? err.stderr : String(err.stderr ?? "");

@@ -441,6 +441,27 @@ describe("katra install-hooks", () => {
     expect(local.stdout).toMatch(/not committed, not shared/);
   });
 
+  it("does not claim 'shared with your team' when the target is gitignored", async () => {
+    const r = repo();
+    await runCli(["init"], { cwd: r.dir });
+    // A repo that ignores .claude/ entirely — the shared settings.json is then
+    // local-only, so the report must not promise sharing git won't allow.
+    writeFileSync(join(r.dir, ".gitignore"), ".claude/\n");
+
+    const result = await runCli(["install-hooks", "claude"], { cwd: r.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    // Still written — the hooks fire locally regardless; only the claim changes.
+    expect(existsSync(CLAUDE_SETTINGS(r.dir))).toBe(true);
+    expect(result.stdout).not.toMatch(/shared with your team/);
+    expect(result.stdout).toMatch(/gitignored/);
+
+    // --json carries the real visibility for a programmatic consumer.
+    const json = await runCli(["install-hooks", "claude", "--json"], { cwd: r.dir });
+    const doc = JSON.parse(json.stdout) as { ignored: boolean };
+    expect(doc.ignored).toBe(true);
+  });
+
   it.runIf(onPosix)("refuses a symlinked .claude directory", async () => {
     const r = repo();
     await runCli(["init"], { cwd: r.dir });
