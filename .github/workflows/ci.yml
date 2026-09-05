@@ -18,7 +18,7 @@ jobs:
     name: Lint & typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v4
 
@@ -41,7 +41,7 @@ jobs:
         # better-sqlite3 13 requires node >=22; commander 15 requires >=22.12.
         node: [22, 24]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: pnpm/action-setup@v4
 
