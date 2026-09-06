@@ -40,12 +40,23 @@ jobs:
       # Opens/updates a "Version Packages" PR when changesets are pending,
       # and publishes to npm when that PR is merged. Publishing authenticates
       # via OIDC (id-token: write above + the trusted publisher configured on
-      # npmjs.com for this repo and workflow) — no NPM_TOKEN secret.
-      - uses: changesets/action@v1
+      # npmjs.com for this repo and workflow) — no NPM_TOKEN secret, so v2's
+      # removal of NPM_TOKEN/.npmrc handling does not affect us.
+      #
+      # v2 pushes the version-PR commit and the release tags via the GitHub API
+      # (push-with-git-cli defaults to false). That is deliberate here: v1 pushed
+      # tags with the Git CLI using actions/checkout's persisted credentials, and
+      # when actions/checkout@v7 changed that credential handling the v0.6.0 tag
+      # and GitHub release were silently never pushed (the publish still
+      # succeeded). The API path needs the token as an explicit `github-token`
+      # input — the GITHUB_TOKEN env var no longer configures the action.
+      - uses: changesets/action@v2
         with:
-          version: pnpm changeset version
-          publish: pnpm release
-          commit: "chore: version packages"
-          title: "chore: version packages"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          version-script: pnpm changeset version
+          publish-script: pnpm release
+          commit-message: "chore: version packages"
+          pr-title: "chore: version packages"
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          # Explicit so the git tag + GitHub release always accompany a publish
+          # (push-git-tags follows this) — the behavior v1 lost on v0.6.0.
+          create-github-releases: true
