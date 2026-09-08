@@ -113,6 +113,12 @@ const SANITIZER_CALL = /\boneLine\(|\bsanitizeBody\(/;
  *   guard by design if a title were ever routed through it instead of
  *   `oneLine` directly — a loud false positive, not a silent miss. No
  *   command formatter currently wraps a title through an alias.
+ * - A mixed-branch conditional (`${cond ? oneLine(a.title) : b.title}`)
+ *   satisfies the check via its wrapped branch while leaving the other
+ *   branch raw — the same substring-keying limit as the destructuring case.
+ *   Tightening to per-occurrence proximity would false-positive on the
+ *   legitimate `clamp(oneLine(x.title), W)` nesting and is genuinely AST
+ *   territory. No command formatter does this today.
  */
 function findUnwrappedSensitiveInterpolations(strippedSource: string, label: string): string[] {
   const violations: string[] = [];
