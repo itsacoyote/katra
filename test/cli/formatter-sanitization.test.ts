@@ -9,6 +9,16 @@
  * and the offending interpolation, if any `${…}` interpolation referencing
  * `.title` or `.closeReason` lacks a `oneLine(` / `sanitizeBody(` wrap.
  *
+ * FIELD SCOPE: the check keys on `.title` and `.closeReason` — the two fields
+ * this sweep fixed — not the whole stored-free-text class. Other
+ * attacker-reachable stored fields a command formatter might render (`.actor`,
+ * `.reason`, `.holder`, `.body`, `.description`, `.provider`, `.externalId`,
+ * `.rawTitle`) are all wrapped correctly today, but this guard does not check
+ * them: they still rely on the manual "every stored string goes through a
+ * sanitizer" discipline (AGENTS.md). Widening `SENSITIVE_FIELD` to the full
+ * set is tracked as a follow-up; until then, do not read this guard as
+ * covering more than the two fields it names.
+ *
  * SCOPE: this guard covers `src/cli/commands/*.ts` ONLY. `src/cli/format.ts`
  * (formatBoard/formatBrief/formatTaskList/…) is the sanitized *reference* and
  * is deliberately out of this guard's reach — it routes titles through a
