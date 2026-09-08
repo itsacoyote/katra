@@ -39,6 +39,63 @@ describe("katra close", () => {
     expect(result.exitCode).toBe(3);
     expect(result.stderr).toMatch(/already Done/);
   });
+
+  it("close flattens a hostile close-reason and unblocked-task title — no ANSI/bidi/zero-width, and forges no row", async () => {
+    // Built by codepoint, per next.test.ts's convention — an invisible
+    // literal in test source is unreviewable. Each hostile payload pairs a
+    // visible marker with the hostile codepoints so the readable remnant
+    // can be asserted; a pure-invisible payload would trim to "" instead.
+    const ESC = String.fromCharCode(0x1b);
+    const RLO = String.fromCharCode(0x202e);
+    const ZWSP = String.fromCharCode(0x200b);
+
+    // The close-reason (result.task.closeReason, lifecycle.ts:18) carries an
+    // embedded newline plus a fake row indistinguishable from a real
+    // "unblocked" row, if unsanitized.
+    const hostileReason = `shipped${ESC}[31m${RLO}HACKED${ZWSP}\n    kt-fake0000  a forged unblocked row`;
+    // The unblocked dependent's title (task.title, lifecycle.ts:24) carries
+    // its own forged row.
+    const hostileDependentTitle = `was waiting${ESC}[31m${RLO}HACKED2${ZWSP}\n    kt-fake1111  another forged row`;
+
+    const blocker = await add("the blocker");
+    const dependent = await add(hostileDependentTitle);
+    await runCli(["dep", dependent, "--blocked-by", blocker], { cwd: repo.dir });
+
+    const result = await runCli(["close", blocker, "--reason", hostileReason], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).not.toContain(ESC);
+    expect(result.stdout).not.toContain(RLO);
+    expect(result.stdout).not.toContain(ZWSP);
+    // The readable remnant survives — sanitizing flattens the field, it does
+    // not blank it.
+    expect(result.stdout).toContain("shipped");
+    expect(result.stdout).toContain("HACKED");
+    expect(result.stdout).toContain("was waiting");
+    expect(result.stdout).toContain("HACKED2");
+
+    // Exactly one real "unblocked" row — the dependent's — never the extra
+    // rows either hostile field's embedded newline would otherwise forge.
+    const rowLines = result.stdout.split("\n").filter((line) => line.startsWith("    "));
+    expect(rowLines).toHaveLength(1);
+    expect(rowLines[0]).toContain(dependent);
+    expect(rowLines[0]).not.toContain("kt-fake0000");
+  });
+
+  it("close --json carries the hostile close-reason verbatim", async () => {
+    const ESC = String.fromCharCode(0x1b);
+    const RLO = String.fromCharCode(0x202e);
+    const ZWSP = String.fromCharCode(0x200b);
+    const hostileReason = `shipped${ESC}[31m${RLO}HACKED${ZWSP}\nfake line`;
+    const id = await add("a task");
+
+    const result = await runCli(["close", id, "--reason", hostileReason, "--json"], {
+      cwd: repo.dir,
+    });
+
+    const payload = result.json() as LifecycleResult;
+    expect(payload.task.closeReason).toBe(hostileReason);
+  });
 });
 
 describe("katra cancel", () => {
@@ -157,12 +214,20 @@ describe("registration and json", () => {
 });
 
 describe("katra reopen reports what it took away", () => {
-  it("renders the tasks it blocked again", async () => {
+  it("reopen flattens a hostile reblocked-task title — no ANSI/bidi/zero-width, and forges no 'blocked again' row", async () => {
     // The core returns `reblocked`; nothing rendered it. Deleting the whole
-    // block from formatLifecycle left the suite green, so the one command
-    // that can produce it was printing nothing.
+    // block from formatLifecycle once left the suite green, so the one
+    // command that can produce it was printing nothing — and, until this
+    // bead, unsanitized once it was rendered. `reopen` is the only command
+    // that reaches this branch (close/cancel never reblock anything), so it
+    // is the sole behavioral proof for lifecycle.ts:30.
+    const ESC = String.fromCharCode(0x1b);
+    const RLO = String.fromCharCode(0x202e);
+    const ZWSP = String.fromCharCode(0x200b);
+    const hostileWaiterTitle = `was startable${ESC}[31m${RLO}HACKED${ZWSP}\n    kt-fake0000  a forged blocked-again row`;
+
     const blocker = await add("the blocker");
-    const waiter = await add("was startable");
+    const waiter = await add(hostileWaiterTitle);
     await runCli(["dep", waiter, "--blocked-by", blocker], { cwd: repo.dir });
     await runCli(["close", blocker], { cwd: repo.dir });
 
@@ -170,7 +235,19 @@ describe("katra reopen reports what it took away", () => {
 
     expect(result.exitCode).toBe(EXIT.ok);
     expect(result.stdout).toContain("blocked again 1:");
+    expect(result.stdout).not.toContain(ESC);
+    expect(result.stdout).not.toContain(RLO);
+    expect(result.stdout).not.toContain(ZWSP);
+    // The readable remnant survives — sanitizing flattens the field, it does
+    // not blank it.
     expect(result.stdout).toContain("was startable");
+    expect(result.stdout).toContain("HACKED");
+
+    // Exactly one real "blocked again" row — the waiter's — never a second
+    // one forged out of the hostile title's embedded newline.
+    const rowLines = result.stdout.split("\n").filter((line) => line.startsWith("    "));
+    expect(rowLines).toHaveLength(1);
+    expect(rowLines[0]).toContain(waiter);
   });
 
   it("says nothing about re-blocking when close and cancel run", async () => {
