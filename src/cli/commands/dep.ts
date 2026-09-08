@@ -5,6 +5,7 @@
 import type { Command } from "commander";
 import type { DependencyResult } from "../../core/contract.js";
 import { addDependency, isReady, listBlockers, removeDependency } from "../../core/graph/deps.js";
+import { oneLine } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
@@ -22,7 +23,9 @@ function formatDep(result: DependencyResult): string {
   return [
     headline,
     `  blocked by ${result.blockers.length}:`,
-    ...result.blockers.map((blocker) => `    ${blocker.id}  ${blocker.lane}  ${blocker.title}`),
+    ...result.blockers.map(
+      (blocker) => `    ${blocker.id}  ${blocker.lane}  ${oneLine(blocker.title)}`,
+    ),
   ].join("\n");
 }
 

@@ -144,4 +144,52 @@ describe("katra dep", () => {
     const names = createProgram({ cwd: repo.dir }).commands.map((command) => command.name());
     expect(names).toContain("dep");
   });
+
+  it("dep flattens a hostile blocker title — no ANSI/bidi/zero-width in output, and forges no blocked-by row", async () => {
+    // Built by codepoint, per next.test.ts's convention — an invisible
+    // literal in test source is unreviewable. The payload pairs a visible
+    // marker with the hostile codepoints so the readable remnant can be
+    // asserted; a pure-invisible payload would trim to "" instead.
+    const ESC = String.fromCharCode(0x1b);
+    const RLO = String.fromCharCode(0x202e);
+    const ZWSP = String.fromCharCode(0x200b);
+    const hostileTitle = `the real blocker${ESC}[31m${RLO}HACKED${ZWSP}\n    kt-fake0000  Planned  a forged blocker row`;
+
+    const blocker = await add(hostileTitle);
+    const blocked = await add("waiting");
+
+    const result = await runCli(["dep", blocked, "--blocked-by", blocker], { cwd: repo.dir });
+
+    expect(result.exitCode).toBe(EXIT.ok);
+    expect(result.stdout).not.toContain(ESC);
+    expect(result.stdout).not.toContain(RLO);
+    expect(result.stdout).not.toContain(ZWSP);
+    // The readable remnant survives — sanitizing flattens the field, it does
+    // not blank it.
+    expect(result.stdout).toContain("the real blocker");
+    expect(result.stdout).toContain("HACKED");
+
+    // Exactly one real "blocked by" row — the genuine blocker's — never a
+    // second one forged out of the hostile title's embedded newline.
+    const rowLines = result.stdout.split("\n").filter((line) => line.startsWith("    "));
+    expect(rowLines).toHaveLength(1);
+    expect(rowLines[0]).toContain(blocker);
+  });
+
+  it("dep --json carries the hostile blocker title verbatim", async () => {
+    const ESC = String.fromCharCode(0x1b);
+    const RLO = String.fromCharCode(0x202e);
+    const ZWSP = String.fromCharCode(0x200b);
+    const hostileTitle = `the real blocker${ESC}[31m${RLO}HACKED${ZWSP}\nfake line`;
+
+    const blocker = await add(hostileTitle);
+    const blocked = await add("waiting");
+
+    const result = await runCli(["dep", blocked, "--blocked-by", blocker, "--json"], {
+      cwd: repo.dir,
+    });
+
+    const payload = result.json() as DependencyResult;
+    expect(payload.blockers[0]?.title).toBe(hostileTitle);
+  });
 });

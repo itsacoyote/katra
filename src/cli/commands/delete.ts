@@ -6,15 +6,16 @@ import type { Command } from "commander";
 import { KatraException } from "../../core/errors.js";
 import type { DeleteResult } from "../../core/tasks/delete.js";
 import { deleteTask } from "../../core/tasks/delete.js";
+import { oneLine } from "../format.js";
 import { emit } from "../output.js";
 import type { CliContext } from "../program.js";
 import { withStore } from "../with-store.js";
 
 function formatDelete(result: DeleteResult): string {
-  const lines = [`deleted ${result.id}  ${result.title}`];
+  const lines = [`deleted ${result.id}  ${oneLine(result.title)}`];
   if (result.unblocked.length > 0) {
     lines.push(`  unblocked ${result.unblocked.length}:`);
-    for (const task of result.unblocked) lines.push(`    ${task.id}  ${task.title}`);
+    for (const task of result.unblocked) lines.push(`    ${task.id}  ${oneLine(task.title)}`);
   }
   return lines.join("\n");
 }
